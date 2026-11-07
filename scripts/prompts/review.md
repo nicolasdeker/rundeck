@@ -9,4 +9,4 @@ Your job this session, in order:
 4. Re-plan: make sure PLAN.md items are 1–3 hours each, ordered by dependency and value, and that exactly one item is ← CURRENT.
 5. Wrap up as usual (JOURNAL.md entry titled "Weekly review", commit, push, release the lock).
 
-Final message (posted to the owner's tracking issue): one paragraph of status per phase, the three biggest risks, and any decision the owner should make (link the decision issues). Keep it under 30 lines.
+Final message (posted to the owner's tracking issue): first line = the output of `bash scripts/progress.sh` (run `bash scripts/progress.sh --update-readme` before the last commit; the line also heads the JOURNAL.md entry), then one paragraph of status per phase with the parity percentage trend over the week, the three biggest risks, and any decision the owner should make (link the decision issues). Keep it under 30 lines.

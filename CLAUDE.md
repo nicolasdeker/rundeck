@@ -43,7 +43,8 @@ mission brief is `MISSION.md`. **Read it at the start of every session, then `PL
 10. **GitHub through REST only.** `gh api repos/nicolasdeker/rundeck/...`; `gh issue`/`gh pr` (GraphQL) are rejected here.
 11. **No `unsafe`.** Workspace-wide `#![forbid(unsafe_code)]`.
 12. **Every session ends within the guard's time budget with**: tests green, commit pushed to `main`, `JOURNAL.md` entry
-    (done / evidence / next / risks), `PLAN.md` updated, lock released.
+    (done / evidence / next / risks, headed by the `scripts/progress.sh` line), `PLAN.md` updated, `README.md` status line
+    refreshed (`scripts/progress.sh --update-readme`), lock released; the final message starts with the progress line.
 
 ## Commands
 

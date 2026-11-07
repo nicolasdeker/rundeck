@@ -437,7 +437,9 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
   benches, Lighthouse; `ci.yml` is the fast gate (fmt, clippy, tests, deny, audit, ui lint/test). Pushes from cloud
   sessions trigger these workflows normally.
 - **Owner interface**: GitHub app (commits, Actions, issues) and Claude app (task run history, ad-hoc sessions).
-  Nothing requires a terminal.
+  Nothing requires a terminal. **Progress in percent**: `scripts/progress.sh` computes it from `PARITY.md` (rows `done`
+  or `deviated` over all rows) and `PLAN.md` (items of the current phase, phases closed); every run prints that line
+  first in its final message and its `JOURNAL.md` entry and refreshes the status line of `README.md`.
 
 **State lives in files, not in your context.** A fresh session must resume in under five minutes.
 - `PLAN.md`: phases as checklists; exactly one item marked `← CURRENT`. Granularity: 1–3 hours of work.
