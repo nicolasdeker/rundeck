@@ -28,7 +28,8 @@ weeknights 01:37, 04:37, 07:37 (cap 2 → two of them), weekends 01:37 and 19:37
    - Name `rdx` · Network access **Trusted**.
    - Variables: `BASH_DEFAULT_TIMEOUT_MS=600000`, `BASH_MAX_TIMEOUT_MS=1800000`, `CARGO_TERM_COLOR=never`.
      Optional tuning: `RDX_MAX_RUNS_PER_DAY=2`, `RDX_RUN_MAX_MINUTES=75`.
-   - Setup script: `bash scripts/cloud-setup.sh` (snapshot taken on first use; re-save the environment when a run reports
+   - Setup script: `if [ -d rundeck ]; then bash rundeck/scripts/cloud-setup.sh; fi` — the environment runs it from the
+     parent of the checkout, not from the repository root (snapshot taken on first use; re-save the environment when a run reports
      that the script changed).
 3. **Usage settings** — https://claude.ai/settings/usage : note the weekly reset day. Leave *usage credits / extra usage*
    **off** unless you want the plan to keep going on paid credits once the weekly limit is reached (that would protect

@@ -413,7 +413,7 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
 
 **Where things run**
 - **Work sessions — Mode A (default): the cloud scheduled task `rdx-autopilot`** (cron `CRON_TZ=Europe/Zurich 37 1,4,7,10,13,16,19 * * *`,
-  repository `nicolasdeker/rundeck`, environment `rdx` whose setup script is `bash scripts/cloud-setup.sh` and whose
+  repository `nicolasdeker/rundeck`, environment `rdx` whose setup script is `if [ -d rundeck ]; then bash rundeck/scripts/cloud-setup.sh; fi` (it runs from the parent of the checkout) and whose
   variables include `BASH_DEFAULT_TIMEOUT_MS=600000`, `BASH_MAX_TIMEOUT_MS=1800000`, automatic approval, Sonnet-class
   model, effort high). Each firing is a fresh VM with the repo cloned at `main`; the first thing it does is
   `bash scripts/family-window.sh`, which blocks the run inside the family's homework windows, inside the 5-hour buffer
