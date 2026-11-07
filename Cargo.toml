@@ -1,0 +1,47 @@
+# rdx workspace — Rundeck rebuilt in Rust (see MISSION.md §3.1 for the crate map).
+#
+# Dependency policy (MISSION §7, §8): every dependency added to a crate carries a one-line justification
+# next to it; `cargo deny` (deny.toml) and `cargo audit` must stay clean. Phase 0 has no dependencies.
+
+[workspace]
+resolver = "3"
+members = ["crates/*", "quartz-cron"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/nicolasdeker/rundeck"
+rust-version = "1.97"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+# The pedantic group is on; the allow-list below lists each pedantic lint we switch off and why.
+pedantic = { level = "warn", priority = -1 }
+# Legacy type names are kept verbatim (`job::JobExecution`, `node::NodeFilter`); renaming would hurt the parity map.
+module_name_repetitions = "allow"
+# Too noisy on builder/accessor-heavy domain code; `#[must_use]` is added by hand where ignoring a value is a bug.
+must_use_candidate = "allow"
+# Legacy domain objects carry many boolean flags (`nodeKeepgoing`, `multipleExecutions`, ...) that are mirrored 1:1.
+struct_excessive_bools = "allow"
+# Hard gates (MISSION §8): never panic on `Option`/`Result`, never ship debug output, never leave a `todo!()`.
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+# MISSION §4: no function > 80 lines (threshold in clippy.toml).
+too_many_lines = "deny"
+# Unimplemented endpoints must return 501 envelopes (MISSION §8), never panic; kept at warn to catch leftovers.
+unimplemented = "warn"
+
+# MISSION §7 resource discipline: optimize dependencies a little in dev so tests run fast without full release builds.
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,14 @@
+[package]
+name = "rdx-ui-api"
+description = "UI-only API (`/ui-api/v1`): SSE streams, aggregated views, session/CSRF — not a compatibility contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

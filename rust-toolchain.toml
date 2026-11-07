@@ -1,0 +1,5 @@
+# Pinned toolchain for the rdx workspace (CLAUDE.md Conventions). `llvm-tools-preview` is for `cargo llvm-cov`.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt", "llvm-tools-preview"]
+profile = "minimal"

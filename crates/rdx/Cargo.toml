@@ -1,0 +1,19 @@
+[package]
+name = "rdx"
+description = "binary: CLI (`serve`, `migrate`, `check-config`, `export`, `import`, `keys`, `acl check`, `doctor`)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "rdx"
+path = "src/main.rs"
+
+[dependencies]
+# Phase 0: none. The CLI parser (clap) arrives with the Phase 1 ADR that wires the first subcommand.
+
+[lints]
+workspace = true

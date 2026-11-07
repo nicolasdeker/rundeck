@@ -1,0 +1,5 @@
+# MISSION §4: no function > 80 lines (enforced through `clippy::too_many_lines = deny` in Cargo.toml).
+too-many-lines-threshold = 80
+# `unwrap()`/`expect()` are forbidden outside tests (MISSION §8); tests may use them.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

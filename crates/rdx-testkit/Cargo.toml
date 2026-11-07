@@ -1,0 +1,14 @@
+[package]
+name = "rdx-testkit"
+description = "shared test harness: temp projects, in-memory DB, fake nodes, golden files, oracle client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
