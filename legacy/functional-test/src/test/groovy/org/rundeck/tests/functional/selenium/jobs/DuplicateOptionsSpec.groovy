@@ -1,0 +1,104 @@
+package org.rundeck.tests.functional.selenium.jobs
+
+import org.openqa.selenium.By
+import org.openqa.selenium.WebElement
+import org.rundeck.util.annotations.SeleniumCoreTest
+import org.rundeck.util.annotations.UiModeFlag
+import org.rundeck.util.annotations.UiModeStatus
+import org.rundeck.util.container.SeleniumBase
+import org.rundeck.util.gui.pages.jobs.JobCreatePage
+import org.rundeck.util.gui.pages.jobs.JobOption
+import org.rundeck.util.gui.pages.jobs.JobShowPage
+import org.rundeck.util.gui.pages.login.LoginPage
+
+import java.text.SimpleDateFormat
+
+@SeleniumCoreTest
+@UiModeFlag(
+    featureName = "duplicate-options",
+    status      = UiModeStatus.LEGACY,
+    description = "Pinned to legacyUi=true; only the legacy code path is exercised here. Migration deferred."
+)
+class DuplicateOptionsSpec extends SeleniumBase {
+
+    final static String PROJECT_NAME = 'DuplicateOptionsSpec'
+
+    def setupSpec(){
+        setupProject(PROJECT_NAME)
+    }
+
+    def setup(){
+        go(LoginPage).login(TEST_USER, TEST_PASS)
+    }
+
+    def "duplicate option and check both are present in job show page as inputs with the corresponding option type"(){
+        given:
+        JobCreatePage jobCreatePage = go(JobCreatePage, PROJECT_NAME, [legacyUi: true])
+        jobCreatePage.withName('job-duplicate-default-option')
+                .addOption(new JobOption(name: optionName, optNumber: 0, optionType: optionType))
+                .addSimpleCommandStep('echo hello ', 0)
+
+        when:
+        JobShowPage jobShowPage = jobCreatePage.duplicateOption(optionName, 1).saveJob()
+
+        then:
+        jobShowPage.getOptionsFields().collect { [it.getAttribute('name'), it.getAttribute('type')] } == [
+                [String.valueOf("extra.option.${optionName}"), optionType.toLowerCase()],
+                [String.valueOf("extra.option.${optionName}_1"), optionType.toLowerCase()]
+        ]
+
+        where:
+        optionName | optionType
+        'textOpt'  | 'Text'
+        'fileOpt'  | 'File'
+    }
+
+    def "duplicate date option and check both are present in job show page"(){
+        given:
+        String optionName = 'textOpt'
+        JobCreatePage jobCreatePage = go(JobCreatePage, PROJECT_NAME, [legacyUi: true])
+        jobCreatePage.withName('job-duplicate-default-option')
+                .addOption(new JobOption(name: optionName, optNumber: 0, inputType: 'date'))
+                .addSimpleCommandStep('echo hello ', 0)
+
+        when: 'duplicate the date option and save the job with date format and a button to select date from a calendar widget'
+        JobShowPage jobShowPage = jobCreatePage.duplicateOption(optionName, 1).saveJob()
+
+        then: 'check both are present in job show page'
+        List<WebElement> optionInputs = jobShowPage.getOptionsFields()
+        optionInputs.collect { [it.getAttribute('name'), it.getAttribute('value')] } == [
+                [String.valueOf("extra.option.${optionName}"), ''],
+                [String.valueOf("extra.option.${optionName}_1"), '']
+        ]
+
+        when:
+        List<String> optionsValues = []
+        optionInputs.each {optionsValues << clickCalendarButtonTwice(jobShowPage, it) }
+
+        then:
+        // When dateFormat is empty, the UI uses Moment.js format 'MM/DD/YYYY hh:mm a' (matches placeholder).
+        // The actual value is parsed using the equivalent Java SimpleDateFormat pattern 'MM/dd/yyyy hh:mm a'.
+        SimpleDateFormat expectedDateFormat = new SimpleDateFormat("MM/dd/yyyy hh:mm a")
+
+        optionsValues.size() == 2
+        expectedDateFormat.parse(optionsValues[0])
+        expectedDateFormat.parse(optionsValues[1])
+    }
+
+    /**
+     * This will click the calendar button one time to show calendar widget and fill option value
+     * and a second time to close the widget
+     * @param jobShowPage
+     * @param optionInputField
+     * @return the inserted date
+     */
+    String clickCalendarButtonTwice(JobShowPage jobShowPage, WebElement optionInputField){
+        WebElement calendarButton = jobShowPage.getCalendarButtonForOption(optionInputField)
+        calendarButton.click()
+
+        jobShowPage.waitForElementVisible(jobShowPage.datetimepickerWidgetBy)
+        calendarButton.click()
+
+        return optionInputField.getAttribute("value")
+    }
+}

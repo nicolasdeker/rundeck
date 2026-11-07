@@ -1,0 +1,50 @@
+@import "../runstrap/variables";
+
+.label {
+  &.label-default {
+    color: var(--default-color);
+    background-color: var(--font-color);
+  }
+  &.label-white {
+    background-color: var(--white-color);
+    color: var(--black-color);
+  }
+
+  &.label-muted {
+    color: var(--text-muted-color);
+    background-color: var(--background-color-accent);
+    &.active {
+      background-color: var(--text-muted-color);
+    }
+  }
+
+  &.label-secondary {
+    background-color: var(--background-color-accent);
+    &.active {
+      background-color: var(--medium-gray);
+    }
+  }
+}
+
+a:hover.label {
+  &.label-muted {
+    background-color: var(--light-gray);
+  }
+
+  &.label-secondary {
+    background-color: var(--medium-gray);
+  }
+}
+
+a.label,
+a.label:focus,
+a.label:hover {
+  color: inherit;
+}
+
+// RUN-4966: --font-color flips to white in dark mode; as a background it
+// renders a white pill. Swap to the .btn-default pairing in dark only.
+*[data-color-theme="dark"] .label.label-default {
+  color: var(--font-color);
+  background-color: var(--default-color);
+}

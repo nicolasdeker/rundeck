@@ -1,0 +1,23 @@
+#
+# This file defines users passwords and roles for a HashUserRealm
+#
+# The format is
+#  <username>: <password>[,<rolename> ...]
+#
+# Passwords may be clear text, obfuscated or checksummed.  The class 
+# org.mortbay.util.Password should be used to generate obfuscated
+# passwords or password checksums
+#
+# This sets the temporary user accounts for the Rundeck app
+#
+${default.admin.name}:${default.admin.password},user,admin
+${default.user.name}:${default.user.password},user
+
+#
+# example users matching the example aclpolicy template roles
+#
+#project-admin:${default.admin.password},user,project_admin
+#job-runner:${default.admin.password},user,job_runner
+#job-writer:${default.admin.password},user,job_writer
+#job-reader:${default.admin.password},user,job_reader
+#job-viewer:${default.admin.password},user,job_viewer

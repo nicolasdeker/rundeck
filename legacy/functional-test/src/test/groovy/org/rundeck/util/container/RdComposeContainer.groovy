@@ -1,0 +1,106 @@
+package org.rundeck.util.container
+
+import groovy.transform.CompileStatic
+import groovy.util.logging.Slf4j
+import org.testcontainers.containers.ComposeContainer
+import org.testcontainers.containers.ContainerState
+import org.testcontainers.containers.output.Slf4jLogConsumer
+import org.testcontainers.containers.wait.strategy.Wait
+
+import java.time.Duration
+
+@CompileStatic
+@Slf4j
+class RdComposeContainer extends ComposeContainer implements ClientProvider {
+
+    public static final String DEFAULT_SERVICE_TO_EXPOSE = System.getenv("TEST_RUNDECK_CONTAINER_SERVICE") ?: 'rundeck'
+    private static final Integer DEFAULT_PORT = System.getenv("TEST_RUNDECK_CONTAINER_PORT")?.toInteger() ?: 4440
+    private static final String CONTEXT_PATH = System.getenv("TEST_RUNDECK_CONTAINER_CONTEXT") ?: ''
+    //matches tokens.properties in src/main/resources
+    public static final String STATIC_TOKEN = System.getenv("TEST_RUNDECK_CONTAINER_TOKEN") ?: 'admintoken'
+    public static final String RUNDECK_IMAGE = System.getenv("TEST_IMAGE") ?: System.getProperty("TEST_IMAGE")
+    public static final String LICENSE_LOCATION = System.getenv("LICENSE_LOCATION")
+    public static final String TEST_RUNDECK_GRAILS_URL = System.getenv("TEST_RUNDECK_GRAILS_URL") ?: "http://localhost:4440"
+    public static final String TEST_TARGET_PLATFORM = System.getenv("TEST_TARGET_PLATFORM") ?: "linux/amd64"
+    public static final boolean USE_LOCAL_DOCKER_COMPOSE = (System.getenv("USE_LOCAL_DOCKER_COMPOSE") ?: "true").toBoolean()
+
+    private final Map<String, Integer> clientConfig
+    private final String rundeckUrl
+
+    /**
+     * Constructor with feature name and clientConfig (backward compatibility)
+     * @param composeFilePath
+     * @param featureName an optional feature name to enable
+     * @param clientConfig optional client configuration
+     */
+    RdComposeContainer(URI composeFilePath, String featureName, Map<String, Integer> clientConfig = Collections.emptyMap()) {
+        this(composeFilePath, featureName, null, clientConfig)
+    }
+
+    /**
+     * Constructor with all parameters
+     * @param composeFilePath
+     * @param featureName an optional feature name to enable
+     * @param customRundeckUrl optional custom Rundeck URL to override TEST_RUNDECK_GRAILS_URL
+     * @param clientConfig optional client configuration
+     */
+    RdComposeContainer(URI composeFilePath, String featureName, String customRundeckUrl, Map<String, Integer> clientConfig) {
+        super(new File(composeFilePath))
+        this.clientConfig = clientConfig
+        this.rundeckUrl = customRundeckUrl ?: TEST_RUNDECK_GRAILS_URL
+        if (CONTEXT_PATH && !CONTEXT_PATH.startsWith('/')) {
+            throw new IllegalArgumentException("Context path must start with /")
+        }
+        withLocalCompose(USE_LOCAL_DOCKER_COMPOSE)
+        withExposedService(DEFAULT_SERVICE_TO_EXPOSE, DEFAULT_PORT, Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(600)))
+        withEnv("TEST_IMAGE", RUNDECK_IMAGE)
+        // Forward the prebuilt test images set by CI (TEST_<name>_IMAGE, e.g. TEST_OSS_TOOLS_IMAGE) so they
+        // also reach containerized compose; when unset, the compose files fall back to building them.
+        for (Map.Entry<String, String> entry : System.getenv().entrySet()) {
+            if (entry.key ==~ /TEST_\w+_IMAGE/) {
+                withEnv(entry.key, entry.value)
+            }
+        }
+        withEnv("LICENSE_LOCATION", LICENSE_LOCATION)
+        withEnv("TEST_RUNDECK_GRAILS_URL", rundeckUrl)
+        withEnv("TEST_TARGET_PLATFORM", TEST_TARGET_PLATFORM)
+        withEnv("TEST_RUNDECK_FEATURE_NAME", featureName ?: 'placeholderFeatureName')
+        withLogConsumer(DEFAULT_SERVICE_TO_EXPOSE, new Slf4jLogConsumer(log))
+        waitingFor(DEFAULT_SERVICE_TO_EXPOSE,
+            Wait.forLogMessage(".*Grails application running at.*", 1)
+                .withStartupTimeout(Duration.ofMinutes(10))
+        )
+
+    }
+
+    String getRundeckContainerId(){
+        Optional<ContainerState> containerState = getContainerByServiceName("rundeck")
+        return containerState.isPresent() ? containerState.get().containerId : null
+    }
+
+
+    RdClient getClient() {
+        clientWithToken(STATIC_TOKEN)
+    }
+
+    RdClient clientWithToken(String token) {
+        RdClient.create(getEffectiveRundeckUrl(), token, clientConfig)
+    }
+
+    /** Returns the mapped host URL if the container is running (dynamic port), otherwise the configured URL. */
+    private String getEffectiveRundeckUrl() {
+        try {
+            int mappedPort = getServicePort(DEFAULT_SERVICE_TO_EXPOSE, DEFAULT_PORT)
+            // Preserve context-path from the configured URL (e.g. /rundeck for context-path tests)
+            String contextPath = new URI(rundeckUrl).path ?: ''
+            return "http://localhost:${mappedPort}${contextPath}"
+        } catch (Exception ignored) {
+            return rundeckUrl
+        }
+    }
+
+    @Override
+    void close() {
+        super.close()
+    }
+}

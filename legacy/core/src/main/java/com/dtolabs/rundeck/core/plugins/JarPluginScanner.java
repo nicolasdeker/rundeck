@@ -1,0 +1,140 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*
+ * JarPluginDirScanner.java
+ * 
+ * User: Greg Schueler <a href="mailto:greg@dtosolutions.com">greg@dtosolutions.com</a>
+ * Created: 4/12/11 6:19 PM
+ * 
+ */
+package com.dtolabs.rundeck.core.plugins;
+
+import com.dtolabs.rundeck.core.Constants;
+import com.dtolabs.rundeck.core.utils.FileUtils;
+import com.dtolabs.rundeck.core.utils.cache.FileCache;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.util.jar.Attributes;
+import java.util.jar.JarFile;
+import java.util.jar.Manifest;
+
+/**
+ * JarPluginScanner scans for java Jar plugins in the extensions dir.
+ * 
+ * @author Greg Schueler <a href="mailto:greg@dtosolutions.com">greg@dtosolutions.com</a>
+ */
+public class JarPluginScanner extends DirPluginScanner {
+    static              Logger     log             = LoggerFactory.getLogger(JarPluginScanner.class.getName());
+    public static final FileFilter FILENAME_FILTER = new FileFilter() {
+        public boolean accept(final File file) {
+            return file.isFile() && file.getName().endsWith(".jar");
+        }
+    };
+
+    public static final String JAR_SCRATCH_DIRECTORY = "pluginJars";
+
+    final File cachedir;
+    final File pluginJarCacheDirectory;
+
+    public JarPluginScanner(
+            final PluginDirProvider pluginDirProvider,
+            final File cachedir,
+            final FileCache<ProviderLoader> filecache
+    ) {
+        super(pluginDirProvider, filecache);
+        this.cachedir = cachedir;
+        this.pluginJarCacheDirectory = new File(Constants.getBaseTempDirectory() + Constants.FILE_SEP + JAR_SCRATCH_DIRECTORY);
+        
+        // Clean up old caches on startup.
+        log.info(String.format("Deleting plugin jar cache at %s", pluginJarCacheDirectory));
+        if (pluginJarCacheDirectory.exists() && !FileUtils.deleteDir(pluginJarCacheDirectory)) {
+            log.warn("Could not delete plugin jar cache");
+        }
+        log.info(String.format("Deleting plugin lib dependency directory at %s", this.cachedir));
+        if (this.cachedir.exists() && !FileUtils.deleteDir(this.cachedir)) {
+            log.warn("Could not delete plugin lib dependency directory");
+        }
+        
+        // Create the directories
+        this.cachedir.mkdirs();
+        this.pluginJarCacheDirectory.mkdirs();
+    }
+
+    public boolean isValidPluginFile(final File file) {
+        // Skip ZIP-as-JAR plugins - they don't have Rundeck-Plugin-Classnames
+        // ScriptPluginScanner handles these, not JarPluginScanner
+        try (JarFile jarFile = new JarFile(file)) {
+            Manifest manifest = jarFile.getManifest();
+            if (manifest == null || manifest.getMainAttributes() == null) {
+                // No manifest = likely a ZIP-as-JAR plugin (ZIP files don't require manifests)
+                // Skip it - ScriptPluginScanner will handle it
+                if (log.isDebugEnabled()) {
+                    log.debug(String.format(
+                        "Skipping ZIP-as-JAR plugin (no manifest): %s",
+                        file.getAbsolutePath()
+                    ));
+                }
+                return false;
+            }
+            String classnames = manifest.getMainAttributes().getValue(JarPluginProviderLoader.RUNDECK_PLUGIN_CLASSNAMES);
+            if (classnames == null || classnames.trim().isEmpty()) {
+                // Missing Rundeck-Plugin-Classnames = ZIP-as-JAR plugin, not compiled JAR
+                // Skip it - ScriptPluginScanner will handle it
+                if (log.isDebugEnabled()) {
+                    log.debug(String.format(
+                        "Skipping ZIP-as-JAR plugin (missing Rundeck-Plugin-Classnames): %s",
+                        file.getAbsolutePath()
+                    ));
+                }
+                return false;
+            }
+        } catch (IOException e) {
+            // If we can't read it as a JAR, it might be corrupted or not a valid JAR/ZIP
+            // Skip it - don't try to validate as JAR plugin
+            if (log.isDebugEnabled()) {
+                log.debug("Error reading JAR manifest for: " + file.getAbsolutePath() + ", skipping", e);
+            }
+            return false;
+        }
+        
+        // Has manifest with Rundeck-Plugin-Classnames - validate as compiled JAR plugin
+        return JarPluginProviderLoader.isValidJarPlugin(file);
+    }
+
+    public FileFilter getFileFilter() {
+        return FILENAME_FILTER;
+    }
+
+    public ProviderLoader createCacheItemForFile(final File file) {
+        return createLoader(file);
+    }
+
+    public ProviderLoader createLoader(final File file) {
+        if (log.isDebugEnabled()) {
+            log.debug("create JarFileProviderLoader: " + file);
+        }
+        return new JarPluginProviderLoader(file, pluginJarCacheDirectory, cachedir,
+                JarPluginProviderLoader.getLoadLocalLibsFirstForFile(file));
+    }
+
+    @Override
+    protected String getVersionForFile(final File file) {
+        return JarPluginProviderLoader.getVersionForFile(file);
+    }
+}

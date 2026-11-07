@@ -1,0 +1,14 @@
+[package]
+name = "rdx-api"
+description = "axum router: API v14–60, auth middleware, error envelope, OpenAPI (utoipa), XML/JSON/YAML negotiation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

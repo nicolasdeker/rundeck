@@ -1,0 +1,601 @@
+package rundeck.services
+
+import com.dtolabs.rundeck.core.VersionConstants
+import com.dtolabs.rundeck.core.common.IFramework
+import com.dtolabs.rundeck.core.config.Features
+import com.dtolabs.rundeck.core.encrypter.PasswordUtilityEncrypterPlugin
+import com.dtolabs.rundeck.core.execution.orchestrator.OrchestratorService
+import com.dtolabs.rundeck.core.execution.service.FileCopier
+import com.dtolabs.rundeck.core.execution.service.FileCopierService
+import com.dtolabs.rundeck.core.execution.service.NodeExecutor
+import com.dtolabs.rundeck.core.execution.service.NodeExecutorService
+import com.dtolabs.rundeck.core.execution.workflow.steps.StepExecutionService
+import com.dtolabs.rundeck.core.execution.workflow.steps.StepExecutor
+import com.dtolabs.rundeck.core.execution.workflow.steps.node.NodeStepExecutionService
+import com.dtolabs.rundeck.core.execution.workflow.steps.node.NodeStepExecutor
+import com.dtolabs.rundeck.core.plugins.PluginUtils
+import com.dtolabs.rundeck.core.plugins.configuration.Description
+import com.dtolabs.rundeck.core.plugins.configuration.Property
+import com.dtolabs.rundeck.core.plugins.configuration.PluginOutputMetadata
+import com.dtolabs.rundeck.core.plugins.configuration.PropertyScope
+import com.dtolabs.rundeck.core.plugins.configuration.StringRenderingConstants
+import com.dtolabs.rundeck.core.resources.ResourceModelSourceFactory
+import com.dtolabs.rundeck.core.resources.ResourceModelSourceService
+import com.dtolabs.rundeck.core.resources.format.ResourceFormatGenerator
+import com.dtolabs.rundeck.core.resources.format.ResourceFormatGeneratorService
+import com.dtolabs.rundeck.core.resources.format.ResourceFormatParser
+import com.dtolabs.rundeck.core.resources.format.ResourceFormatParserService
+import com.dtolabs.rundeck.plugins.ServiceNameConstants
+import com.dtolabs.rundeck.plugins.audit.AuditEventListenerPlugin
+import com.dtolabs.rundeck.plugins.config.PluginGroup
+import com.dtolabs.rundeck.plugins.file.FileUploadPlugin
+import com.dtolabs.rundeck.plugins.logging.LogFilterPlugin
+import com.dtolabs.rundeck.plugins.logs.ContentConverterPlugin
+import com.dtolabs.rundeck.plugins.nodes.NodeEnhancerPlugin
+import com.dtolabs.rundeck.plugins.option.OptionValuesPlugin
+import com.dtolabs.rundeck.plugins.orchestrator.OrchestratorPlugin
+import com.dtolabs.rundeck.plugins.rundeck.UIPlugin
+import com.dtolabs.rundeck.plugins.storage.StorageConverterPlugin
+import com.dtolabs.rundeck.plugins.storage.StoragePlugin
+import com.dtolabs.rundeck.plugins.tours.TourLoaderPlugin
+import com.dtolabs.rundeck.plugins.user.groups.UserGroupSourcePlugin
+import com.dtolabs.rundeck.plugins.webhook.WebhookEventPlugin
+import com.dtolabs.rundeck.server.plugins.services.StorageConverterPluginProviderService
+import com.dtolabs.rundeck.core.storage.service.StoragePluginProviderService
+import com.dtolabs.rundeck.server.plugins.services.UIPluginProviderService
+import grails.core.GrailsApplication
+import grails.web.mapping.LinkGenerator
+import org.grails.web.util.WebUtils
+import org.springframework.context.NoSuchMessageException
+import org.springframework.web.context.request.RequestContextHolder
+import rundeck.services.feature.FeatureService
+
+import jakarta.servlet.ServletContext
+
+class PluginApiService {
+
+    ServletContext servletContext
+    GrailsApplication grailsApplication
+    FrameworkService frameworkService
+    def messageSource
+    UiPluginService uiPluginService
+    UIPluginProviderService uiPluginProviderService
+    NotificationService notificationService
+    LoggingService loggingService
+    PluginService pluginService
+    ScmService scmService
+    LogFileStorageService logFileStorageService
+    StoragePluginProviderService storagePluginProviderService
+    StorageConverterPluginProviderService storageConverterPluginProviderService
+    FeatureService featureService
+    ExecutionLifecycleComponentService executionLifecycleComponentService
+    JobLifecycleComponentService jobLifecycleComponentService
+    def rundeckPluginRegistry
+    LinkGenerator grailsLinkGenerator
+
+    def listPluginsDetailed() {
+        //list plugins and config settings for project/framework props
+        IFramework framework = frameworkService.getRundeckFramework()
+        Locale locale = getLocale()
+
+        Map<String, List<Description>> pluginDescs = [:]
+
+        StepExecutionService ses = framework.getStepExecutionService()
+        pluginDescs[ses.name] = pluginService.listPlugins(StepExecutor, ses)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort {a,b -> a?.name <=> b?.name }
+
+        NodeExecutorService nes = framework.getNodeExecutorService()
+        pluginDescs[nes.name] = pluginService.listPlugins(NodeExecutor, nes)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a?.name <=> b?.name }
+
+        NodeStepExecutionService nses = framework.getNodeStepExecutorService()
+        pluginDescs[nses.name] = pluginService.listPlugins(NodeStepExecutor, nses)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        FileCopierService fcs = framework.getFileCopierService()
+        pluginDescs[fcs.name] = pluginService.listPlugins(FileCopier, fcs)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        ResourceModelSourceService rmss = framework.getResourceModelSourceService()
+        pluginDescs[rmss.name] = pluginService.listPlugins(ResourceModelSourceFactory, rmss)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        pluginDescs[ServiceNameConstants.NodeEnhancer]=pluginService.listPlugins(NodeEnhancerPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        ResourceFormatParserService rfps = framework.getResourceFormatParserService()
+        pluginDescs[rfps.name] = pluginService.listPlugins(ResourceFormatParser, rfps)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        ResourceFormatGeneratorService rfgs = framework.getResourceFormatGeneratorService()
+        pluginDescs[rfgs.name] = pluginService.listPlugins(ResourceFormatGenerator, rfgs)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        OrchestratorService os = framework.getOrchestratorService()
+        pluginDescs[os.name] = pluginService.listPlugins(OrchestratorPlugin, os)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        pluginDescs['OptionValues'] = pluginService.listPlugins(OptionValuesPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        pluginDescs['PasswordUtilityEncrypter'] = pluginService.listPlugins(PasswordUtilityEncrypterPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        //web-app level plugin descriptions
+        def jobLifecyclePlugins = jobLifecycleComponentService.listJobLifecyclePlugins()
+        pluginDescs[jobLifecycleComponentService.jobLifecyclePluginProviderService.name] = jobLifecyclePlugins ?
+                jobLifecyclePlugins
+                        .findAll { it.value.description != null }
+                        .collect { it.value.description }
+                        .sort { a, b -> a?.name <=> b?.name } : []
+
+        def executionLifecyclePlugins = executionLifecycleComponentService.listExecutionLifecyclePlugins()
+        pluginDescs[executionLifecycleComponentService.executionLifecyclePluginProviderService.name] = executionLifecyclePlugins ?
+                executionLifecyclePlugins
+                        .findAll { it.value.description != null }
+                        .collect { it.value.description }
+                        .sort { a, b -> a?.name <=> b?.name } : []
+        pluginDescs[notificationService.notificationPluginProviderService.name]=notificationService.listNotificationPlugins()
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[loggingService.streamingLogReaderPluginProviderService.name]=loggingService.listStreamingReaderPlugins()
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[loggingService.streamingLogWriterPluginProviderService.name]=loggingService.listStreamingWriterPlugins()
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[logFileStorageService.executionFileStoragePluginProviderService.name]= logFileStorageService.listLogFileStoragePlugins()
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[storagePluginProviderService.name]= pluginService.listPlugins(StoragePlugin.class, storagePluginProviderService)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[storageConverterPluginProviderService.name] = pluginService.listPlugins(StorageConverterPlugin.class, storageConverterPluginProviderService)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[scmService.scmExportPluginProviderService.name]=scmService.listPlugins('export')
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[scmService.scmImportPluginProviderService.name]=scmService.listPlugins('import')
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+        if(featureService.featurePresent(Features.FILE_UPLOAD_PLUGIN)) {
+            pluginDescs['FileUpload'] = pluginService.listPlugins(FileUploadPlugin)
+                    .findAll { it.value.description != null }
+                    .collect { it.value.description }
+                    .sort { a, b -> a.name <=> b.name }
+        }
+        pluginDescs['LogFilter'] = pluginService.listPlugins(LogFilterPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs['ContentConverter']=pluginService.listPlugins(ContentConverterPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs['TourLoader']=pluginService.listPlugins(TourLoaderPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs['UserGroupSource']=pluginService.listPlugins(UserGroupSourcePlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs['UI']= pluginService.listPlugins(UIPlugin, uiPluginProviderService)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs['WebhookEvent']=pluginService.listPlugins(WebhookEventPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[ServiceNameConstants.AuditEventListener] = pluginService.listPlugins(AuditEventListenerPlugin)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+        pluginDescs[ServiceNameConstants.PluginGroup] = pluginService.listPlugins(PluginGroup)
+                .findAll { it.value.description != null }
+                .collect { it.value.description }
+                .sort { a, b -> a.name <=> b.name }
+
+
+        Map<String,Map> uiPluginProfiles = [:]
+        def loadedFileNameMap=[:]
+        pluginDescs.each { svc, list ->
+            if(svc == "UI") return
+            list.each { desc ->
+                def provIdent = svc + ":" + desc.name
+                uiPluginProfiles[provIdent] = uiPluginService.getProfileFor(svc, desc.name)
+                def filename = uiPluginProfiles[provIdent].get('fileMetadata')?.filename
+                if(filename){
+                    if(!loadedFileNameMap[filename]){
+                        loadedFileNameMap[filename]=[]
+                    }
+                    loadedFileNameMap[filename]<< provIdent
+                }
+            }
+        }
+
+        def defaultScopes=[
+                (framework.getNodeStepExecutorService().name) : PropertyScope.InstanceOnly,
+                (framework.getStepExecutionService().name) : PropertyScope.InstanceOnly,
+        ]
+        def bundledPlugins=[
+                (framework.getNodeExecutorService().name): framework.getNodeExecutorService().getBundledProviderNames(),
+                (framework.getFileCopierService().name): framework.getFileCopierService().getBundledProviderNames(),
+                (framework.getResourceFormatParserService().name): framework.getResourceFormatParserService().getBundledProviderNames(),
+                (framework.getResourceFormatGeneratorService().name): framework.getResourceFormatGeneratorService().getBundledProviderNames(),
+                (framework.getResourceModelSourceService().name): framework.getResourceModelSourceService().getBundledProviderNames(),
+                (storagePluginProviderService.name): storagePluginProviderService.getBundledProviderNames()+['db'],
+                FileUpload: ['filesystem-temp'],
+        ]
+        //list included plugins
+        def embeddedList = frameworkService.listEmbeddedPlugins(grailsApplication)
+        def embeddedFilenames=[]
+        if(embeddedList.success && embeddedList.pluginList){
+            embeddedFilenames=embeddedList.pluginList*.fileName
+        }
+        def specialConfiguration=[
+                (storagePluginProviderService.name):[
+                        description: message("plugin.storage.provider.special.description",locale),
+                        prefix:"rundeck.storage.provider.[index].config."
+                ],
+                (storageConverterPluginProviderService.name):[
+                        description: message("plugin.storage.converter.special.description",locale),
+                        prefix:"rundeck.storage.converter.[index].config."
+                ],
+                (framework.getResourceModelSourceService().name):[
+                        description: message("plugin.resourceModelSource.special.description",locale),
+                        prefix:"resources.source.[index].config."
+                ],
+                (logFileStorageService.executionFileStoragePluginProviderService.name):[
+                        description: message("plugin.executionFileStorage.special.description",locale),
+                ],
+                (scmService.scmExportPluginProviderService.name):[
+                        description: message("plugin.scmExport.special.description",locale),
+                ],
+                (scmService.scmImportPluginProviderService.name):[
+                        description: message("plugin.scmImport.special.description",locale),
+                ],
+                FileUpload:[
+                        description: message("plugin.FileUpload.special.description",locale),
+                ]
+        ]
+        def specialScoping=[
+                (scmService.scmExportPluginProviderService.name):true,
+                (scmService.scmImportPluginProviderService.name):true
+        ]
+
+        [
+                descriptions        : pluginDescs,
+                serviceDefaultScopes: defaultScopes,
+                bundledPlugins      : bundledPlugins,
+                embeddedFilenames   : embeddedFilenames,
+                specialConfiguration: specialConfiguration,
+                specialScoping      : specialScoping,
+                uiPluginProfiles    : uiPluginProfiles
+        ]
+    }
+
+    def listPlugins(boolean includeGroupMetadata = false) {
+        Locale locale = getLocale()
+        long appEpoch = VersionConstants.DATE.time
+        String appVer = VersionConstants.VERSION
+        def pluginList = listPluginsDetailed()
+
+        // Cache for group icons: group name -> iconUrl (v57+ feature)
+        Map<String, String> groupIconCache = includeGroupMetadata ? [:] : null
+
+        def tersePluginList = pluginList.descriptions.collect {
+            String service = it.key
+            def providers = it.value.collect { provider ->
+                def meta = rundeckPluginRegistry.getPluginMetadata(service, provider.name)
+                boolean builtin = meta == null
+                String ver = meta?.pluginFileVersion ?: appVer
+                String artifactName = meta?.pluginArtifactName ?: provider.name
+                String tgtHost = meta?.targetHostCompatibility ?: 'all'
+                String rdVer = meta?.rundeckCompatibilityVersion ?: 'unspecified'
+                String author = meta?.pluginAuthor ?: ''
+                String id = meta?.pluginId ?: PluginUtils.generateShaIdFromName(artifactName)
+
+                def pluginDesc = [
+                 pluginId   : id,
+                 pluginName : artifactName,
+                 name         : provider.name,
+                 title        : provider.title,
+                 description  : provider.description,
+                 isHighlighted  : provider.isHighlighted(),
+                 highlightedOrder      : provider.getOrder(),
+                 builtin      : builtin,
+                 pluginVersion: ver,
+                 pluginAuthor : author,
+                 rundeckCompatibilityVersion: rdVer,
+                 targetHostCompatibility: tgtHost,
+                 pluginDate   : meta?.pluginDate?.time?:appEpoch,
+                 enabled      : true] as LinkedHashMap<Object, Object>
+
+                if (service in [ServiceNameConstants.WorkflowStep, ServiceNameConstants.WorkflowNodeStep]) {
+                    def outputs = pluginOutputsAsList(service, provider.name, provider.properties)
+                    if (outputs) {
+                        pluginDesc.outputs = outputs
+                    }
+                }
+
+                // Get groupBy from provider metadata (v57+ feature)
+                def groupBy = includeGroupMetadata ?
+                    provider.metadata?.get(com.dtolabs.rundeck.plugins.PluginGroupConstants.PLUGIN_GROUP_KEY) : null
+                pluginDesc.providerMetadata = new LinkedHashMap<>()
+
+                if(service != ServiceNameConstants.UI) {
+                    def uiDesc = uiPluginService.getProfileFor(service, provider.name)
+                    if (uiDesc.icon)
+                        pluginDesc.iconUrl = grailsLinkGenerator.link(
+                                controller: 'plugin',
+                                action: 'pluginIcon',
+                                params: [service: service, name: provider.name],
+                                absolute: true)
+
+                    if(uiDesc.providerMetadata) {
+                        pluginDesc.providerMetadata.putAll(uiDesc.providerMetadata)
+                    }
+                }
+
+                // Group icon resolution (v57+ feature)
+                if (includeGroupMetadata && groupBy) {
+                    pluginDesc.providerMetadata[com.dtolabs.rundeck.plugins.PluginGroupConstants.PLUGIN_GROUP_KEY] = groupBy
+
+                    String groupIconUrl = null
+
+                    if (groupIconCache.containsKey(groupBy)) {
+                        groupIconUrl = groupIconCache[groupBy]
+                    } else {
+                        def pluginGroupType = provider.pluginGroupType
+                        if (pluginGroupType) {
+                            try {
+                                def pluginGroupInstance = pluginGroupType.newInstance()
+                                String explicitIconPath = pluginGroupInstance.getGroupIconUrl(groupBy) as String
+                                if (explicitIconPath) {
+                                    // Extract icon filename from path like "/images/plugins/datadog-icon.svg"
+                                    String iconName = explicitIconPath.substring(explicitIconPath.lastIndexOf('/') + 1)
+                                    // Generate controller URL to serve the group icon
+                                    String absoluteUrl = grailsLinkGenerator.link(
+                                        controller: 'plugin',
+                                        action: 'groupIcon',
+                                        params: [iconName: iconName],
+                                        absolute: true
+                                    )
+                                    groupIconCache[groupBy] = absoluteUrl
+                                    groupIconUrl = absoluteUrl
+                                }
+                            } catch (Exception ignored) {
+                                // Error creating instance or calling method, continue to fallback
+                            }
+                        }
+
+                        // 3. Fallback to first plugin's icon in the group
+                        if (!groupIconUrl && pluginDesc.iconUrl) {
+                            groupIconCache[groupBy] = pluginDesc.iconUrl
+                            groupIconUrl = pluginDesc.iconUrl
+                        }
+                    }
+
+                    if (groupIconUrl) {
+                        pluginDesc.providerMetadata['groupIconUrl'] = groupIconUrl
+                    }
+                }
+
+                return pluginDesc
+            }
+            [service  : it.key,
+             desc     : message("framework.service.${service}.description".toString(),locale),
+             providers: providers
+            ]
+        }
+        tersePluginList
+    }
+
+    /**
+     *
+     * @param property property
+     * @return true if the property has a feature flag requirement and the feature is present, or no requirement is specified
+     */
+    boolean hasRequiredFeatures(Property property){
+        if (property.renderingOptions.containsKey(StringRenderingConstants.FEATURE_FLAG_REQUIRED)) {
+            def featureFlag = property.renderingOptions[StringRenderingConstants.FEATURE_FLAG_REQUIRED]?.toString()
+            if (featureFlag && !featureService.featurePresent(featureFlag)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * @param properties the plugin's full property list, as used internally for output capture and
+     * condition-key resolution
+     * @return only the properties that should be rendered as job/step configuration inputs: those
+     * with required features present, excluding any {@link Property#isOutputOnly()} property (a
+     * computed, backend-only value built from a field carrying only {@code @PluginOutput}, never
+     * job-configurable)
+     */
+    List<Map> pluginPropertiesAsMap(String service, String pluginName, List<Property> properties) {
+        properties.findAll {
+            hasRequiredFeatures(it) && !it.outputOnly
+        }.collect { Property prop ->
+            pluginPropertyMap(service, pluginName, prop)
+        }
+    }
+
+    /**
+     * @param properties the plugin's full property list
+     * @return every output exposed by the properties with required features present, including
+     * those of {@link Property#isOutputOnly()} properties that {@link #pluginPropertiesAsMap} omits,
+     * without duplicates (same group and name)
+     */
+    List<Map<String, String>> pluginOutputsAsList(String service, String pluginName, List<Property> properties) {
+        Map<String, Map<String, String>> outputs = [:]
+        properties.findAll { hasRequiredFeatures(it) && it.outputMetadata }.each { Property prop ->
+            String title = uiPluginService.getPluginMessage(
+                service,
+                pluginName,
+                "property.${prop.name}.title",
+                prop.title ?: prop.name,
+                locale
+            )
+            prop.outputMetadata.each { PluginOutputMetadata metadata ->
+                outputs.putIfAbsent(
+                    "${metadata.group}.${metadata.name}".toString(),
+                    [
+                        name       : metadata.name,
+                        group      : metadata.group,
+                        description: metadata.description,
+                        title      : title
+                    ]
+                )
+            }
+        }
+        return new ArrayList<Map<String, String>>(outputs.values())
+    }
+
+    /**
+     * Return map representation of plugin property definition
+     * @param service service
+     * @param pluginName provider
+     * @param prop property
+     * @param locale locale
+     * @return
+     */
+    Map pluginPropertyMap(String service, String pluginName, Property prop) {
+        def optsMap = asStringMap(prop)
+        def staticTextDefaultValue = uiPluginService.getPluginMessage(
+            service,
+            pluginName,
+            "property.${prop.name}.defaultValue",
+            prop.defaultValue ?: '',
+            locale
+        )
+        if(staticTextDefaultValue && optsMap && optsMap['staticTextContentType'] in ['text/html','text/markdown']){
+            if(optsMap['staticTextContentType'] == 'text/markdown') {
+                staticTextDefaultValue = staticTextDefaultValue.decodeMarkdown()
+                optsMap['staticTextContentType'] = 'application/x-text-html-sanitized'
+            }else{
+                staticTextDefaultValue = staticTextDefaultValue.encodeAsSanitizedHTML()
+                optsMap['staticTextContentType'] = 'application/x-text-html-sanitized'
+            }
+        }
+        [
+            name                  : prop.name,
+            desc                  : uiPluginService.getPluginMessage(
+                service,
+                pluginName,
+                "property.${prop.name}.description",
+                prop.description ?: '',
+                locale
+            ),
+            title                 : uiPluginService.getPluginMessage(
+                service,
+                pluginName,
+                "property.${prop.name}.title",
+                prop.title ?: prop.name,
+                locale
+            ),
+            defaultValue          : prop.defaultValue,
+            staticTextDefaultValue: staticTextDefaultValue,
+            required              : prop.required,
+            type                  : prop.type.toString(),
+            allowed               : prop.selectValues,
+            selectLabels          : prop.selectLabels,
+            scope                 : prop.scope?.toString(),
+            options               : optsMap,
+            outputMetadata        : outputMetadataList(prop)
+        ]
+    }
+
+    /**
+     * @param prop property
+     * @return list representation of the property's exposed output metadata, or null if not exposed
+     */
+    List<Map<String, String>> outputMetadataList(Property prop) {
+        if (!prop.outputMetadata) {
+            return null
+        }
+        prop.outputMetadata.collect { PluginOutputMetadata metadata ->
+            [
+                group      : metadata.group,
+                name       : metadata.name,
+                description: metadata.description
+            ]
+        }
+    }
+
+    public Map<String, String> asStringMap(Property prop) {
+        if (!prop.renderingOptions) {
+            return null
+        }
+        Map<String, String> opts = [:]
+        prop.renderingOptions.each { String k, Object v ->
+            opts[k]=v.toString()
+        }
+        opts
+    }
+
+    def listInstalledPluginIds() {
+        def idList = [:]
+        def plugins = pluginService.listPlugins(UIPlugin, uiPluginProviderService)
+        plugins.each{ entry ->
+            def meta = rundeckPluginRegistry.getPluginMetadata("UI", entry.key)
+            String id = meta?.pluginId ?: PluginUtils.generateShaIdFromName(entry.key)
+            idList[id] = meta?.pluginFileVersion ?: "1.0.0"
+        }
+
+        listPlugins().each { p ->
+            p.providers.each { idList[it.pluginId] = it.pluginVersion }
+        }
+
+        return idList
+    }
+
+    Locale getLocale() {
+        RequestContextHolder.getRequestAttributes() ? WebUtils.retrieveGrailsWebRequest().getLocale() : Locale.default
+    }
+
+    private def message(String code, Locale locale) {
+        try {
+            messageSource.getMessage(code,[].toArray(),locale)
+        } catch(NoSuchMessageException nsme) {
+            return code
+        }
+
+    }
+
+}

@@ -1,0 +1,132 @@
+package org.rundeck.tests.functional.api.job
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import org.rundeck.util.annotations.APITest
+import org.rundeck.util.api.responses.execution.ExecutionOutput
+import org.rundeck.util.common.jobs.JobUtils
+import org.rundeck.util.container.BaseContainer
+
+@APITest
+class JobExecutionOnMultipleNodesSpec extends BaseContainer {
+
+    public static final String TEST_PROJECT = "core-jsch-executor-test"
+    public static final String TEST_SSH_ARCHIVE_DIR = "/projects-import/core-jsch-executor-test"
+    public static final String NODE_KEY_PASSPHRASE = "testpassphrase123"
+    public static final String NODE_USER_PASSWORD = "testpassword123"
+    public static final String USER_VAULT_PASSWORD = "vault123"
+    public static final List<String> NODE_LIST = ["ssh-node-passphrase", "ssh-node-file-passphrase", "ssh-node-file", "ssh-node", "ssh-agent-node", "password-node"]
+    private static final MAPPER = new ObjectMapper()
+
+    def setupSpec() {
+        String keyPath = getClass().getClassLoader().getResource("docker/compose/oss").getPath() + "/keys"
+
+        loadKeysForNodes(keyPath, TEST_PROJECT, NODE_KEY_PASSPHRASE, NODE_USER_PASSWORD, USER_VAULT_PASSWORD)
+
+        setupProjectArchiveDirectory(TEST_PROJECT,
+                new File(getClass().getResource(TEST_SSH_ARCHIVE_DIR).getPath()),
+                ["importConfig"      : "true",
+                 "importACL"         : "true",
+                 "importNodesSources": "true",
+                 "jobUuidOption"     : "preserve"])
+        //wait for ansible node to be available
+        waitingResourceEnabled(TEST_PROJECT, "ssh-node")
+    }
+    def cleanupSpec(){
+        deleteProject(TEST_PROJECT)
+    }
+
+    def "Create a job that executes on all nodes"() {
+        given:
+        def jobName = UUID.randomUUID().toString()
+        def path = JobUtils.updateJobFileToImport("job-template-common.xml",
+                TEST_PROJECT,
+                ["job-name"           : jobName,
+                 "args"               : "echo 0",
+                 "node-filter-include": "tags: \"executor-test\"",
+                ])
+
+        when:
+        def response = JobUtils.createJob(TEST_PROJECT, new File(path).text, client)
+        def jobId = response.getSucceeded().get(0).id.toString()
+        def runJob = runJobGetOutput(jobId, ["options": [opt1: "z", opt2: "a"]])
+
+        then:
+        runJob.execution.status == 'succeeded'
+        // Ensure it was ran on only the expected nodes
+        getOrderedNodesListExecutedOn(runJob.output).size() == (NODE_LIST.size())
+    }
+
+    def "Create a job that executes on nodes that were not excluded"() {
+        given:
+        def jobName = UUID.randomUUID().toString()
+        def path = JobUtils.updateJobFileToImport("job-template-common.xml",
+                TEST_PROJECT,
+                ["job-name"           : jobName,
+                 "args"               : "echo 0",
+                 "node-filter-exclude": "tags: \"executor-test,option-test\"",
+                ])
+
+        when:
+        def response = JobUtils.createJob(TEST_PROJECT, new File(path).text, client)
+        def jobId = response.getSucceeded().get(0).id.toString()
+        def runJob = runJobGetOutput(jobId, ["options": [opt1: "z", opt2: "a"]])
+
+        then:
+        runJob.execution.status == 'succeeded'
+        // Should run the local node only since the filter excluded the nodes added by the setup
+        getOrderedNodesListExecutedOn(runJob.output).size() == 1
+    }
+
+    def "Create a job that executes on nodes in the descending order"() {
+        given:
+        def jobName = UUID.randomUUID().toString()
+        def path = JobUtils.updateJobFileToImport("job-template-common.xml",
+                TEST_PROJECT,
+                ["job-name"           : jobName,
+                 "args"               : "echo 0",
+                 "node-filter-include": "tags: \"executor-test\"",
+                 "dispatch-rank-order": "descending",
+                ])
+
+        when:
+        def response = JobUtils.createJob(TEST_PROJECT, new File(path).text, client)
+        def jobId = response.getSucceeded().get(0).id.toString()
+        def runJob = runJobGetOutput(jobId, ["options": [opt1: "z", opt2: "a"]])
+        runJob.output.entries.each{
+            println("entry: "+ it)
+        }
+        then:
+        runJob.execution.status == 'succeeded'
+        getOrderedNodesListExecutedOn(runJob.output) == NODE_LIST
+
+    }
+
+
+    def "Create a job that executes on nodes in the ascending order"() {
+        given:
+        def jobName = UUID.randomUUID().toString()
+        def path = JobUtils.updateJobFileToImport("job-template-common.xml",
+                TEST_PROJECT,
+                ["job-name"           : jobName,
+                 "args"               : "echo 0",
+                 "node-filter-include": "tags: \"executor-test\"",
+                 "dispatch-rank-order": "ascending",
+                ])
+
+        when:
+        def response = JobUtils.createJob(TEST_PROJECT, new File(path).text, client)
+        def jobId = response.getSucceeded().get(0).id.toString()
+        def runJob = runJobGetOutput(jobId, ["options": [opt1: "z", opt2: "a"]])
+        runJob.output.entries.each{
+            println("entry: "+ it)
+        }
+
+        then:
+        runJob.execution.status == 'succeeded'
+        getOrderedNodesListExecutedOn(runJob.output) == NODE_LIST.reverse()
+    }
+
+    private static List<String> getOrderedNodesListExecutedOn(ExecutionOutput completedJob) {
+        completedJob.entries.inject(new ArrayList<String>(), { result, x -> result.add(x.node); return result })
+    }
+}

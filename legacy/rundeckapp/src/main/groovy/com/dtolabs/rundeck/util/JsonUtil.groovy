@@ -1,0 +1,163 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.util
+
+import com.fasterxml.jackson.core.JsonProcessingException
+import com.fasterxml.jackson.databind.ObjectMapper
+import groovy.util.logging.Slf4j
+import jakarta.servlet.http.HttpServletRequest
+
+
+/**
+ * JSON request handling utilities
+ */
+@Slf4j
+class JsonUtil {
+
+    // Grails 7: Shared ObjectMapper instance for parsing JSON request bodies
+    private static final ObjectMapper objectMapper = new ObjectMapper()
+
+    /**
+     * Grails 7: Parse JSON from HttpServletRequest body using Jackson ObjectMapper.
+     * This replaces the broken request.JSON property in Grails 7/Spring Boot 3.
+     *
+     * @param request HttpServletRequest with JSON body
+     * @return Parsed JSON as Map, or null if request body is empty, already consumed, or not a JSON object
+     */
+    static Map parseRequestBody(HttpServletRequest request) {
+        def content = readRequestBodyContent(request, 'parseRequestBody')
+        if (!content) {
+            return null
+        }
+
+        try {
+            return objectMapper.readValue(content, Map.class)
+        } catch (JsonProcessingException parseEx) {
+            // Body readable but not a JSON object (array, primitive, malformed) — return null
+            log.error("parseRequestBody: JSON parsing failed [${parseEx.class.simpleName}: ${parseEx.originalMessage}] — body was readable but not a JSON object")
+            return null
+        }
+    }
+
+    /**
+     * Grails 7: Parse a JSON array from HttpServletRequest body using Jackson ObjectMapper.
+     * Some endpoints (e.g. the legacy-UI job list export status request) send a bare JSON
+     * array as the request body rather than a JSON object; {@link #parseRequestBody} always
+     * expects an object and would fail to parse those requests (RUN-10468).
+     *
+     * @param request HttpServletRequest with a JSON array body
+     * @return Parsed JSON as a List, or null if request body is empty, already consumed, or not a JSON array
+     */
+    static List parseRequestBodyAsList(HttpServletRequest request) {
+        def content = readRequestBodyContent(request, 'parseRequestBodyAsList')
+        if (!content) {
+            return null
+        }
+
+        try {
+            return objectMapper.readValue(content, List.class)
+        } catch (JsonProcessingException parseEx) {
+            // Body readable but not a JSON array (object, primitive, malformed) — return null
+            log.error("parseRequestBodyAsList: JSON parsing failed [${parseEx.class.simpleName}: ${parseEx.originalMessage}] — body was readable but not a JSON array")
+            return null
+        }
+    }
+
+    /**
+     * Reads the raw text content of a request body intended to contain JSON, or null if the
+     * content-type is not JSON or the body is empty/unavailable. Shared by
+     * {@link #parseRequestBody} and {@link #parseRequestBodyAsList}.
+     *
+     * @param request HttpServletRequest with JSON body
+     * @param logPrefix label used in log messages to identify the calling method
+     * @return the raw body content, or null
+     */
+    private static String readRequestBodyContent(HttpServletRequest request, String logPrefix) {
+        def contentType = request.contentType
+        if (contentType && !contentType.toLowerCase().contains('json')) {
+            return null
+        }
+
+        // Use getReader() FIRST — never call getInputStream() before getReader().
+        // Calling getInputStream() first locks the stream and causes getReader() to throw
+        // IllegalStateException (Servlet spec), which combined with available()==0 (common on
+        // real networks/ALB) was the root cause of the silent data-loss bug (RUN-4521).
+        String content = null
+        try {
+            content = request.getReader()?.text
+        } catch (Exception readerEx) {
+            // Reader unavailable (stream closed, IllegalStateException from prior getInputStream
+            // call, etc.) — fall back to reading raw bytes without the available() check.
+            // Do NOT use available(): it returns only buffered bytes and silently truncates
+            // data not yet in the local buffer on proxied/slow connections.
+            log.error("${logPrefix}: getReader() failed [${readerEx.class.simpleName}: ${readerEx.message}], falling back to getInputStream()")
+            try {
+                def bytes = request.getInputStream()?.readAllBytes()
+                if (bytes?.length > 0) {
+                    content = new String(bytes, 'UTF-8')
+                }
+            } catch (Exception streamEx) {
+                // Both reader and stream unavailable — body cannot be read
+                log.error("${logPrefix}: getInputStream() also failed [${streamEx.class.simpleName}: ${streamEx.message}] — body is unreadable")
+            }
+        }
+
+        content?.trim() ? content : null
+    }
+
+    /**
+     * Validate a json object
+     * @param data
+     * @param spec
+     * @return
+     */
+    static List<String> validateJson(data, Map<String, Object> spec, prefix='') {
+
+        def errors = []
+        spec.each { prop, Object type ->
+            def required = prop.startsWith('!')
+            prop = required?prop.substring(1):prop
+
+            Object value = jsonNull(data[prop])
+            if (value != null) {
+                if (type instanceof Map) {
+                    if (value instanceof Map) {
+                        def newerrs = validateJson(value, type, "${prop}.")
+                        errors.addAll(newerrs ?: [])
+                    }else{
+                        errors << "json: expected '${prefix}${prop}' to be a ${Map.simpleName}"
+                    }
+                } else if (type instanceof Class) {
+                    if (!(type.isAssignableFrom(value.getClass()))) {
+                        errors << "json: expected '${prefix}${prop}' to be a ${type.simpleName}"
+                    }
+                }
+            }else if(required){
+                errors<<"json: required '${prefix}${prop}' but it was not found"
+            }
+        }
+        errors ?: null
+    }
+    /**
+     * @param data JSONObject data
+     * @return null if the data is null or Json NULL, the input value otherwise
+     */
+    static def jsonNull(data) {
+        //JSONObject.NULL has been deprecated, should no longer be referenced and has been removed from Grails 3.1. Ref.: http://docs.grails.org/3.0.6/api/org/grails/web/json/JSONObject.Null.html
+        null == data ? null : data
+    }
+}

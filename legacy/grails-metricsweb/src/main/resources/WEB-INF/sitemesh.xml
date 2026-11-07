@@ -1,0 +1,14 @@
+<sitemesh>
+    <page-parsers>
+        <parser content-type="text/html"
+            class="org.apache.grails.views.gsp.layout.GrailsHTMLPageParser" />
+        <parser content-type="text/html;charset=ISO-8859-1"
+            class="org.apache.grails.views.gsp.layout.GrailsHTMLPageParser" />
+        <parser content-type="text/html;charset=UTF-8"
+            class="org.apache.grails.views.gsp.layout.GrailsHTMLPageParser" />
+    </page-parsers>
+
+    <decorator-mappers>
+        <mapper class="org.apache.grails.views.gsp.layout.GrailsLayoutDecoratorMapper" />
+    </decorator-mappers>
+</sitemesh>

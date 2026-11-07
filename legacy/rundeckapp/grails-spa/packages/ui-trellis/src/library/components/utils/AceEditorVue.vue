@@ -1,0 +1,302 @@
+<template>
+  <div :class="{ resizable: minLines === 0 }">
+    <div :id="identifier" ref="root"></div>
+  </div>
+</template>
+<script lang="ts">
+import { defineComponent, PropType } from "vue";
+
+import ace, { Ace } from "ace-builds";
+import "ace-builds/src-noconflict/ext-emmet";
+import { ContextVariable } from "../../stores/contextVariables";
+
+export default defineComponent({
+  props: {
+    identifier: {
+      type: String,
+      default: "",
+    },
+    modelValue: {
+      type: String,
+      required: true,
+    },
+    height: {
+      type: String,
+      default: "",
+    },
+    width: {
+      type: String,
+      default: "",
+    },
+    lang: {
+      type: String,
+      default: "",
+    },
+    minLines: {
+      type: Number,
+      default: 0,
+    },
+    maxLines: {
+      type: Number,
+      default: Infinity,
+    },
+    softWrap: {
+      type: Boolean,
+      default: true,
+    },
+    theme: {
+      type: String,
+      default: "",
+    },
+    darkTheme: {
+      type: String,
+      default: "",
+    },
+    options: {
+      type: Object as PropType<Ace.EditorOptions>,
+      default: () => {},
+    },
+    contextVariableSuggestions: {
+      type: Array<ContextVariable>,
+      default: () => [],
+    },
+  },
+  emits: ["init", "update:modelValue"],
+  data(): {
+    editor: Ace.Editor | null;
+    contentBackup: string;
+    observer: MutationObserver | null;
+    resizeObserver: ResizeObserver | null;
+    jsonSpaces: number;
+  } {
+    return {
+      editor: null,
+      contentBackup: "",
+      observer: null,
+      resizeObserver: null,
+      jsonSpaces: 2,
+    };
+  },
+  computed: {
+    /**
+     * When minLines is 0, the editor is manually resizable via CSS instead of
+     * auto-growing/shrinking to fit its content, so minLines/maxLines must not
+     * be handed to ace or its own auto-sizing will fight the manual resize.
+     */
+    isResizable(): boolean {
+      return this.minLines === 0;
+    },
+  },
+  watch: {
+    modelValue: function (val: string): void {
+      if (this.contentBackup !== val) {
+        this.editor!.getSession().setValue(this.resolveValue(val));
+        this.contentBackup = this.resolveValue(val);
+      }
+    },
+    theme: function (newTheme): void {
+      this.editor!.setTheme(this.resolveTheme(newTheme));
+    },
+    lang: function (newLang): void {
+      this.editor!.getSession().setMode(this.resolveLang(newLang));
+    },
+    softWrap: function (newSoftWrap): void {
+      this.editor!.getSession().setUseWrapMode(newSoftWrap);
+    },
+    options: function (newOption): void {
+      this.editor!.setOptions(newOption);
+    },
+    minLines: function (val: number): void {
+      if (val && !this.isResizable) {
+        this.editor!.setOptions({ minLines: val });
+      }
+    },
+    maxLines: function (val: number): void {
+      if (!this.isResizable) {
+        this.editor!.setOptions({ maxLines: val });
+      }
+    },
+    height: function (): void {
+      this.$nextTick(function () {
+        this.editor!.resize();
+      });
+    },
+    width: function (): void {
+      this.$nextTick(function () {
+        this.editor!.resize();
+      });
+    },
+  },
+  mounted: function () {
+    const lang = this.lang || "text";
+    const theme = this.getTheme();
+
+    const editor = (this.editor = ace.edit(this.$refs.root as HTMLElement));
+
+    this.$emit("init", editor);
+    editor.getSession().setUseWorker(false);
+    editor.getSession().setMode(this.resolveLang(lang));
+    editor.setTheme(this.resolveTheme(theme));
+
+    const shouldEnableAutoCompletion =
+      this.contextVariableSuggestions &&
+      this.contextVariableSuggestions.length > 0;
+    const autoCompleteDelay = shouldEnableAutoCompletion ? 150 : undefined;
+    // When resizable, ace must not auto-manage the container height via
+    // minLines/maxLines, since that fights with manually resizing it.
+    editor.setOptions({
+      ...(this.options || {}),
+      ...(this.isResizable
+        ? {}
+        : { minLines: this.minLines, maxLines: this.maxLines }),
+      enableLiveAutocompletion: shouldEnableAutoCompletion,
+      liveAutocompletionDelay: autoCompleteDelay,
+    });
+
+    if (this.modelValue) editor.setValue(this.resolveValue(this.modelValue), 1);
+
+    this.contentBackup = this.modelValue;
+
+    this.addContextVariableSuggestions();
+    this.observeDarkMode();
+    this.attachChangeEventToEditor();
+
+    if (this.isResizable) this.observeResize();
+  },
+  beforeUnmount: function () {
+    this.editor!.destroy();
+    this.editor!.container.remove();
+    this.observer?.disconnect();
+    this.resizeObserver?.disconnect();
+  },
+  methods: {
+    /**
+     * Keep the ace renderer in sync when the container is manually resized
+     */
+    observeResize() {
+      this.resizeObserver = new ResizeObserver(() => {
+        this.editor!.resize();
+      });
+      this.resizeObserver.observe(this.$refs.root as HTMLElement);
+    },
+    /**
+     * Observe the dark mode and update the theme for the editor
+     */
+    observeDarkMode() {
+      const query = matchMedia("(prefers-color-scheme: dark)");
+
+      const changeHandler = () => {
+        this.editor!.setTheme(this.resolveTheme(this.getTheme()));
+      };
+
+      // Support for Safari <14
+      if (typeof query.addEventListener == "function")
+        query.addEventListener("change", changeHandler);
+      else query.addListener(changeHandler);
+
+      this.observer = new MutationObserver(changeHandler);
+      this.observer.observe(document.documentElement, { attributes: true });
+    },
+
+    /**
+     * Get the theme to use based on whether it is dark mode or not
+     */
+    getTheme() {
+      let theme = document.documentElement.dataset.colorTheme || "light";
+
+      if (theme == "system")
+        theme = matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+
+      return theme == "dark"
+        ? this.darkTheme || "tomorrow_night_eighties"
+        : this.theme || "chrome";
+    },
+    px(value: string): string {
+      if (/^\d*$/.test(value)) return `${value}px`;
+
+      return value;
+    },
+    resolveTheme(theme: string): string {
+      return `ace/theme/${theme}`;
+    },
+    resolveLang(lang: string): string {
+      return typeof lang === "string" ? `ace/mode/${lang}` : lang;
+    },
+    /**
+     * Convert value to supported format
+     *
+     * @param val
+     */
+    resolveValue(val: string) {
+      const LANG_JSON: string = "json";
+      try {
+        if (this.lang == LANG_JSON) {
+          return JSON.stringify(JSON.parse(val), null, this.jsonSpaces);
+        }
+        return val;
+      } catch (e) {
+        return val;
+      }
+    },
+    /**
+     * Attach change event to ace editor
+     *
+     */
+    attachChangeEventToEditor(): void {
+      this.editor!.on("change", () => {
+        const content = this.editor!.getValue();
+        this.$emit("update:modelValue", content);
+        this.contentBackup = content;
+      });
+    },
+
+    addContextVariableSuggestions(): void {
+      const staticWordCompleter: Ace.Completer = {
+        ...this.buildCompletionProvider(),
+        ...this.buildDocTooltipProvider(),
+        identifierRegexps: [/[@%a-zA-Z_0-9.\$\-\u00A2-\uFFFF]/],
+      } as Ace.Completer;
+
+      this.editor!.completers = [staticWordCompleter];
+    },
+
+    buildCompletionProvider() {
+      return {
+        getCompletions: (
+          _editor: Ace.Editor,
+          _session: Ace.EditSession,
+          _pos: Ace.Point,
+          _prefix: string,
+          callback: Ace.CompleterCallback,
+        ) => {
+          const suggestions = this.contextVariableSuggestions.map(
+            ({ name, type, description, title }) => ({
+              name,
+              title,
+              desc: description,
+              value: name,
+              meta: type[0].toUpperCase() + type.slice(1),
+            }),
+          );
+          callback(null, suggestions);
+        },
+      };
+    },
+
+    buildDocTooltipProvider() {
+      const lang = ace.require("ace/lib/lang");
+      return {
+        getDocTooltip: (
+          item: Ace.Completion & { title: string; desc?: string },
+        ) => {
+          const title = lang.escapeHTML(item.title);
+          const desc = item.desc ? `<br><hr>${lang.escapeHTML(item.desc)}` : "";
+          item.docHTML = `<b>${title}${desc}</b>`;
+        },
+      };
+    },
+  },
+});
+</script>

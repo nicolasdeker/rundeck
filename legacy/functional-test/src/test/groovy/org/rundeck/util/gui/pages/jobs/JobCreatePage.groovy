@@ -1,0 +1,1425 @@
+package org.rundeck.util.gui.pages.jobs
+
+import groovy.transform.CompileStatic
+import org.openqa.selenium.By
+import org.openqa.selenium.JavascriptExecutor
+import org.openqa.selenium.StaleElementReferenceException
+import org.openqa.selenium.WebElement
+import org.openqa.selenium.interactions.Actions
+import org.openqa.selenium.support.ui.ExpectedConditions
+import org.openqa.selenium.support.ui.Select
+import org.openqa.selenium.support.ui.WebDriverWait
+import org.rundeck.util.gui.pages.BasePage
+import org.rundeck.util.container.SeleniumContext
+
+import java.time.Duration
+
+/**
+ * Job create page
+ */
+@CompileStatic
+class JobCreatePage extends BasePage {
+
+    By nodeFilterInputBy = By.id("schedJobNodeFilter")
+    By selectNode = By.cssSelector(".glyphicon-circle-arrow-right")
+    By lastNodeInList = By.cssSelector(".col-xs-6:nth-child(3) span:nth-child(2)")
+    By refreshNodesBy = By.cssSelector(".refresh_nodes")
+    By numberOfStepsBy = By.cssSelector(".autohilite.autoedit.wfitem")
+    By notificationModalBy = By.cssSelector('#job-notifications-edit-modal')
+    By notificationDropDownBy = By.cssSelector('#notification-edit-type-dropdown > button')
+    By notificationSaveBy = By.id("job-notifications-edit-modal-btn-save")
+    By updateJob = By.id("jobUpdateSaveButton")
+    By jobNameInputBy = By.cssSelector("form input[name=\"jobName\"]")
+    By groupPathInputBy = By.cssSelector("form input[name=\"groupPath\"]")
+    By groupChooseButton = By.id("groupChooseModalBtn")
+    By groupChooseModal = By.cssSelector('#groupChooseModal')
+    By groupNameOption = By.cssSelector("span.groupname.jobgroupexpand")
+    By descriptionTextareaBy = By.cssSelector("form textarea[name='description']")
+    By jobGroupBy = By.cssSelector("input#schedJobGroup")
+    By scheduleTabPaneBy = By.id('tab_schedule')
+    By scheduleRunYesLabelBy = By.cssSelector("label[for='scheduledTrue']")
+    By scheduleEveryDayLabelBy = By.cssSelector("label[for='everyDay']")
+    By scheduleRunYesBy = By.id('scheduledTrue')
+    By scheduleEveryDayCheckboxBy = By.cssSelector('input#everyDay')
+    By scheduleDaysCheckboxDivBy = By.cssSelector('div#DayOfWeekDialog')
+    By executionPluginsRows = By.xpath('//*[@id="tab_execution_plugins"]//*[@class="list-group-item"]')
+    By killHandlerPluginPreviousRow = By.xpath('//input[@value="killhandler"]/preceding-sibling::div[1]')
+    By killHandlerPluginCheckbox = By.xpath('//*[@value="killhandler"]//following-sibling::div[1]//input[@type="checkbox"]')
+    By killHandlerPluginKillSpawnedCheckbox = By.xpath('//*[@value="killhandler"]//following-sibling::div[1]//div[2]//input[@type="checkbox"]')
+    By multiExecFalseBy = By.cssSelector('input#multipleFalse')
+    By multiExecTrueBy = By.cssSelector('input#multipleTrue')
+    By workFlowStrategyBy = By.xpath('//*[@id="workflow.strategy"]')
+    By deleteStepBy = By.xpath('//*[@title="Delete this step"]')
+    By strategyPluginParallelBy = By.xpath('//*[@id="strategyPluginparallel"]')
+    By strategyPluginParallelMsgBy = By.xpath('//*[@id="strategyPluginparallel"]/span/span')
+    By strategyPluginSequentialBy = By.xpath('//*[@id="strategyPluginsequential"]')
+    By strategyPluginSequentialMsgBy = By.xpath('//*[@id="strategyPluginsequential"]/span/span')
+    By adhocRemoteStringBy = By.name("pluginConfig.adhocRemoteString")
+    By floatBy = By.className("floatr")
+    By createJobBy = By.id("Create")
+    By cancelBy = By.id('createFormCancelButton')
+    By optionBy = By.cssSelector("#optnewbutton > span")
+    By nodeStepSectionActiveBy = By.cssSelector(".node_step_section.tab-pane.active")
+    By executionEnabledFalseBy = By.id("executionEnabledFalse")
+    By executionEnabledTrueBy = By.id("executionEnabledTrue")
+    By scheduleEnabledFalseBy = By.id("scheduleEnabledFalse")
+    By scheduleEnabledTrueBy = By.id("scheduleEnabledTrue")
+    By workflowAlphaUiContainer = By.id("workflowContent") // TODO: delete once out of Alpha
+    By workflowContentControlLabelBy = By.xpath("//section[@id='workflowContent']//div[contains(@class, 'control-label')]")
+    By workflowAlphaUiButton = By.id("addButton")
+    By workflowSaveStepButton = By.xpath('//div[contains(@class, \'in\') and contains(@class, \'modal\')]//button[@data-testid="save-button"]')
+    By loaderClass = By.className("loader")
+
+    static class NextUi {
+        static By jobNameInputBy = By.id("schedJobName")
+        static By groupPathInputBy = By.id("schedJobGroup")
+        static By descriptionTextareaBy = By.cssSelector("form textarea.ace_text-input")
+        static By killHandlerPluginPreviousRow = By.xpath('//input[@value="killhandler"]/ancestor::div[@class="list-group-item"]/preceding-sibling::div[@class="list-group-item"][1]')
+        static By killHandlerPluginCheckbox = By.xpath('//input[@value="killhandler"]')
+        static By killHandlerPluginKillSpawnedCheckbox = By.xpath('//*[@data-prop-name="killChilds"]//input[@type="checkbox"]')
+        static By optionBy = By.cssSelector("#optnewbutton > button")
+        static By usageSectionBy = By.cssSelector("#option_preview")
+        static By optionCloseKeyStorageBy = By.cssSelector("#storage-file.modal .modal-footer > button.btn-default")
+        static By optionOpenKeyStorageBy = By.cssSelector(".opt_sec_enabled div.input-group > .input-group-btn > button")
+        static By optionUndoBy = By.cssSelector("[data-test=options_undo_redo] > button:nth-child(1)")
+        static By optionRedoBy = By.cssSelector("[data-test=options_undo_redo] > button:nth-child(2)")
+        static By optionRevertAllBy = By.cssSelector("[data-test=options_undo_redo] > button:nth-child(3)")
+        static By defaultValueInput=By.cssSelector("[data-test='option-value'] input[name=defaultValue]")
+        static By optionItemBy(int index) {
+            By.cssSelector("#optitem_$index")
+        }
+        static By storagePathInput = By.name("storagePath")
+        static By adhocRemoteStringBy = By.xpath('//*[@data-prop-name="adhocRemoteString"]//input[@type="text"]')
+        static By workFlowStrategyBy = By.xpath('//select[contains(@name, \'workflow.strategy\')]')
+        static By strategyPluginParallelMsgBy = By.xpath('//*[@id="strategyPluginparallel"]/span')
+        static By numberOfStepsBy = By.cssSelector("[data-testid='edit-step-item']")
+        static By deleteStepBy = By.cssSelector('button[data-test="remove-step"]')
+        static By stepEditModalCancelBy = By.cssSelector('.modal.in [data-testid="cancel-button"]')
+        static By stepEditModalSaveBy = By.cssSelector('.modal.in [data-testid="save-button"]')
+        static By jobOptionMultivaluedBy = By.cssSelector("[data-test='option-delimiter'] input[name='multivalued'][value='true']")
+        static By jobOptionMultivaluedDelimiterBy = By.cssSelector("[data-test='option-delimiter'] input[name='delimiter']")
+        static By jobOptionMultiValuedAllSelectedBy = By.cssSelector("[data-test='option-delimiter'] input[name='multivalueAllSelected']")
+    }
+
+    By usageSectionBy = By.xpath("//*[@id[contains(.,'preview_')]]//span[contains(.,'The option values will be available to scripts in these forms')]")
+    By saveOptionBy = By.xpath("//*[@title[contains(.,'Save the new option')]]")
+    By nodeDispatchTrueBy = By.id("doNodedispatchTrue")
+    By nodeFilterLinkBy = By.cssSelector("#job_edit__node_filter_include .job_edit__node_filter__filter_select_dropdown")
+    By nodeFilterSelectAllLinkBy = By.cssSelector("#job_edit__node_filter_include .job_edit__node_filter__filter_select_all")
+    By nodeMatchedCountBy = By.xpath("//span[@class='text-info node_filter_results__matched_nodes_count']")
+    By nodePopoverBy = By.cssSelector(".popover.node-embed-popover")
+    By excludeFilterTrueBy = By.xpath("//*[@id='excludeFilterTrue']")
+    By editableFalseBy = By.xpath("//*[@id='editableFalse']")
+    By schedJobNodeThreadCountBy = By.xpath("//*[@id='schedJobnodeThreadcount']")
+    By schedJobNodeRankAttributeBy = By.xpath("//*[@id='schedJobnodeRankAttribute']")
+    By nodeRankOrderDescendingBy = By.xpath("//*[@id='nodeRankOrderDescending']")
+    By nodeKeepGoingTrueBy = By.xpath("//*[@id='nodeKeepgoingTrue']")
+    By successOnEmptyNodeFilterTrueBy = By.xpath("//*[@id='successOnEmptyNodeFilterTrue']")
+    By nodesSelectedByDefaultFalseBy = By.xpath("//*[@id='nodesSelectedByDefaultFalse']")
+    By orchestratorDropdownBy = By.cssSelector('#orchestrator-edit-type-dropdown > button')
+    By errorAlertBy = By.cssSelector('#error')
+    By formValidationAlertBy = By.cssSelector('#page_job_edit > div.list-group-item > div.alert.alert-danger')
+    By sessionSectionBy = By.xpath("//div[contains(@class, 'opt_sec_nexp_disabled')]")
+    By secureInputTypeBy = By.xpath("//input[contains(@value, 'secureExposed')]")
+    By storagePathInput = By.name("defaultStoragePath")
+    By defaultValueInput = By.id("opt_defaultValue")
+    By optionOpenKeyStorageBy = By.cssSelector(".btn.btn-default.obs-select-storage-path")
+    By optionCloseKeyStorageBy = By.xpath("//button[@class='btn btn-sm btn-default']")
+    By optionUndoBy = By.xpath("//*[@id='optundoredo']/div/span[1]")
+    By optionRedoBy = By.xpath("//*[@id='optundoredo']/div/span[2]")
+    By optionRevertAllBy = By.xpath("//*[starts-with(@id,'revertall')]")
+    By optionConfirmRevertAllBy = By.cssSelector("div[class='popover-content'] span[class*='confirm']")
+    By workFlowStepBy = By.linkText("Workflow Steps")
+    By workFlowStepTabBy = By.xpath("//*[@role='tab' and contains(., 'Workflow Steps')]")
+    By ansibleBinariesPathBy = By.name("pluginConfig.ansible-binaries-dir-path")
+    By ansibleBinariesPathByNextUi = By.cssSelector("[data-testid='prop-field-ansible-binaries-dir-path'] input, [data-prop-name='ansible-binaries-dir-path'] input")
+    By autocompleteSuggestionsBy = By.cssSelector("div[class='autocomplete-suggestions']")
+    By wfUndoButtonBy = By.xpath("//*[@id='wfundoredo']/div/span[1]")
+    By wfUndoButtonLinkBy = By.xpath("//*[@class='btn btn-xs btn-default act_undo flash_undo']")
+    By wfUndoButtonByNextUi = By.cssSelector("#workflowContent [data-testid='undo-btn']")
+    By wfRedoButtonBy = By.xpath("//*[@id='wfundoredo']/div/span[2]")
+    By wfRedoButtonLinkBy = By.xpath("//*[@class='btn btn-xs btn-default act_redo flash_undo']")
+    By wfRedoButtonByNextUi = By.cssSelector("#workflowContent [data-testid='redo-btn']")
+    By wfRevertAllButtonBy = By.xpath("//*[@id='wfundoredo']/div/span[3]")
+    By wfRevertAllButtonByNextUi = By.cssSelector("[data-testid='revertAll-btn']")
+    By revertWfConfirmBy = By.xpath('//*[starts-with(@id,"popover")]/div[2]/span[2]')
+    By cancelNewStepFormBy = By.cssSelector('ol.flowlist li span.btn.btn-default.btn-sm[onclick*="_wficancelnew("]')
+    By cancelEditStepFormBy = By.cssSelector('ol.flowlist li span.btn.btn-default.btn-sm[onclick*="_wfiview"]')
+    By listWorkFlowItemBy = By.xpath("//*[starts-with(@id,'wfitem_')]")
+    By addSimpleCommandStepBy = By.xpath("//span[contains(@onclick, 'wfnewbutton')]")
+    By notificationListBy = By.cssSelector(".flex-item.flex-grow-1")
+    By nofiticationChildsBy = By.className("text-success")
+    By updateBtn        = By.name("_action_Update")
+    By defaultTabNodes  = By.id("tabSummary")
+    By defaultTabOutput = By.id("tabOutput")
+    By defaultTabHtml   = By.id("tabHTML")
+    By schedulesCronTabBy = By.linkText("Crontab")
+    By schedulesCrontabPanel = By.cssSelector("#cronstrtab .panel-body")
+    By schedulesCrontabStringBy = By.name("crontabString")
+    By stepFilterBy = By.xpath("//*[starts-with(@id, 'stepFilterField')]")
+    By stepFilterSearchBy = By.linkText("Search")
+    By emptyStepListBy = By.xpath("//*[@data-node-step-type='exec-command'][contains(@style, 'display: none;')]")
+    By jobOptionListValuesBy = By.name("valuesList")
+    By jobOptionListDelimiterBy = By.name("valuesListDelimiter")
+    By jobOptionEnforcedBy = By.id("enforcedType_enforced")
+    By jobOptionAllowedValuesRemoteUrlBy = By.cssSelector("input[name='valuesType'][value='url']")
+    By jobOptionAllowedValuesRemoteUrlByNextUi = By.cssSelector("[data-test='option-valuesType'] input[value='url']")
+    By jobOptionAllowedValuesRemoteUrlValueBy = By.name("valuesUrl")
+    By jobOptionRequiredBy = By.id("option-required-yes")
+    By jobOptionMultivaluedBy = By.xpath("//div[15]/div/div/div[2]/input")
+    By jobOptionMultivaluedDelimiterBy = By.name("delimiter")
+    By jobOptionMultiValuedAllSelectedBy = By.name("multivalueAllSelected")
+    By duplicateWfStepBy = By.cssSelector(".glyphicon.glyphicon-duplicate")
+    By urlOptionInput = By.xpath("//input[@name='valuesType' and @value='url']")
+    By scriptTextAreaBy = By.xpath("//*[contains(@class, 'form-group ') and .//*[contains(text(), 'script to execute')]]")
+    By wfItemEditFormBy = By.className("wfitemEditForm")
+    By optDetailBy = By.cssSelector(".optdetail.autohilite.autoedit")
+    By optDetailByNextUi = By.cssSelector(".optdetail, .option-item .optdetail")
+    By optionsBy = By.cssSelector(".opt.item")
+    By optionsByNextUi = By.cssSelector(".edit-option-item")
+    By timeZoneBy = By.id("timeZone")
+    By optEditFormBy = By.className("optEditForm")
+    By optionNameNewBy = By.cssSelector(".optEditForm input[type=text][name=name]")
+    By addGlobalLogFilter = By.cssSelector("[data-testid='add-filter-button']")
+    By addGlobalLogFilterLegacy = By.cssSelector("#logfilterplugins_wf [data-bind='click: addFilterPopup']")
+    By addLogFilterOption = By.cssSelector("a[data-test='add-log-filter']")
+    By addErrorHandlerOption = By.cssSelector("a[data-test='add-error-handler']")
+
+    private String loadPath = "/job/create"
+    private final String copyPath = "/job/copy"
+    String projectName
+    String jobId
+    boolean edit=false
+    @Override
+    String getLoadPath() {
+        if(edit && projectName && jobId){
+            return "/project/${projectName}/job/edit/${jobId}${getUiParam()}"
+        }else if(projectName && !edit){
+            return "/project/${projectName}/job/create${getUiParam()}"
+        }else{
+            return loadPath
+        }
+    }
+
+    private String getUiParam() {
+        if(legacyUi) {
+            return '?legacyUi=true'
+        } else if(nextUi) {
+            return '?nextUi=true'
+        } else {
+            return ''  // Default = Vue UI
+        }
+    }
+
+    boolean getNextUi() { isFlagEnabled('nextUi') }
+    void setNextUi(boolean value) { withFlag('nextUi', value) }
+    boolean getLegacyUi() { isFlagEnabled('legacyUi') }
+    void setLegacyUi(boolean value) { withFlag('legacyUi', value) }
+
+    JobCreatePage(final SeleniumContext context) {
+        super(context)
+    }
+
+    JobCreatePage(final SeleniumContext context, String projectName) {
+        super(context)
+        loadCreatePath(projectName)
+    }
+
+    /**
+     * Loads the job edit path with an explicit UI mode.
+     *
+     * @param projectName the project name
+     * @param jobId the job ID
+     * @param mode the UI mode to activate; defaults to {@link UiMode#DEFAULT}
+     */
+    void loadEditPath(String projectName, String jobId, UiMode mode = UiMode.DEFAULT) {
+        this.edit = true
+        this.projectName = projectName
+        this.jobId = jobId
+        withFlag('nextUi',   mode == UiMode.NEXT_UI)
+        withFlag('legacyUi', mode == UiMode.LEGACY)
+    }
+
+    void loadCreatePath(String projectName) {
+        this.projectName=projectName
+        this.edit=false
+    }
+    
+    void fillBasicJob(String name) {
+        jobNameInput.sendKeys name
+        tab JobTab.WORKFLOW click()
+        if(legacyUi){
+            addSimpleCommandStep 'echo selenium test', 0
+        } else {
+            waitForElementVisible workflowAlphaUiButton
+            addSimpleCommandStepNextUi 'echo selenium test', 0
+        }
+    }
+
+    /**
+     * It adds a command with the given string and it verifies that the stepIndexNumber is added
+     * @param command
+     * @param stepIndexNumber it starts from 0
+     * @return
+     */
+    JobCreatePage addSimpleCommandStep(String command, int stepIndexNumber) {
+        def execCommandBy = By.xpath("//*[contains(@${StepType.NODE.getStepType()}, 'exec-command')]")
+        if (legacyUi) {
+            executeScript "window.location.hash = '#addnodestep'"
+        } else {
+            clickAddStep()
+        }
+        def stepEl = byAndWaitClickable(execCommandBy)
+        executeScript "arguments[0].scrollIntoView(true);", stepEl
+        if (legacyUi) {
+            executeScript "arguments[0].click();", stepEl
+        } else {
+            stepEl.click()
+        }
+        byAndWaitClickable(legacyUi ? adhocRemoteStringBy : NextUi.adhocRemoteStringBy)
+        adhocRemoteStringField.click()
+        if (legacyUi) {
+            waitForNumberOfElementsToBeOne floatBy
+        }
+
+        adhocRemoteStringField.sendKeys command
+
+        saveStep stepIndexNumber
+
+        return this
+    }
+
+    JobCreatePage addSimpleCommandStepNextUi(String command, int stepIndexNumber) {
+        clickAddStep()
+        byAndWaitClickable By.xpath("//*[@${StepType.NODE.getStepType()}='exec-command']")
+        stepLink 'exec-command', StepType.NODE click()
+        byAndWaitClickable NextUi.adhocRemoteStringBy
+        adhocRemoteStringField.click()
+        adhocRemoteStringField.sendKeys command
+
+        saveStep stepIndexNumber
+
+        return this
+    }
+
+    JobCreatePage addStep(JobStep step, int stepNumber = 0){
+        def stepName = step.STEP_NAME
+        tab(JobTab.WORKFLOW).click()
+        if(!legacyUi){
+            clickAddStep();
+        }
+        stepLink(stepName, step.stepType).click()
+
+        step.configure(this, !legacyUi)
+
+        saveStep stepNumber
+        return this
+    }
+
+    JobCreatePage addErrorHandler(String stepName, StepType stepType, int stepNumber = 0){
+        clickAddErrorHandler(stepNumber);
+
+        stepLink(stepName, stepType).click()
+
+        if(stepName == 'exec-command') {
+            adhocRemoteStringField.click()
+            adhocRemoteStringField.sendKeys 'echo test'
+            saveStep stepNumber
+        }
+
+        return this
+    }
+
+    JobCreatePage withName(String name){
+        jobNameInput.sendKeys name
+        return this
+    }
+
+    JobCreatePage addOption(JobOption option){
+        tab(JobTab.WORKFLOW).click()
+        option.configure(this)
+        return this
+    }
+
+    JobCreatePage duplicateOption(String optName, int newIdx){
+        tab(JobTab.WORKFLOW).click()
+        JobOption.duplicate(this, optName, newIdx)
+        return this
+    }
+
+    JobCreatePage addDefaultTab(String defaultTab){
+        tab(JobTab.OTHER).click()
+        driver.findElement(By.xpath("//input[@value='${defaultTab}']")).click();
+        return this
+    }
+
+    JobShowPage saveJob() {
+        if (loadPath.endsWith('create'))
+            createJobButton.click()
+        else
+            updateJobButton.click()
+
+        return new JobShowPage(context)
+    }
+
+    WebElement getExecutionEnabledFalse(){
+        el executionEnabledFalseBy
+    }
+
+    WebElement getExecutionEnabledTrue(){
+        el executionEnabledTrueBy
+    }
+
+    WebElement getScheduleEnabledFalse(){
+        el scheduleEnabledFalseBy
+    }
+
+    WebElement getScheduleEnabledTrue(){
+        el scheduleEnabledTrueBy
+    }
+
+    boolean commandStepVisible(){
+        stepLink 'exec-command', StepType.NODE displayed
+    }
+
+    void validateCopyPage() {
+        if (!driver.currentUrl.contains(copyPath)) {
+            throw new IllegalStateException("Not on job copy page: " + driver.currentUrl)
+        }
+    }
+
+    WebElement tab(JobTab tab) {
+        def tabBy = By.partialLinkText(tab.getTabName())
+        waitForNumberOfElementsToBeOne tabBy
+        el tabBy
+    }
+
+    WebElement getLastNodeInListSpan(){
+        waitForElementVisible(lastNodeInList)
+        el lastNodeInList
+    }
+
+    WebElement getNodeByName(String nodeName) {
+        def selector = By.cssSelector("a[data-node='${nodeName}']")
+        waitForElementVisible(selector)
+        el selector
+    }
+
+    WebElement getNodeInListSpan(int idx) {
+        def selector = By.cssSelector(".col-xs-6:nth-child(${idx}) span:nth-child(2)")
+        waitForElementVisible(selector)
+        el selector
+    }
+
+    WebElement getSelectNodeArrowElement(){
+        el selectNode
+    }
+
+    /**
+     * Returns the "add to filter" (+) link of a tag inside the open node popover.
+     * Scoped to the node popover so a tag of a node rendered elsewhere is never matched,
+     * and waits until the link is clickable.
+     * @param tabName tag name as rendered in the popover
+     */
+    WebElement selectTabAddFilterByName(String tabName){
+        def selector = By.xpath("//*[contains(@class,'node-embed-popover')]//span[normalize-space(.)=\"${tabName}\"]//*[@class='glyphicon glyphicon-plus text-success']")
+        waitForElementToBeClickable(selector)
+        el selector
+    }
+
+    /**
+     * Opens the details popover of a node in the matched nodes list.
+     * Waits for any previously open node popover to close first, because clicking a node
+     * while another popover is still hiding (or while the list is re-rendering) is ignored.
+     * @param nodeName name of the node to open
+     */
+    void openNodePopover(String nodeName) {
+        new WebDriverWait(driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.invisibilityOfElementLocated(nodePopoverBy))
+        getNodeByName(nodeName).click()
+        waitForElementVisible(By.xpath("//*[contains(@class,'node-embed-popover')]//*[contains(@class,'node-header')]/span[normalize-space(.)=\"${nodeName}\"]"))
+    }
+
+    /**
+     * Waits until the node filter input contains {@code text} and the matched nodes
+     * query triggered by that filter change has finished loading.
+     * @param text expected fragment of the node filter
+     */
+    void waitForNodeFilterApplied(String text) {
+        new WebDriverWait(driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.attributeContains(nodeFilterInputBy, "value", text))
+        waitForElementVisible(nodeMatchedCountBy)
+    }
+
+    WebElement getNodeFilterInput(){
+        el nodeFilterInputBy
+    }
+
+    WebElement addNotificationButtonByType(NotificationEvent notificationEvent) {
+        waitForElementToBeClickable notificationEvent.notificationEvent
+        el notificationEvent.notificationEvent
+    }
+
+    WebElement getNotificationDropDown() {
+        waitForElementToBeClickable notificationDropDownBy
+        el notificationDropDownBy
+    }
+
+    WebElement notificationByType(NotificationType notificationType) {
+        waitForElementToBeClickable notificationType.notificationType
+        el notificationType.notificationType
+    }
+
+    WebElement notificationConfigByPropName(String propName) {
+        def popBy = By.cssSelector('#notification-edit-config div.form-group[data-prop-name=\'' + propName + '\']')
+        waitForNumberOfElementsToBeOne popBy
+        el popBy findElement By.cssSelector('input[type=text]')
+    }
+
+    WebElement getNotificationSaveButton() {
+        waitForElementToBeClickable notificationSaveBy
+        el notificationSaveBy
+    }
+
+    WebElement getJobGroupField() {
+        waitForElementVisible jobGroupBy
+        el jobGroupBy
+    }
+
+    WebElement getUpdateJobButton() {
+        def element = el updateJob
+        executeScript "arguments[0].scrollIntoView(true);", element
+        return element
+    }
+
+    void waitNotificationModal(Integer totalNotificationModals) {
+        waitForNumberOfElementsToBe notificationModalBy, totalNotificationModals
+    }
+
+    void waitGroupModal(Integer totalGroupModals) {
+        waitForNumberOfElementsToBe groupChooseModal, totalGroupModals
+    }
+
+    WebElement getJobNameInput() {
+        def by = legacyUi ? jobNameInputBy : NextUi.jobNameInputBy
+        waitForElementVisible(by)
+        el(by)
+    }
+
+    WebElement getGroupPathInput() {
+        el legacyUi ? groupPathInputBy : NextUi.groupPathInputBy
+    }
+
+    WebElement getGroupChooseButton() {
+        el groupChooseButton
+    }
+
+    WebElement getGroupNameOption() {
+        el groupNameOption
+    }
+
+    WebElement getDescriptionTextarea() {
+        if(legacyUi) {
+            def element = el descriptionTextareaBy
+            String js = 'jQuery(\'form textarea[name="description"]\').show()'
+            ((JavascriptExecutor) driver).executeScript(js, element)
+            waitForElementVisible element
+            element
+        } else {
+            el NextUi.descriptionTextareaBy
+        }
+    }
+
+    WebElement getRefreshNodesButton(){
+        el refreshNodesBy
+    }
+
+    WebElement getScheduleRunYesField() {
+        el scheduleRunYesBy
+    }
+
+    WebElement getScheduleEveryDayCheckboxField() {
+        el scheduleEveryDayCheckboxBy
+    }
+
+    WebElement getScheduleDaysCheckboxDivField() {
+        el scheduleDaysCheckboxDivBy
+    }
+
+    /**
+     * Open the Schedule tab and turn on a simple every-day schedule.
+     *
+     * The tab's controls are rendered by a Vue component mounted after the tab is
+     * shown, so each one is waited for rather than read straight after the click.
+     */
+    void enableDailySchedule() {
+        // saveStep returns as soon as the new step row appears, so the step editor's
+        // modal can still be open and over the tabs
+        waitForModal(0)
+        WebElement scheduleTab = tab(JobTab.SCHEDULE)
+        waitForElementToBeClickable scheduleTab
+        scheduleTab.click()
+        // fail on the pane rather than 30s later on a control inside it
+        waitForElementVisible scheduleTabPaneBy
+        // the theme gives these inputs opacity:0 and draws the control on the label, so
+        // the label is both what a user clicks and the only part Selenium sees as visible
+        byAndWaitClickable(scheduleRunYesLabelBy).click()
+        // the day-of-week panel appearing is the reactive model having caught up
+        waitForElementVisible scheduleDaysCheckboxDivBy
+        if (!scheduleEveryDayCheckboxField.isSelected()) {
+            byAndWaitClickable(scheduleEveryDayLabelBy).click()
+        }
+    }
+
+    List<WebElement> getExecutionPluginsRows() {
+        driver.findElements(executionPluginsRows)
+    }
+
+    WebElement getKillHandlerPluginPreviousRow() {
+        if(legacyUi){
+            el killHandlerPluginPreviousRow
+        } else {
+            new WebDriverWait(driver,  Duration.ofSeconds(50)).until(
+                    ExpectedConditions.presenceOfElementLocated(NextUi.killHandlerPluginPreviousRow)
+            )
+            el NextUi.killHandlerPluginPreviousRow
+        }
+    }
+
+    WebElement getKillHandlerPluginCheckbox() {
+        if(legacyUi){
+            el killHandlerPluginCheckbox
+        } else {
+            new WebDriverWait(driver,  Duration.ofSeconds(50)).until(
+                    ExpectedConditions.presenceOfElementLocated(NextUi.killHandlerPluginCheckbox)
+            )
+            el NextUi.killHandlerPluginCheckbox
+        }
+    }
+
+    WebElement getKillHandlerPluginKillSpawnedCheckbox() {
+        el legacyUi ? killHandlerPluginKillSpawnedCheckbox : NextUi.killHandlerPluginKillSpawnedCheckbox
+    }
+
+    WebElement getMultiExecFalseField() {
+        el multiExecFalseBy
+    }
+
+    WebElement getMultiExecTrueField() {
+        el multiExecTrueBy
+    }
+
+    WebElement getWorkFlowStrategyField() {
+        el legacyUi ? workFlowStrategyBy : NextUi.workFlowStrategyBy
+    }
+
+    WebElement getStrategyPluginParallelField() {
+        el strategyPluginParallelBy
+    }
+
+    WebElement getStrategyPluginParallelMsgField() {
+        el legacyUi ? strategyPluginParallelMsgBy : NextUi.strategyPluginParallelMsgBy
+    }
+
+    WebElement stepLink(String dataNodeStepType, StepType stepType) {
+        if(stepType == StepType.WORKFLOW) {
+            if(legacyUi) {
+                workFlowStepLink.click()
+            } else {
+                new WebDriverWait(driver, Duration.ofSeconds(45))
+                    .until(ExpectedConditions.invisibilityOfElementLocated(By.cssSelector("[data-testid='loading-text']")))
+                new WebDriverWait(driver, Duration.ofSeconds(10))
+                    .until(ExpectedConditions.visibilityOfElementLocated(workFlowStepTabBy))
+                el(workFlowStepTabBy).click()
+            }
+        }
+        el By.xpath("//*[contains(@${stepType.getStepType()}, '$dataNodeStepType')]")
+    }
+
+    /**
+     * Returns the adhoc remote-string command input element.
+     *
+     * <p>Note: there is no companion {@code getAdhocRemoteStringBy()} method by design —
+     * a getter named {@code getAdhocRemoteStringBy} would shadow Groovy property access
+     * to the {@link #adhocRemoteStringBy} {@link By} field, breaking call-sites like
+     * {@code jobCreatePage.byAndWaitClickable(jobCreatePage.adhocRemoteStringBy)}.
+     */
+    WebElement getAdhocRemoteStringField() {
+        el legacyUi ? adhocRemoteStringBy : NextUi.adhocRemoteStringBy
+    }
+
+    WebElement getCreateJobButton() {
+        el createJobBy
+    }
+
+    /**
+     * Submit a new job, waiting for the button to be interactable first. The schedule
+     * editor is Vue-driven, so the form can still be settling when the caller is ready.
+     */
+    void clickCreateJob() {
+        byAndWaitClickable createJobBy
+        createJobButton.click()
+    }
+
+    void clickTimeZone(){
+        (el timeZoneBy).click()
+    }
+
+    void clickAddStep(){
+        def btn = waitForElementVisible(workflowAlphaUiButton)
+        executeScript "arguments[0].scrollIntoView(true);", btn
+        waitForElementToBeClickable(btn)
+        btn.click()
+    }
+
+    void clickAddErrorHandler(int position){
+        stepDropdownTrigger(position).click()
+        def errorHandlerOptionBy = legacyUi ? 
+            By.cssSelector("a.wfitem_add_errorhandler") : 
+            addErrorHandlerOption
+        waitForElementVisible(errorHandlerOptionBy)
+        (el errorHandlerOptionBy).click()
+    }
+
+    def clickAddLogFilter(int position) {
+        stepDropdownTrigger(position).click()
+        def logFilterOptionBy = legacyUi ? 
+            By.cssSelector("a[data-bind*='addFilterPopup'][title*='Add Log Filter']") : 
+            addLogFilterOption
+        def errorHandlerOptionBy = legacyUi ? 
+            By.cssSelector("a.wfitem_add_errorhandler") : 
+            addErrorHandlerOption
+        waitForElementVisible(errorHandlerOptionBy)
+        (el logFilterOptionBy).click()
+        return this
+    }
+
+    WebElement getCancelButton() {
+        el cancelBy
+    }
+
+    WebElement getOptionButton() {
+        el legacyUi ? optionBy : NextUi.optionBy
+    }
+
+    WebElement optionNameNew(int index=0) {
+        if(legacyUi){
+            return byAndWait(optionNameNewBy)
+        }else{
+            return byAndWait(By.cssSelector("#optitem_new input[type=text][name=name]"))
+        }
+    }
+    WebElement optionName(int index) {
+        byAndWait legacyUi?
+                  By.cssSelector("#optvis_$index > div.optEditForm input[type=text][name=name]"):
+                  By.cssSelector("#optitem_new input[type=text][name=name], #optitem_$index input[type=text][name=name]")
+    }
+
+    WebElement getUsageSection() {
+        el legacyUi ? usageSectionBy : NextUi.usageSectionBy
+    }
+
+    WebElement getSaveOptionButton() {
+        byAndWaitClickable saveOptionBy
+    }
+    By optionItemBy(int index) {
+        legacyUi ? By.cssSelector("#optli_$index") : NextUi.optionItemBy(index)
+    }
+    void waitFotOptLi(int index) {
+        waitForElementVisible optionItemBy(index)
+    }
+
+    List<WebElement> optionLis(int index) {
+        els optionItemBy(index)
+    }
+
+    void waitForOptionsToBe(int index, int total) {
+        waitForNumberOfElementsToBe optionItemBy(index), total
+    }
+
+    WebElement optionNameSaved(int index) {
+        el legacyUi?
+           By.xpath("//*[@id=\"optli_$index\"]/div/div/span[2]/span/span[1]/span[1]")
+           :By.cssSelector("#optitem_${index} .option-item .option-item-content .optdetail_name")
+    }
+
+    WebElement duplicateButton(String nameOpt, int optNum = 0) {
+        el legacyUi?
+           By.xpath("//*[@id='optctrls_$nameOpt']/span[2]")
+           :By.cssSelector("#optitem_${optNum} .option-item-content+.btn-group> .btn + .btn")
+    }
+
+    WebElement getNodeDispatchTrueCheck() {
+        el nodeDispatchTrueBy
+    }
+
+    WebElement getNodeFilterLinkButton() {
+        el nodeFilterLinkBy
+    }
+
+    WebElement getNodeFilterSelectAllLinkButton() {
+        el nodeFilterSelectAllLinkBy
+    }
+
+    WebElement getNodeMatchedCountField() {
+        el nodeMatchedCountBy
+    }
+
+    WebElement getExcludeFilterTrueCheck() {
+        el excludeFilterTrueBy
+    }
+
+    WebElement getEditableFalseCheck() {
+        el editableFalseBy
+    }
+
+    WebElement getSchedJobNodeThreadCountField() {
+        el schedJobNodeThreadCountBy
+    }
+
+    WebElement getSchedJobNodeRankAttributeField() {
+        el schedJobNodeRankAttributeBy
+    }
+
+    WebElement getNodeRankOrderDescendingField() {
+        el nodeRankOrderDescendingBy
+    }
+
+    WebElement getNodeKeepGoingTrueCheck() {
+        el nodeKeepGoingTrueBy
+    }
+
+    WebElement getSuccessOnEmptyNodeFilterTrueCheck() {
+        el successOnEmptyNodeFilterTrueBy
+    }
+
+    WebElement getNodesSelectedByDefaultFalseCheck() {
+        el nodesSelectedByDefaultFalseBy
+    }
+
+    WebElement getOrchestratorDropdownButton() {
+        el orchestratorDropdownBy
+    }
+
+    WebElement getSessionSectionLabel() {
+        el sessionSectionBy
+    }
+
+    WebElement getSecureInputTypeRadio() {
+        el secureInputTypeBy
+    }
+
+    WebElement getStoragePathInput(){
+        el legacyUi ? storagePathInput : NextUi.storagePathInput
+    }
+
+    By getDefaultValueBy(){
+        legacyUi ? defaultValueInput : NextUi.defaultValueInput
+    }
+    WebElement getDefaultValueInput(){
+        el defaultValueBy
+    }
+
+    WebElement getOptionOpenKeyStorageButton() {
+        el legacyUi?
+           optionOpenKeyStorageBy
+           :NextUi.optionOpenKeyStorageBy
+    }
+
+    WebElement getOptionCloseKeyStorageButton() {
+        el legacyUi?
+           optionCloseKeyStorageBy
+           :NextUi.optionCloseKeyStorageBy
+    }
+
+    WebElement getOptionUndoButton() {
+        el legacyUi ? optionUndoBy : NextUi.optionUndoBy
+    }
+
+    WebElement getOptionRedoButton() {
+        el legacyUi ? optionRedoBy : NextUi.optionRedoBy
+    }
+
+    WebElement getOptionRevertAllButton() {
+        el legacyUi ? optionRevertAllBy : NextUi.optionRevertAllBy
+    }
+
+    WebElement getOptionConfirmRevertAllButton() {
+        el optionConfirmRevertAllBy
+    }
+
+    WebElement orchestratorChoiceLink(String variable) {
+        el By.cssSelector("#orchestrator-edit-type-dropdown > ul > li > a[role=button][data-plugin-type=$variable]")
+    }
+
+    WebElement getErrorAlert() {
+        el errorAlertBy
+    }
+
+    WebElement getFormValidationAlert() {
+        el formValidationAlertBy
+    }
+
+    WebElement getWorkFlowStepLink() {
+        legacyUi ? el(workFlowStepBy) : el(workFlowStepTabBy)
+    }
+
+    WebElement getAnsibleBinariesPathField() {
+        el legacyUi ? ansibleBinariesPathBy : ansibleBinariesPathByNextUi
+    }
+
+    WebElement getWfUndoButton() {
+        el(legacyUi ? wfUndoButtonBy : wfUndoButtonByNextUi)
+    }
+
+    WebElement getWfUndoButtonLink() {
+        el(legacyUi ? wfUndoButtonLinkBy : wfUndoButtonByNextUi)
+    }
+
+    WebElement getWfRedoButton() {
+        el(legacyUi ? wfRedoButtonBy : wfRedoButtonByNextUi)
+    }
+
+    WebElement getWfRedoButtonLink() {
+        el(legacyUi ? wfRedoButtonLinkBy : wfRedoButtonByNextUi)
+    }
+
+    WebElement getWfRevertAllButton() {
+        el(legacyUi ? wfRevertAllButtonBy : wfRevertAllButtonByNextUi)
+    }
+
+    WebElement getRevertWfConfirmYes() {
+        el revertWfConfirmBy
+    }
+
+    List<WebElement> getWorkFlowList() {
+        els listWorkFlowItemBy
+    }
+
+    WebElement getAddSimpleCommandStepButton() {
+        el addSimpleCommandStepBy
+    }
+
+    WebElement getUpdateBtn() {
+        return el(updateBtn)
+    }
+
+    WebElement getDefaultTabNodes() {
+        def element = el defaultTabNodes
+        executeScript "arguments[0].scrollIntoView(true);", element
+        return element
+    }
+
+    WebElement getDefaultTabOutput() {
+        def element = el defaultTabOutput
+        executeScript "arguments[0].scrollIntoView(true);", element
+        return element
+    }
+
+    WebElement getDefaultTabHtml() {
+        def element = el defaultTabHtml
+        executeScript "arguments[0].scrollIntoView(true);", element
+        return element
+    }
+
+    WebElement getSchedulesCrontab(){
+        el schedulesCronTabBy
+    }
+
+    WebElement getSchedulesCrontabPanel(){
+        el schedulesCrontabPanel
+    }
+
+    WebElement getSchedulesCrontabStringInput(){
+        el schedulesCrontabStringBy
+    }
+
+    WebElement getStepFilterInput(){
+        el stepFilterBy
+    }
+
+    WebElement getStepFilterSearchButton(){
+        el stepFilterSearchBy
+    }
+
+    WebElement getEmptyStepList(){
+        el emptyStepListBy
+    }
+
+    WebElement getAutocompleteSuggestions() {
+        def autoAux = els autocompleteSuggestionsBy
+        WebElement autoDivAux
+        for (WebElement auto : autoAux) {
+            if (auto.isDisplayed()) {
+                autoDivAux = auto
+                break
+            }
+        }
+        autoDivAux.findElement By.cssSelector("div[class='autocomplete-suggestion']")
+    }
+
+    WebElement getJobOptionListValueInput(){
+        el jobOptionListValuesBy
+    }
+
+    WebElement getJobOptionListDelimiter(){
+        el jobOptionListDelimiterBy
+    }
+
+    WebElement getJobOptionEnforcedInput(){
+        el jobOptionEnforcedBy
+    }
+
+    WebElement getJobOptionAllowedValuesRemoteUrlInput(){
+        // Native radio inputs are styled with opacity:0 and zero dimensions (standard Bootstrap custom radio
+        // styling). Selenium's visibilityOfElementLocated requires non-zero size — always times out.
+        // Use presenceOfElementLocated: the element IS in the DOM, just visually replaced by its label.
+        def optionsSectionBy = By.id("optionsContent")
+        new WebDriverWait(driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.presenceOfElementLocated(optionsSectionBy))
+        executeScript("arguments[0].scrollIntoView({block: 'center'});", el(optionsSectionBy))
+        if (!legacyUi) {
+            By preferred = By.cssSelector("#optionsContent #optitem_new input[name='valuesType'][value='url']")
+            By fallback = By.cssSelector("#optionsContent [data-test='option-valuesType'] input[name='valuesType'][value='url']")
+            // ExpectedConditions.or returns Boolean, not WebElement — wait for presence then find the element
+            new WebDriverWait(driver, Duration.ofSeconds(60))
+                    .ignoring(StaleElementReferenceException.class)
+                    .until(ExpectedConditions.or(
+                            ExpectedConditions.presenceOfElementLocated(preferred),
+                            ExpectedConditions.presenceOfElementLocated(fallback)))
+            def inputs = driver.findElements(preferred)
+            WebElement input = inputs.isEmpty() ? driver.findElement(fallback) : inputs.first()
+            executeScript("arguments[0].scrollIntoView({block: 'center'});", input)
+            return input
+        }
+        By by = By.cssSelector(
+                "#optionsContent ul li:last-child .optEditForm input[name='valuesType'][value='url']")
+        WebElement input = new WebDriverWait(driver, Duration.ofSeconds(60))
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.presenceOfElementLocated(by))
+        executeScript("arguments[0].scrollIntoView({block: 'center'});", input)
+        return input
+    }
+
+    /**
+     * Selects the "Remote URL" allowed-values radio; uses a script click so CI does not fail on intercepted native clicks.
+     */
+    void clickJobOptionAllowedValuesRemoteUrlRadio() {
+        WebElement input = getJobOptionAllowedValuesRemoteUrlInput()
+        executeScript("arguments[0].click();", input)
+    }
+
+    void scrollToElement(WebElement el){
+        Actions actions = new Actions(driver);
+        actions.moveToElement(el);
+        actions.perform();
+    }
+
+    WebElement getJobOptionAllowedValuesRemoteUrlValueTextInput(){
+        el jobOptionAllowedValuesRemoteUrlValueBy
+    }
+
+    WebElement getJobOptionRequiredInput(){
+        el jobOptionRequiredBy
+    }
+
+    WebElement getJobOptionMultiValuedInput(){
+        def by = legacyUi ? jobOptionMultivaluedBy : NextUi.jobOptionMultivaluedBy
+        def el = el(by)
+        scrollToElement(el)
+        el
+    }
+
+    By getJobOptionMultivaluedDelimiterBy() {
+        legacyUi ? jobOptionMultivaluedDelimiterBy : NextUi.jobOptionMultivaluedDelimiterBy
+    }
+
+    WebElement getJobOptionMultivaluedDelimiter(){
+        def by = getJobOptionMultivaluedDelimiterBy()
+        def el = el(by)
+        scrollToElement(el)
+        el
+    }
+
+    WebElement getJobOptionMultiValuedAllSelectedInput(){
+        def by = legacyUi ? jobOptionMultiValuedAllSelectedBy : NextUi.jobOptionMultiValuedAllSelectedBy
+        def el = el(by)
+        scrollToElement(el)
+        el
+    }
+
+    WebElement getDuplicateWfStepButton(){
+        el duplicateWfStepBy
+    }
+
+    WebElement getWfStepByListPosition(int position){
+        (el By.id("wfitem_${position}"))
+    }
+
+    void saveStep(Integer stepNumber) {
+        def button
+        if(legacyUi) {
+            button = el floatBy findElement By.cssSelector(".btn.btn-cta.btn-sm")
+        } else {
+            button = el workflowSaveStepButton
+        }
+        executeScript "arguments[0].scrollIntoView(true);", button
+        button.click()
+        waitForElementVisible By.id("wfitem_${stepNumber}")
+    }
+
+    void removeStepByIndex(int stepIndex){
+        if(legacyUi) {
+            (els deleteStepBy).get(stepIndex).click()
+        } else {
+            (el By.cssSelector("#wfitem_${stepIndex} + .step-item-controls button[data-test='remove-step']")).click()
+        }
+    }
+
+    def expectNumberOfStepsToBe(int numberSteps){
+        new WebDriverWait(driver,  Duration.ofSeconds(5)).until(
+                ExpectedConditions.numberOfElementsToBe(this.legacyUi ? numberOfStepsBy : NextUi.numberOfStepsBy, numberSteps)
+        )
+    }
+
+    /**
+     * It gets the list of notification elements added to the job
+     */
+    def getNotificationList(){
+        (els notificationListBy)
+    }
+
+    /**
+     * It gets the list of notification childs so it can validate each config value
+     */
+    def getNotificationChilds(WebElement notificationParent){
+        notificationParent.findElements(nofiticationChildsBy)
+    }
+
+    void addScriptStep(String jobName, List<String> params, Integer waitTime = null) {
+        jobNameInput.sendKeys jobName
+        tab JobTab.WORKFLOW click()
+        executeScript "window.location.hash = '#addnodestep'"
+        stepLink 'script-inline', StepType.NODE click()
+        waitForElementVisible scriptTextAreaBy
+        params.each {scriptTextAreaInput.sendKeys(it)}
+        wfItemEditForm.click()
+        getWfItemIndex(0).isDisplayed()
+
+        waitTime?.with {
+            el(By.id("wfnewbutton")).findElement(By.cssSelector(".btn.btn-default.btn-sm.ready")).click()
+            addSimpleCommandStep("sleep $it", 1)
+            el(By.id("wfnewbutton")).findElement(By.cssSelector(".btn.btn-default.btn-sm.ready")).click()
+            addSimpleCommandStep("echo \"after wait\"", 2)
+
+            getWfItemIndex(1).isDisplayed()
+            getWfItemIndex(2).isDisplayed()
+        }
+
+        createJobButton.click()
+    }
+
+    WebElement getScriptTextAreaInput() {
+        el scriptTextAreaBy findElement By.tagName("textarea")
+    }
+
+    WebElement getWfItemEditForm() {
+        el wfItemEditFormBy findElement By.cssSelector(".btn.btn-cta.btn-sm")
+    }
+
+    WebElement getWfItemIndex(int number) {
+        el By.id("wfitem_${number}")
+    }
+
+    List<WebElement> getOptions(){
+        els legacyUi ? optionsBy : optionsByNextUi
+    }
+
+    List<WebElement> getOptDetails(){
+        els legacyUi ? optDetailBy : optDetailByNextUi
+    }
+
+    def getTotalFoundPlugins(String pluginName){
+        return (el nodeStepSectionActiveBy).findElements(By.name(pluginName)).size()
+    }
+
+    WebElement getWorkflowAlphaUiContainer() {
+        el workflowAlphaUiContainer
+    }
+
+    WebElement getListItemIndex(int position) {
+        if (legacyUi) {
+            // Legacy UI uses knockout modal for filter selection
+            el By.cssSelector("#addLogFilterPluginModal .list-group-item:nth-child(${position})")
+        } else {
+            el By.cssSelector("[data-testid='add-filter-modal'] .list-group[data-testid='list-view'] > button.list-group-item:nth-child(${position})")
+        }
+    }
+
+    WebElement getInputField(String value, String childElement) {
+        getElementByDataPropName(value, childElement)
+    }
+
+    WebElement getAddGlobalLogFilter() {
+        def by = legacyUi ? addGlobalLogFilterLegacy : addGlobalLogFilter
+        def button = el(by)
+        executeScript "arguments[0].scrollIntoView(true);", button
+        waitForElementToBeClickable(button)
+        return button
+    }
+
+    def fillHighlightLogFilter() {
+        if (legacyUi) {
+            def highlightItem = el(By.xpath("//div[@id='addLogFilterPluginModal']//a[contains(., 'Highlight')]"))
+            highlightItem.click()
+            waitForElementVisible(By.cssSelector("#editLogFilterPluginModal .modal-body"))
+            def regexInput = byAndWait(By.cssSelector("#editLogFilterPluginModal input[type='text']"))
+            regexInput.sendKeys('test')
+            def fgcolorSelect = new Select(byAndWait(By.cssSelector("#editLogFilterPluginModal select")))
+            fgcolorSelect.selectByValue('yellow')
+            el(By.cssSelector("#editLogFilterPluginModal .btn-cta")).click()
+        } else {
+            getListItemIndex(3).click();
+            def highlightPatternInput = getInputField("regex", "input[type='text']")
+            highlightPatternInput.click()
+            highlightPatternInput.sendKeys 'test'
+            def select = new Select(getInputField("fgcolor", "select"))
+            select.selectByValue('yellow')
+            getWorkflowSaveStepButton().click()
+        }
+        return this
+    }
+
+    List<WebElement> getLogFilterButtons(String id) {
+        els By.cssSelector("${id} .btn-group")
+    }
+
+    WebElement getWorkflowSaveStepButton() {
+        el workflowSaveStepButton
+    }
+
+    WebElement getWorkflowAlphaUiButton() {
+        el workflowAlphaUiButton
+    }
+
+    WebElement removeErrorHandlerButton(int index) {
+        el By.cssSelector(".item-container:nth-child(${index+1}) button[data-testid='remove-handler-button']");
+    }
+
+    WebElement stepDropdownTrigger(int index) {
+        if (legacyUi) {
+            el By.cssSelector("#pfctrls_${index} .btn-group .dropdown-toggle")
+        } else {
+            el By.cssSelector("#wfitem_${index} +.step-item-controls button[data-role='trigger']")
+        }
+    }
+
+    def doesntHasDropdownOption(int index, String dataTest) {
+        if (legacyUi) {
+            // In legacy UI, check for classes like 'wfitem_add_errorhandler' in the dropdown
+            // Map data-test values to legacy class names
+            def classMap = [
+                'add-error-handler': 'wfitem_add_errorhandler',
+                'add-log-filter': '' // Log filter button has data-bind="click: addFilterPopup"
+            ]
+            def className = classMap[dataTest]
+            if (dataTest == 'add-log-filter') {
+                // Legacy UI: log filter button is in the dropdown menu with data-bind
+                els(By.cssSelector("#pfctrls_${index} .dropdown-menu a[data-bind*='addFilterPopup']")).isEmpty()
+            } else if (className) {
+                els(By.cssSelector("#pfctrls_${index} .dropdown-menu a.${className}")).isEmpty()
+            } else {
+                true // Unknown dataTest, assume it doesn't exist
+            }
+        } else {
+            els(By.cssSelector("#wfitem_${index} +.step-item-controls a[data-test='${dataTest}']")).isEmpty()
+        }
+    }
+
+    /**
+     * Waits until the given step dropdown option is absent.
+     *
+     * {@link #doesntHasDropdownOption} is a point-in-time DOM query, so asserting it directly
+     * right after an async mutation (e.g. saving an error handler, which triggers a Vue re-render
+     * that removes the "add error handler" option) is racy. This polls until the option is actually
+     * gone instead of checking once.
+     *
+     * @return true once the option is absent; throws TimeoutException if it never disappears
+     */
+    boolean waitForDropdownOptionAbsent(int index, String dataTest, int timeoutSeconds = 30) {
+        new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds))
+                .until { doesntHasDropdownOption(index, dataTest) }
+        return true
+    }
+
+    /**
+     * Waits until the given step dropdown option is present.
+     *
+     * Counterpart to {@link #waitForDropdownOptionAbsent} for the cases where an async mutation
+     * (e.g. removing an error handler) is expected to re-add the option.
+     *
+     * @return true once the option is present; throws TimeoutException if it never appears
+     */
+    boolean waitForDropdownOptionPresent(int index, String dataTest, int timeoutSeconds = 30) {
+        new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds))
+                .until { !doesntHasDropdownOption(index, dataTest) }
+        return true
+    }
+
+    /**
+     * Clicks the step at index to open edit modal (nextUi mode only).
+     * The step item with id wfitem_${index} is clickable and opens EditPluginModal.
+     * The step item id `wfitem_${index}` is shared across legacy KO and Vue;
+     * legacy opens the inline edit form, default/nextUi opens EditPluginModal.
+     */
+    void clickStepToEdit(int index) {
+        def stepEl = el(By.id("wfitem_${index}"))
+        executeScript "arguments[0].scrollIntoView(true);", stepEl
+        waitForElementToBeClickable(stepEl)
+        stepEl.click()
+    }
+
+    /**
+     * Clicks the cancel button when editing a step.
+     * Legacy: inline form discard button. Default/nextUi (post workflow-tab promotion): modal cancel.
+     */
+    void clickCancelStepEdit() {
+        def cancelBy = legacyUi ? cancelEditStepFormBy : NextUi.stepEditModalCancelBy
+        def cancelBtn = waitForElementVisible(cancelBy)
+        executeScript "arguments[0].scrollIntoView(true);", cancelBtn
+        waitForElementToBeClickable(cancelBtn)
+        cancelBtn.click()
+    }
+
+    /**
+     * Returns true if the step edit modal (with cancel/save) is visible (nextUi mode only).
+     */
+    boolean isStepEditModalVisible() {
+        els(NextUi.stepEditModalCancelBy).any { it.isDisplayed() }
+    }
+}
+
+
+class JobOption {
+    static final String defaultOptType = 'Text'
+    String optionType
+    String inputType
+    String name
+    int optNumber
+
+    void configure(JobCreatePage jobCreatePage){
+        final By usageSectionLocator = By.xpath("//*[contains(@id,'${notUseDefaultType() ? optionType.toLowerCase() + "_" : ""}preview_')]//span[contains(.,' will be available to scripts in these forms')]")
+
+        jobCreatePage.optionButton.click()
+        jobCreatePage.optionName(optNumber).sendKeys(name)
+
+        if(notUseDefaultType()){
+            jobCreatePage.driver.findElement(By.name("optionType")).click();
+            Select typeSelector = new Select(jobCreatePage.driver.findElement(By.name("optionType")))
+            typeSelector.selectByVisibleText(optionType)
+        }
+
+        if(inputType)
+            jobCreatePage.driver.findElement(By.cssSelector("input[value='${inputType}']")).click()
+
+        jobCreatePage.waitForElementVisible(usageSectionLocator)
+        jobCreatePage.executeScript("window.location.hash = '#workflowKeepGoingFail'")
+        jobCreatePage.saveOptionButton.click()
+        jobCreatePage.waitFotOptLi(optNumber)
+    }
+
+    boolean notUseDefaultType(){
+        optionType && optionType != defaultOptType
+    }
+
+    static void duplicate(JobCreatePage jobCreatePage, String optName, int newIdx){
+        jobCreatePage.duplicateButton(optName).click()
+        jobCreatePage.waitFotOptLi(newIdx)
+    }
+}
+
+enum NotificationType {
+
+    MAIL(By.cssSelector('#notification-edit-type-dropdown > ul > li > a[data-plugin-type=\'email\']')),
+    WEBHOOK(By.cssSelector('#notification-edit-type-dropdown > ul > li > a[data-plugin-type=\'url\']'))
+
+    private By notificationTypeBy
+
+    NotificationType(By notificationTypeBy) {
+        this.notificationTypeBy = notificationTypeBy
+    }
+
+    By getNotificationType() {
+        notificationTypeBy
+    }
+}
+
+enum NotificationEvent {
+    SUCCESS(By.cssSelector('#job-notifications-onsuccess > .list-group-item:first-child > button')),
+    START(By.cssSelector('#job-notifications-onstart > .list-group-item:first-child > button')),
+    FAILURE(By.cssSelector('#job-notifications-onfailure > .list-group-item:first-child > button')),
+    RETRY(By.cssSelector('#job-notifications-onretryablefailure > .list-group-item:first-child > button')),
+    AVERAGE(By.cssSelector('#job-notifications-onavgduration > .list-group-item:first-child > button'))
+
+    private By notificationEventBy
+
+    NotificationEvent(By notificationEventBy) {
+        this.notificationEventBy = notificationEventBy
+    }
+
+    By getNotificationEvent() {
+        notificationEventBy
+    }
+}
+
+enum StepType {
+    NODE("data-node-step-type"),
+    WORKFLOW("data-step-type")
+
+    private String stepType
+
+    StepType(String stepType) {
+        this.stepType = stepType
+    }
+
+    String getStepType() {
+        return stepType
+    }
+}
+
+enum StepName {
+    COMMAND("command"),
+    SCRIPT("script")
+
+    private String stepName
+
+    StepName(String stepName) {
+        this.stepName = stepName
+    }
+
+    String getStepName() {
+        return stepName
+    }
+}
+
+enum JobTab {
+
+    DETAILS("Details"),
+    WORKFLOW("Workflow"),
+    NODES("Nodes"),
+    SCHEDULE("Schedule"),
+    NOTIFICATIONS("Notifications"),
+    EXECUTION_PLUGINS("Execution Plugins"),
+    OTHER("Other")
+
+    private String tabName
+
+    JobTab(String tabName) {
+        this.tabName = tabName
+    }
+
+    String getTabName() {
+        return tabName
+    }
+
+}

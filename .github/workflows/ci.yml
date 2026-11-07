@@ -1,0 +1,123 @@
+# ci.yml — the fast gate (MISSION §7 "Heavy verification": fmt, clippy, tests, deny, audit, ui lint/test + e2e).
+# Runs exactly the Makefile targets of `make check` (CLAUDE.md "Commands"), so a green CI means `make check` is green.
+# Branch filter: only `main` — the lock branch `autopilot-lock` carries no code and never triggers CI (MISSION §7).
+# Action pinning: full version tags (actions/checkout@v4 ...). Commit SHAs would be stricter, but this session's GitHub
+# access is scoped to this repository and cannot resolve third-party tags to SHAs; pin SHAs in Phase 6 (hardening).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: never
+
+jobs:
+  rust:
+    name: rust (fmt, clippy, nextest, deny, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # dtolnay/rust-toolchain installs the channel given in `toolchain`; we read it from rust-toolchain.toml so the
+      # pin lives in one place (rustup would also honor the file, this just pre-installs the components).
+      - name: Read rust-toolchain.toml
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          components=$(sed -n 's/^components *= *\[\(.*\)\]/\1/p' rust-toolchain.toml | tr -d ' "')
+          [ -n "$channel" ] || { echo "rust-toolchain.toml has no channel"; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "components=$components" >> "$GITHUB_OUTPUT"
+          echo "toolchain $channel, components $components"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: ${{ steps.toolchain.outputs.components }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny,cargo-audit
+
+      - run: make fmt-check
+      - run: make clippy
+      - run: make test
+      - run: make deny
+      - run: make audit
+
+  ui:
+    name: ui (lint, vitest, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm/action-setup reads the exact version from ui/package.json "packageManager" (no `version` input here).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: make ui-install
+      - run: make ui-lint
+      - run: make ui-test
+      - run: make ui-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  e2e:
+    name: e2e (Playwright journeys + screenshots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: ui
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: make ui-install
+      - name: Install Playwright chromium
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: ui
+      # ui/playwright.config.ts builds and serves the SPA itself (webServer: `pnpm build && pnpm preview`).
+      - run: make e2e
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: ui/playwright-report
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload UI review screenshots (docs/ui-review/phase-0)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-review-phase-0
+          path: docs/ui-review/phase-0
+          if-no-files-found: warn
+          retention-days: 30

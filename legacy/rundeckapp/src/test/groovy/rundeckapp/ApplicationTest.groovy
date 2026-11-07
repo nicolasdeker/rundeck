@@ -1,0 +1,286 @@
+/*
+ * Copyright 2018 Rundeck, Inc. (http://rundeck.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package rundeckapp
+
+import org.rundeck.app.bootstrap.PreBootstrap
+import org.springframework.core.env.Environment
+import org.springframework.core.env.MutablePropertySources
+import org.springframework.core.env.StandardEnvironment
+import rundeckapp.init.RundeckInitConfig
+import rundeckapp.init.RundeckInitializer
+import spock.lang.Ignore
+import spock.lang.Specification
+import spock.lang.Unroll
+
+class ApplicationTest extends Specification {
+
+    def "setEnvironment with both property file and groovy"() {
+
+        when:
+        File tmpCfgDir = File.createTempDir()
+        File tmpGroovy = new File(tmpCfgDir, "rundeck-config.groovy")
+        tmpGroovy << "grails { mail {} } "
+        File tmpProp = File.createTempFile("app-test",".properties")
+        tmpProp << "myprop=avalue"
+        System.setProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION,tmpProp.absolutePath)
+        System.setProperty(RundeckInitConfig.SYS_PROP_RUNDECK_SERVER_CONFIG_DIR,tmpCfgDir.absolutePath)
+
+        Application.rundeckConfig = new RundeckInitConfig()
+        Properties runtimeProps = new Properties()
+        runtimeProps.setProperty(RundeckInitializer.PROP_REALM_LOCATION,"fake")
+        runtimeProps.setProperty(RundeckInitializer.PROP_LOGINMODULE_NAME,"fake")
+        Application.rundeckConfig.runtimeConfiguration = runtimeProps
+        Application.prebootstrapSucceeded = true
+        Application app = new Application()
+        TestEnvironment env = new TestEnvironment()
+
+        app.setEnvironment(env)
+        List<String> propertiesLoaded = env.propertySources.iterator().collect { it.name }
+
+        then:
+        propertiesLoaded.size() == 3
+        propertiesLoaded.contains("hardcoded-rundeck-props")
+        propertiesLoaded.contains("rundeck.config.location")
+        propertiesLoaded.contains("rundeck-config-groovy")
+
+        cleanup:
+        System.clearProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION)
+        Application.prebootstrapSucceeded = null
+    }
+
+    def "setEnvironment adds liquibase migration prop with migration cli option"() {
+
+        when:
+        Application.rundeckConfig = new RundeckInitConfig()
+        Application.rundeckConfig.cliOptions.migrate = true
+        Properties runtimeProps = new Properties()
+        runtimeProps.setProperty(RundeckInitializer.PROP_REALM_LOCATION,"fake")
+        runtimeProps.setProperty(RundeckInitializer.PROP_LOGINMODULE_NAME,"fake")
+        Application.rundeckConfig.runtimeConfiguration = runtimeProps
+        Application.prebootstrapSucceeded = true
+        Application app = new Application()
+        TestEnvironment env = new TestEnvironment()
+
+        app.setEnvironment(env)
+        List<String> propertiesLoaded = env.propertySources.iterator().collect { it.name }
+
+        then:
+        propertiesLoaded.contains("ensure-migration-flag")
+
+        cleanup:
+        Application.prebootstrapSucceeded = null
+    }
+
+    def "loadRundeckPropertySources aborts on a prior failed prebootstrap even though rundeckConfig is already non-null"() {
+        // Regression test: rundeckConfig != null doesn't mean prebootstrap succeeded --
+        // InitializeRundeckPreboostrap assigns it before finishing initialization, and other callers
+        // (RundeckWebAppInitializer, main()) can run prebootstrap first and leave it non-null but
+        // broken. loadRundeckPropertySources must check prebootstrapSucceeded, not rundeckConfig.
+        given:
+        def previousRundeckConfig = Application.rundeckConfig
+        def previousPrebootstrapSucceeded = Application.prebootstrapSucceeded
+        Application.rundeckConfig = new RundeckInitConfig()
+        Application.prebootstrapSucceeded = false
+
+        when:
+        Application.loadRundeckPropertySources(new TestEnvironment())
+
+        then:
+        thrown(IllegalStateException)
+
+        cleanup:
+        Application.rundeckConfig = previousRundeckConfig
+        Application.prebootstrapSucceeded = previousPrebootstrapSucceeded
+    }
+
+    def "load default rundeck-config.groovy if file exist and RDECK_CONFIG_LOCATION not set"() {
+
+        when:
+        File defaultGroovy = File.createTempFile("rundeck-config",".groovy")
+        defaultGroovy << "grails { mail {} } "
+        Application app = new Application()
+        TestEnvironment env = new TestEnvironment()
+        app.loadGroovyRundeckConfigIfExists(env)
+
+        List<String> propertiesLoaded = env.propertySources.iterator().collect { it.name }
+
+        then:
+        propertiesLoaded.size() == 1
+        propertiesLoaded.contains("rundeck-config-groovy")
+
+    }
+
+    def "load my-custom-file.groovy as rundeck-config-groovy if set in system property RDECK_CONFIG_LOCATION"() {
+
+        when:
+        File customGroovy = File.createTempFile("my-custom-file",".groovy")
+        customGroovy.deleteOnExit()
+        customGroovy << 'grails.customvalue = "loaded-from-custom" '
+        System.setProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION,customGroovy.absolutePath)
+
+        Application app = new Application()
+        TestEnvironment env = new TestEnvironment()
+        app.loadGroovyRundeckConfigIfExists(env)
+
+        def groovyConfigSource = env.propertySources.iterator().find { it.name == "rundeck-config-groovy" }
+
+        then:
+        groovyConfigSource != null
+        groovyConfigSource.source.get("grails.customvalue") == "loaded-from-custom"
+
+        cleanup:
+        System.clearProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION)
+
+    }
+
+    def "load my-custom-file.groovy over default rundeck-config.groovy if both exist and RDECK_CONFIG_LOCATION is set"() {
+
+        when:
+        File tmpCfgDir = File.createTempDir()
+        File defaultGroovy = new File(tmpCfgDir, "rundeck-config.groovy")
+        File customGroovy = File.createTempFile("my-custom-file",".groovy")
+        customGroovy.deleteOnExit()
+        defaultGroovy << 'grails.customvalue = "loaded-from-default" '
+        customGroovy << 'grails.customvalue = "loaded-from-custom" '
+
+        System.setProperty(RundeckInitConfig.SYS_PROP_RUNDECK_SERVER_CONFIG_DIR,tmpCfgDir.absolutePath)
+        System.setProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION,customGroovy.absolutePath)
+        Application app = new Application()
+        TestEnvironment env = new TestEnvironment()
+        app.loadGroovyRundeckConfigIfExists(env)
+
+        def groovyConfigSource = env.propertySources.iterator().find { it.name == "rundeck-config-groovy" }
+
+        then:
+        groovyConfigSource != null
+        groovyConfigSource.source.get("grails.customvalue") == "loaded-from-custom"
+
+        cleanup:
+        System.clearProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION)
+        System.clearProperty(RundeckInitConfig.SYS_PROP_RUNDECK_SERVER_CONFIG_DIR)
+        defaultGroovy.delete()
+        tmpCfgDir.delete()
+
+    }
+
+    def "grails.serverURL set in a .groovy config file is resolvable as a literal dotted key"() {
+        // Regression test for https://github.com/rundeck/rundeck/issues/10416:
+        // grails.* namespaced keys in a rundeck-config.groovy file were silently ignored
+        // because the nested ConfigObject was wrapped in a MapPropertySource, and a literal
+        // Environment.getProperty("grails.serverURL") lookup does a plain Map.get() against
+        // the property source, which only had a nested "grails" -> "serverURL" key, not a
+        // literal "grails.serverURL" key. The property source's backing Map must expose a
+        // literal "grails.serverURL" key for that direct lookup to succeed.
+
+        when:
+        File customGroovy = File.createTempFile("my-custom-file",".groovy")
+        customGroovy.deleteOnExit()
+        customGroovy << '''
+            grails.serverURL = "https://rundeck.example.com"
+            dataSource.url = "jdbc:mysql://host:3307/rundeck"
+        '''
+        System.setProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION,customGroovy.absolutePath)
+
+        Application app = new Application()
+        TestEnvironment env = new TestEnvironment()
+        app.loadGroovyRundeckConfigIfExists(env)
+
+        def groovyConfigSource = env.propertySources.iterator().find { it.name == "rundeck-config-groovy" }
+
+        then:
+        groovyConfigSource != null
+        groovyConfigSource.source.get("grails.serverURL") == "https://rundeck.example.com"
+        groovyConfigSource.source.get("dataSource.url") == "jdbc:mysql://host:3307/rundeck"
+
+        cleanup:
+        System.clearProperty(RundeckInitConfig.SYS_PROP_RUNDECK_CONFIG_LOCATION)
+
+    }
+
+    def "RunPreboostrap"() {
+        when:
+        def error = Application.runPrebootstrap()
+        then:
+        System.getProperty("TestPreboostrap") == "ran successfully"
+        !error
+    }
+
+    def "Detect Prebootstrap Error"() {
+        given:
+        def failingFunctions = [new FailingPrebootrapFunction()]
+
+        when:
+        boolean error = false
+        failingFunctions.sort { a, b -> a.order <=> b.order }
+        failingFunctions.each { pbs ->
+            try {
+                pbs.run()
+            } catch (Exception ex) {
+                error = true
+            }
+        }
+
+        then:
+        error
+    }
+
+    def "report startup failure in migration mode"() {
+        given:
+        int actual = -404
+        Application.exitWithCodeOverride = { Integer code ->
+            actual = code
+        }
+        Application.execRunAppOverride = { String[] args ->
+            throw new RuntimeException("something failed in the startup")
+        }
+
+        when:
+        Application.main(["-m"] as String[])
+
+        then:
+        actual == 1
+
+        cleanup:
+        Application.exitWithCodeOverride = null
+        Application.execRunAppOverride = null
+    }
+
+
+    static class FailingPrebootrapFunction implements PreBootstrap {
+
+        @Override
+        void run() {
+            throw new RuntimeException("fail")
+        }
+
+        @Override
+        float getOrder() {
+            return 0
+        }
+    }
+
+
+    class TestEnvironment extends StandardEnvironment {
+        MutablePropertySources propertySources = new MutablePropertySources()
+
+        @Override
+        public MutablePropertySources getPropertySources() {
+            return this.propertySources;
+        }
+
+    }
+
+}

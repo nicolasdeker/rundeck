@@ -1,0 +1,949 @@
+import { shallowMount } from "@vue/test-utils";
+import PluginConfig from "../pluginConfig.vue";
+import PluginPropView from "../pluginPropView.vue";
+import PluginPropEdit from "../pluginPropEdit.vue";
+
+jest.mock("@/library/modules/rundeckClient", () => ({
+  client: jest.fn(),
+}));
+
+jest.mock("@/library/rundeckService", () => ({
+  getRundeckContext: jest.fn().mockReturnValue({
+    rootStore: {
+      plugins: {
+        getPluginDetail: jest.fn().mockResolvedValue({ props: [] }),
+      },
+    },
+  }),
+}));
+
+jest.mock("@/library/modules/pluginService", () => ({
+  getPluginProvidersForService: jest.fn().mockResolvedValue({
+    service: true,
+    descriptions: [],
+    labels: [],
+  }),
+}));
+
+jest.mock("@/library/modules/InputUtils", () => ({
+  cleanConfigInput: jest.fn((v) => v),
+  convertArrayInput: jest.fn((v) => v),
+}));
+
+interface MountOptions {
+  props?: Record<string, any>;
+  slots?: Record<string, string>;
+}
+
+const createWrapper = async (options: MountOptions = {}) => {
+  const wrapper = shallowMount(PluginConfig, {
+    props: {
+      mode: "create",
+      modelValue: { type: "test-plugin", config: {} },
+      pluginConfig: { props: [] },
+      ...options.props,
+    },
+    slots: { ...options.slots },
+    global: {
+      stubs: {
+        PluginInfo: true,
+        PluginPropView: true,
+        PluginPropEdit: true,
+      },
+    },
+  });
+  await wrapper.vm.$nextTick();
+  return wrapper;
+};
+
+describe("PluginConfig", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe("mode-based rendering", () => {
+    it("renders PluginPropView for each prop that has a value in config in show mode", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "show",
+          config: { host: "localhost" },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findAllComponents(PluginPropView)).toHaveLength(1);
+    });
+
+    it("renders a form field for each prop in edit mode", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "host", type: "String", options: {} },
+              { name: "port", type: "Integer", options: {} },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        true,
+      );
+      expect(wrapper.find('[data-testid="prop-field-port"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("does not render form fields in show mode", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "show",
+          config: {},
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("extraProperties slot ordering", () => {
+    it("renders the extraProperties slot before the props in show mode, matching edit mode's order", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "show",
+          config: { host: "localhost" },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+        slots: {
+          extraProperties: '<div data-testid="extra-properties-slot"></div>',
+        },
+      });
+
+      const extra = wrapper.find(
+        '[data-testid="extra-properties-slot"]',
+      ).element;
+      const prop = wrapper.find('[data-testid="configprop-host"]').element;
+
+      expect(
+        !!(
+          extra.compareDocumentPosition(prop) & Node.DOCUMENT_POSITION_FOLLOWING
+        ),
+      ).toBe(true);
+    });
+
+    it("renders the extraProperties slot before the props form fields in edit mode", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+        slots: {
+          extraProperties: '<div data-testid="extra-properties-slot"></div>',
+        },
+      });
+
+      const extra = wrapper.find(
+        '[data-testid="extra-properties-slot"]',
+      ).element;
+      const prop = wrapper.find('[data-testid="prop-field-host"]').element;
+
+      expect(
+        !!(
+          extra.compareDocumentPosition(prop) & Node.DOCUMENT_POSITION_FOLLOWING
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe("scope-based field visibility", () => {
+    it("renders props that have no scope constraint regardless of the component scope", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          scope: "Instance",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("hides props scoped to Framework when the component scope is Instance", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          scope: "Instance",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "host", type: "String", scope: "Framework", options: {} },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        false,
+      );
+    });
+
+    it("shows props scoped to InstanceOnly when the component scope is Instance", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          scope: "Instance",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "host",
+                type: "String",
+                scope: "InstanceOnly",
+                options: {},
+              },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("shows Project-scoped props when the component scope is Framework", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          scope: "Framework",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "host", type: "String", scope: "Project", options: {} },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("hides Instance-scoped props when the component scope is Framework", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          scope: "Framework",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "host",
+                type: "String",
+                scope: "InstanceOnly",
+                options: {},
+              },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        false,
+      );
+    });
+
+    it("shows props with Unspecified scope regardless of the component scope", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          scope: "Instance",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "host",
+                type: "String",
+                scope: "Unspecified",
+                options: {},
+              },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        true,
+      );
+    });
+  });
+
+  describe("property grouping", () => {
+    it("renders ungrouped props directly in the form without a details section", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-section-Auth"]').exists()).toBe(
+        false,
+      );
+      expect(wrapper.find('[data-testid="prop-field-host"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("renders named group props inside a collapsible details section", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "user", type: "String", options: { groupName: "Auth" } },
+              { name: "pass", type: "String", options: { groupName: "Auth" } },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-section-Auth"]').exists()).toBe(
+        true,
+      );
+      expect(wrapper.find('[data-testid="prop-field-user"]').exists()).toBe(
+        true,
+      );
+      expect(wrapper.find('[data-testid="prop-field-pass"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("renders a primary named group as an open details section", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "user", type: "String", options: { groupName: "Auth" } },
+            ],
+          },
+        },
+      });
+
+      // open=!group.secondary=!false → open="" (HTML boolean attribute)
+      expect(
+        wrapper.find('[data-testid="prop-section-Auth"]').attributes("open"),
+      ).toBe("");
+    });
+
+    it("renders a secondary group as a collapsed details section by default", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "extra", type: "String", options: { grouping: true } },
+            ],
+          },
+        },
+      });
+
+      // open=!group.secondary=!true → open not set (collapsed)
+      expect(
+        wrapper.find('[data-testid="prop-section--"]').attributes("open"),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("hidden props", () => {
+    it("renders a hidden input instead of a visible form field for HIDDEN display type props", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "secret",
+                type: "String",
+                options: { displayType: "HIDDEN" },
+              },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.find('[data-testid="prop-hidden-secret"]').exists()).toBe(
+        true,
+      );
+      expect(wrapper.find('[data-testid="prop-field-secret"]').exists()).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("show mode prop visibility", () => {
+    it("renders PluginPropView for a String prop that has a value in config", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "show",
+          config: { host: "localhost" },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findAllComponents(PluginPropView)).toHaveLength(1);
+    });
+
+    it("does not render PluginPropView for a String prop with no value in config", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "show",
+          config: {},
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findAllComponents(PluginPropView)).toHaveLength(0);
+    });
+
+    it("always renders PluginPropView for a Boolean prop even when not present in config", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "show",
+          config: {},
+          pluginConfig: {
+            props: [{ name: "enabled", type: "Boolean", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findAllComponents(PluginPropView)).toHaveLength(1);
+    });
+  });
+
+  describe("input initialization", () => {
+    it("passes an array to PluginPropEdit for an Options prop with a comma-separated string value", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: { tags: "red, blue, green" } },
+          pluginConfig: {
+            props: [{ name: "tags", type: "Options", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findComponent(PluginPropEdit).props("modelValue")).toEqual(
+        ["red", "blue", "green"],
+      );
+    });
+
+    it("passes an empty array to PluginPropEdit for an Options prop with no value in config", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "tags", type: "Options", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findComponent(PluginPropEdit).props("modelValue")).toEqual(
+        [],
+      );
+    });
+
+    it("passes an empty string to PluginPropEdit for an undefined Select prop", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "strategy", type: "Select", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findComponent(PluginPropEdit).props("modelValue")).toBe(
+        "",
+      );
+    });
+
+    it("converts a string 'true' Boolean config value to a real boolean for the form", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: { enabled: "true" } },
+          pluginConfig: {
+            props: [{ name: "enabled", type: "Boolean", options: {} }],
+          },
+        },
+      });
+
+      expect(wrapper.findComponent(PluginPropEdit).props("modelValue")).toBe(
+        true,
+      );
+    });
+
+    it("applies the prop default value in create mode when no config value exists", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "create",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "timeout",
+                type: "String",
+                defaultValue: "30",
+                options: {},
+              },
+            ],
+          },
+        },
+      });
+
+      expect(wrapper.findComponent(PluginPropEdit).props("modelValue")).toBe(
+        "30",
+      );
+    });
+
+    it("does not apply the prop default in edit mode when no config value exists", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "timeout",
+                type: "String",
+                defaultValue: "30",
+                options: {},
+              },
+            ],
+          },
+        },
+      });
+
+      // Default must not be applied — value should be absent/empty, not "30"
+      expect(
+        wrapper.findComponent(PluginPropEdit).props("modelValue"),
+      ).not.toBe("30");
+    });
+  });
+
+  describe("STATIC_TEXT props", () => {
+    // Regression tests for https://github.com/rundeck/rundeck/issues/10420:
+    // WorkflowStrategy's "info" property is a STATIC_TEXT/display-only help table
+    // (rendered from prop.staticTextDefaultValue, never user-editable). It was
+    // being seeded from prop.defaultValue in create mode and then persisted into
+    // the saved job config as literal HTML, polluting exported YAML and causing
+    // spurious SCM diffs.
+    it("does not seed a STATIC_TEXT prop with its default value in create mode", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "create",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "info",
+                type: "String",
+                defaultValue: "<table><tr><td>1.</td></tr></table>",
+                options: { displayType: "STATIC_TEXT" },
+              },
+            ],
+          },
+        },
+      });
+
+      expect(
+        wrapper.findComponent(PluginPropEdit).props("modelValue"),
+      ).toBeFalsy();
+    });
+
+    it("never includes a STATIC_TEXT prop in the exported config payload", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "create",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "info",
+                type: "String",
+                defaultValue: "<table><tr><td>1.</td></tr></table>",
+                options: { displayType: "STATIC_TEXT" },
+              },
+              { name: "host", type: "String", options: {} },
+            ],
+          },
+        },
+      });
+
+      // trigger the exportInputs/update:modelValue path via an edit to a non-STATIC_TEXT field
+      await wrapper
+        .findAllComponents(PluginPropEdit)[1]
+        .vm.$emit("update:modelValue", "localhost");
+      await wrapper.vm.$nextTick();
+
+      const emitted = wrapper.emitted("update:modelValue");
+      expect(emitted).toBeTruthy();
+      for (const call of emitted!) {
+        expect((call[0] as any).config).not.toHaveProperty("info");
+      }
+    });
+
+    it("strips an already-persisted STATIC_TEXT value out of the exported config (self-heals legacy data)", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: {
+            type: "test",
+            config: { info: "<table><tr><td>1.</td></tr></table>" },
+          },
+          pluginConfig: {
+            props: [
+              {
+                name: "info",
+                type: "String",
+                options: { displayType: "STATIC_TEXT" },
+              },
+              { name: "host", type: "String", options: {} },
+            ],
+          },
+        },
+      });
+
+      // trigger the exportInputs/update:modelValue path via an edit to an unrelated field
+      await wrapper
+        .findAllComponents(PluginPropEdit)[1]
+        .vm.$emit("update:modelValue", "localhost");
+      await wrapper.vm.$nextTick();
+
+      const emitted = wrapper.emitted("update:modelValue")!;
+      expect((emitted[emitted.length - 1][0] as any).config).not.toHaveProperty(
+        "info",
+      );
+    });
+  });
+
+  describe("AutogenInstanceId props", () => {
+    // AutogenInstanceId props (e.g. the Node Wizard "wizard-id") are rendered as
+    // STATIC_TEXT but carry a generated id that is real config: it must be seeded
+    // in create mode (which also marks the parent form as modified) and exported.
+    // Built per test: loadPluginData() mutates prop objects in place.
+    const autogenProp = () => ({
+      name: "wizard-id",
+      type: "AutogenInstanceId",
+      defaultValue: "",
+      options: { displayType: "STATIC_TEXT" },
+    });
+
+    it("seeds a generated id in create mode and emits it in the config payload", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "create",
+          modelValue: { type: "node-wizard", config: {} },
+          pluginConfig: { props: [autogenProp()] },
+        },
+      });
+
+      const emitted = wrapper.emitted("update:modelValue");
+      expect(emitted).toBeTruthy();
+      const config = (emitted![emitted!.length - 1][0] as any).config;
+      expect(typeof config["wizard-id"]).toBe("string");
+      expect(config["wizard-id"].length).toBeGreaterThan(0);
+    });
+
+    it("keeps an existing id in the exported config in edit mode", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: {
+            type: "node-wizard",
+            config: { "wizard-id": "abc123" },
+          },
+          pluginConfig: {
+            props: [
+              autogenProp(),
+              { name: "host", type: "String", options: {} },
+            ],
+          },
+        },
+      });
+
+      await wrapper
+        .findAllComponents(PluginPropEdit)[1]
+        .vm.$emit("update:modelValue", "localhost");
+      await wrapper.vm.$nextTick();
+
+      const emitted = wrapper.emitted("update:modelValue")!;
+      expect((emitted[emitted.length - 1][0] as any).config["wizard-id"]).toBe(
+        "abc123",
+      );
+    });
+  });
+
+  describe("boolean export", () => {
+    it("emits the string 'true' in the config payload when a Boolean field is set to true", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "enabled", type: "Boolean", options: {} }],
+          },
+        },
+      });
+
+      await wrapper
+        .findComponent(PluginPropEdit)
+        .vm.$emit("update:modelValue", true);
+      await wrapper.vm.$nextTick();
+
+      const emitted = wrapper.emitted("update:modelValue");
+      expect(emitted).toHaveLength(1);
+      expect((emitted![0][0] as any).config.enabled).toBe("true");
+    });
+
+    it("emits the string 'false' in the config payload when a Boolean with a true default is set to false", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              {
+                name: "enabled",
+                type: "Boolean",
+                defaultValue: "true",
+                options: {},
+              },
+            ],
+          },
+        },
+      });
+
+      await wrapper
+        .findComponent(PluginPropEdit)
+        .vm.$emit("update:modelValue", false);
+      await wrapper.vm.$nextTick();
+
+      const emitted = wrapper.emitted("update:modelValue");
+      expect((emitted![emitted!.length - 1][0] as any).config.enabled).toBe(
+        "false",
+      );
+    });
+
+    it("emits the string 'false' in the config payload when a Boolean with no true default is explicitly set to false", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [{ name: "enabled", type: "Boolean", options: {} }],
+          },
+        },
+      });
+
+      await wrapper
+        .findComponent(PluginPropEdit)
+        .vm.$emit("update:modelValue", false);
+      await wrapper.vm.$nextTick();
+
+      const emitted = wrapper.emitted("update:modelValue")!;
+      expect(emitted![emitted.length - 1][0]).toEqual(
+        expect.objectContaining({
+          config: expect.objectContaining({ enabled: "false" }),
+        }),
+      );
+    });
+
+    it("preserves 'false' through a round-trip when a Boolean prop with no default is loaded from config as 'false'", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: { extraQuotes: "false" } },
+          pluginConfig: {
+            props: [{ name: "extraQuotes", type: "Boolean", options: {} }],
+          },
+        },
+      });
+
+      const emitted = wrapper.emitted("update:modelValue")!;
+      expect(emitted).toBeDefined();
+      expect(emitted[emitted.length - 1][0]).toEqual(
+        expect.objectContaining({
+          config: expect.objectContaining({ extraQuotes: "false" }),
+        }),
+      );
+    });
+  });
+
+  describe("validation state", () => {
+    it("applies the required class to the form group when the prop is marked required", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          pluginConfig: {
+            props: [
+              { name: "host", type: "String", required: true, options: {} },
+            ],
+          },
+        },
+      });
+
+      expect(
+        wrapper.find('[data-testid="prop-field-host"]').classes(),
+      ).toContain("required");
+    });
+
+    it("applies the has-error class when validation errors exist for a prop", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          validation: { valid: false, errors: { host: "is required" } },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(
+        wrapper.find('[data-testid="prop-field-host"]').classes(),
+      ).toContain("has-error");
+    });
+
+    it("does not apply the has-error class when there are no validation errors", async () => {
+      const wrapper = await createWrapper({
+        props: {
+          mode: "edit",
+          modelValue: { type: "test", config: {} },
+          validation: { valid: true, errors: {} },
+          pluginConfig: {
+            props: [{ name: "host", type: "String", options: {} }],
+          },
+        },
+      });
+
+      expect(
+        wrapper.find('[data-testid="prop-field-host"]').classes(),
+      ).not.toContain("has-error");
+    });
+  });
+
+  describe("dynamic select values — regression for RUN-4764", () => {
+    it("exposes map keys as allowed values so the submitted value is the code, not the label", async () => {
+      const wrapper = await createWrapper();
+
+      (wrapper.vm as any).loadPluginData({
+        props: [{ name: "urgency", type: "FreeSelect", options: {} }],
+        dynamicProps: { urgency: { "1": "1 - High", "3": "3 - Low" } },
+      });
+      await wrapper.vm.$nextTick();
+
+      const prop = (wrapper.vm as any).props.find(
+        (p: any) => p.name === "urgency",
+      );
+      expect(prop.allowed).toEqual(["1", "3"]);
+      expect(prop.selectLabels).toEqual({ "1": "1 - High", "3": "3 - Low" });
+    });
+
+    it("drops map-derived labels when the same prop is reloaded with a list", async () => {
+      const wrapper = await createWrapper();
+      const props = [{ name: "urgency", type: "FreeSelect", options: {} }];
+
+      (wrapper.vm as any).loadPluginData({
+        props,
+        dynamicProps: { urgency: { "1": "1 - High" } },
+      });
+      await wrapper.vm.$nextTick();
+      expect(props[0]).toHaveProperty("selectLabels", { "1": "1 - High" });
+
+      // loadPluginData runs again over the very same prop objects when it is
+      // called with the pluginConfig prop.
+      (wrapper.vm as any).loadPluginData({
+        props,
+        dynamicProps: { urgency: ["High", "Low"] },
+      });
+      await wrapper.vm.$nextTick();
+
+      expect((props[0] as any).allowed).toEqual(["High", "Low"]);
+      expect((props[0] as any).selectLabels).toBeUndefined();
+    });
+
+    it("keeps labels the descriptor supplied when dynamic values are a list", async () => {
+      const wrapper = await createWrapper();
+      const descriptorLabels = { High: "Very high" };
+      const props = [
+        {
+          name: "urgency",
+          type: "FreeSelect",
+          options: {},
+          selectLabels: descriptorLabels,
+        },
+      ];
+
+      (wrapper.vm as any).loadPluginData({
+        props,
+        dynamicProps: { urgency: ["High", "Low"] },
+      });
+      await wrapper.vm.$nextTick();
+
+      expect((props[0] as any).selectLabels).toEqual(descriptorLabels);
+    });
+
+    it("leaves list-style dynamic values untouched", async () => {
+      const wrapper = await createWrapper();
+
+      (wrapper.vm as any).loadPluginData({
+        props: [{ name: "assignmentGroup", type: "FreeSelect", options: {} }],
+        dynamicProps: { assignmentGroup: ["App Support", "Network Ops"] },
+      });
+      await wrapper.vm.$nextTick();
+
+      const prop = (wrapper.vm as any).props.find(
+        (p: any) => p.name === "assignmentGroup",
+      );
+      expect(prop.allowed).toEqual(["App Support", "Network Ops"]);
+      expect(prop.selectLabels).toBeUndefined();
+    });
+  });
+});

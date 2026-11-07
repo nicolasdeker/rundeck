@@ -1,0 +1,842 @@
+<template>
+  <div
+    ref="root"
+    class="execution-log"
+    :class="[`execution-log--${colorTheme}`]"
+    data-testid="log-viewer"
+  >
+    <RdDrawer
+      title="Settings"
+      placement="left"
+      :mask="false"
+      :visible="settingsVisible"
+      :closable="true"
+      :get-container="false"
+      :wrap-style="{ position: 'absolute' }"
+      @close="closeSettings"
+    >
+      <form style="padding: 10px" data-testid="log-viewer-settings-form">
+        <div class="form-group">
+          <label>Theme</label>
+          <select
+            v-model="settings.theme"
+            class="form-control select"
+            data-testid="log-viewer-theme-select"
+          >
+            <option
+              v-for="themeOpt in themes"
+              :key="themeOpt.value"
+              :value="themeOpt.value"
+            >
+              {{ themeOpt.label }}
+            </option>
+          </select>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_gutter"
+            v-model="settings.gutter"
+            type="checkbox"
+          />
+          <label for="logview_gutter">Display Gutter</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_timestamps"
+            v-model="settings.timestamps"
+            type="checkbox"
+          />
+          <label for="logview_timestamps">Display Timestamps</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_command"
+            v-model="settings.command"
+            type="checkbox"
+          />
+          <label for="logview_command">Display Command</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_nodeBadge"
+            v-model="settings.nodeBadge"
+            type="checkbox"
+          />
+          <label for="logview_nodeBadge">Display Node Badge</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_ansiColor"
+            v-model="settings.ansiColor"
+            type="checkbox"
+          />
+          <label for="logview_ansiColor">Render ANSI Colors</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_lineWrap"
+            v-model="settings.lineWrap"
+            type="checkbox"
+          />
+          <label for="logview_lineWrap">Wrap Long Lines</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_stats"
+            v-model="settings.stats"
+            type="checkbox"
+            data-testid="log-viewer-stats-checkbox"
+          />
+          <label for="logview_stats">Display Stats</label>
+        </div>
+        <div class="checkbox">
+          <input
+            id="logview_hideIncomplete"
+            type="checkbox"
+            data-testid="log-viewer-hide-incomplete-checkbox"
+            :checked="hideIncompleteNodes"
+            :disabled="!hideIncompleteApplies"
+            :title="$t('hideIncompleteNodesDescription')"
+            @change="onHideIncompleteCheckboxChange"
+          />
+          <label for="logview_hideIncomplete">{{
+            $t("hideIncompleteNodes")
+          }}</label>
+        </div>
+        <ui-socket
+          section="execution-log-viewer"
+          location="settings"
+          :event-bus="eventBus"
+        />
+      </form>
+    </RdDrawer>
+    <div
+      ref="scroller"
+      class="execution-log__scroller"
+      :class="{
+        'execution-log--no-transition': logLines > 1000,
+        'ansicolor-on': settings.ansiColor,
+      }"
+      :style="
+        node ? { height: '600px', flex: 'none', overflowY: 'hidden' } : {}
+      "
+    >
+      <div ref="log" class="execution-log__scroller-item-container">
+        <div
+          v-if="showSettings"
+          class="execution-log__settings"
+          style="margin-left: 5px; margin-right: 5px"
+          data-testid="log-viewer-toolbar"
+        >
+          <btn-group>
+            <btn
+              size="xs"
+              data-testid="log-viewer-settings-btn"
+              @click="toggleSettings"
+            >
+              <i class="fas fa-cog" />Settings
+            </btn>
+            <btn
+              size="xs"
+              data-testid="log-viewer-follow-btn"
+              @click="toggleFollow"
+            >
+              <i
+                :class="[followIcon]"
+                data-testid="log-viewer-follow-icon"
+              />Follow
+            </btn>
+          </btn-group>
+          <transition name="fade">
+            <div
+              v-if="showProgress"
+              class="execution-log__progress-bar"
+              data-testid="log-viewer-progress-bar"
+            >
+              <progress-bar
+                v-model="barProgress"
+                :type="progressType"
+                :label-text="progressText"
+                label
+                min-width
+                striped
+                active
+                data-testid="log-viewer-progress-bar-component"
+                @click="toggleProgressBar"
+              />
+            </div>
+          </transition>
+        </div>
+        <div
+          v-if="overSize"
+          class="execution-log__warning"
+          data-testid="log-viewer-oversize-warning"
+        >
+          <h3>
+            🐋 {{ +(logSize / 1048576).toFixed(2) }}MiB is a whale of a log! 🐋
+          </h3>
+          <h4>Select a download option above to avoid sinking the ship.</h4>
+          <h5>Log content may be truncated</h5>
+        </div>
+        <div
+          v-if="errorMessage"
+          class="execution-log__warning"
+          data-testid="log-viewer-error-message"
+        >
+          <h4>{{ errorMessage }}</h4>
+        </div>
+        <div
+          v-if="completed && logLines === 0"
+          class="execution-log__warning"
+          data-testid="log-viewer-no-output"
+        >
+          <h5>No output</h5>
+        </div>
+        <LogNodeChunk
+          v-if="!overSize"
+          ref="logEntryChunk"
+          class="execution-log__node-chunk"
+          :event-bus="eventBus"
+          :selected-line="selectedLineIdx"
+          :node="node"
+          :step-ctx="stepCtx"
+          :node-icon="settings.nodeBadge"
+          :max-line="2000"
+          :command="settings.command"
+          :time="settings.timestamps"
+          :gutter="settings.gutter"
+          :line-wrap="settings.lineWrap"
+          :entries="viewerEntries"
+          :jump-to-line="jumpToLine"
+          :jumped="jumped"
+          :follow="mfollow"
+          @line-select="handleLineSelect"
+          @jumped="jumped = true"
+          @follow-change="onNodeFollowChange"
+        />
+      </div>
+    </div>
+    <div v-if="settings.stats" class="stats" data-testid="log-viewer-stats">
+      <span
+        >Following:{{ mfollow }} Lines:{{
+          logLines.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+        }}
+        Size:{{ logSize }}b TotalTime:{{ totalTime / 1000 }}s</span
+      >
+    </div>
+  </div>
+</template>
+
+<script lang="ts">
+import { CancelToken } from "@esfx/canceltoken";
+import { autorun, IReactionDisposer } from "mobx";
+
+import { defineComponent } from "vue";
+import RdDrawer from "../containers/drawer/Drawer.vue";
+import UiSocket from "../utils/UiSocket.vue";
+import { EventBus } from "../../utilities/vueEventBus";
+import { Btn, BtnGroup, ProgressBar } from "uiv";
+import { PropType } from "vue";
+import LogNodeChunk from "./LogNodeChunk.vue";
+import { getRundeckContext } from "../../rundeckService";
+
+const CONFIG_STORAGE_KEY = "execution-viewer";
+const context = getRundeckContext();
+const rootStore = context.rootStore;
+
+interface IEventViewerSettings {
+  theme: string;
+  stats: boolean;
+  timestamps: boolean;
+  command: boolean;
+  gutter: boolean;
+  nodeBadge: boolean;
+  ansiColor: boolean;
+  lineWrap: boolean;
+}
+
+export default defineComponent({
+  name: "LogViewer",
+  components: {
+    LogNodeChunk,
+    UiSocket,
+    RdDrawer,
+    Btn,
+    BtnGroup,
+    ProgressBar,
+  },
+  props: {
+    executionId: {
+      type: String,
+      required: true,
+    },
+    node: {
+      type: String,
+      required: false,
+    },
+    stepCtx: {
+      type: String,
+      required: false,
+    },
+    showStats: {
+      type: Boolean,
+      required: false,
+      default: true,
+    },
+    showSettings: {
+      type: Boolean,
+      required: false,
+      default: true,
+    },
+    follow: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
+    jumpToLine: {
+      type: Number,
+      required: false,
+    },
+    theme: {
+      type: String,
+      required: false,
+      default: "dark",
+    },
+    maxLogSize: {
+      type: Number,
+      required: false,
+      default: 3145728,
+    },
+    trimOutput: {
+      type: Number,
+      required: false,
+    },
+    config: {
+      type: Object as PropType<IEventViewerSettings>,
+      required: false,
+    },
+    useUserSettings: {
+      type: Boolean,
+      required: false,
+      default: true,
+    },
+  },
+  emits: ["line-select", "line-deselect"],
+  data() {
+    return {
+      eventBus: window._rundeck.eventBus as typeof EventBus,
+      themes: [
+        { label: "Rundeck Theme", value: "rundeck" },
+        { label: "Light", value: "light" },
+        { label: "Dark", value: "dark" },
+        { label: "None", value: "none" },
+      ],
+      settings: {
+        theme: "rundeck",
+        stats: false,
+        timestamps: false,
+        command: true,
+        gutter: true,
+        ansiColor: true,
+        nodeBadge: true,
+        lineWrap: true,
+      },
+      consumeLogs: true,
+      completed: false,
+      errorMessage: "",
+      execCompleted: true,
+      settingsVisible: false,
+      overSize: false,
+      jumped: false,
+      mfollow: this.follow,
+      viewer: null,
+      logBuilder: null,
+      logEntries: [],
+      scrollCount: 0,
+      startTime: 0,
+      logSize: 0,
+      logLines: 0,
+      resp: null,
+      populateLogsProm: null,
+      cancelProgress: null,
+      nextProgress: 0,
+      scrollTolerance: 5,
+      batchSize: 200,
+      totalTime: 0,
+      progress: 0,
+      selected: null,
+      selectedLineIdx: null,
+      percentLoaded: 0,
+      entries: [],
+      entriesFromViewer: [],
+      viewerEntriesByNodeCtx: null,
+      viewerFilteredEntries: [] as any[],
+      autorunDisposer: null as IReactionDisposer | null,
+      hideIncompleteNodes: false,
+      hideIncompleteApplies: false,
+      incompleteNodeNames: [] as string[],
+      hideIncompleteStateListener: null as
+        | ((payload: {
+            hide?: boolean;
+            applies?: boolean;
+            nodeNames?: string[];
+          }) => void)
+        | null,
+    };
+  },
+  computed: {
+    settingsChange() {
+      return Object.assign({}, this.settings);
+    },
+    followIcon() {
+      return this.mfollow ? "fas fa-eye" : "fas fa-eye-slash";
+    },
+    barProgress() {
+      return this.execCompleted ? this.progress : 100;
+    },
+    progressType() {
+      return this.consumeLogs ? "info" : "warning";
+    },
+    progressText() {
+      const loadingText = `${this.barProgress}% ${this.consumeLogs ? "Pause" : "Resume"}`;
+      const runningText = `${this.consumeLogs ? "Pause" : "Resume"}`;
+
+      return this.execCompleted ? loadingText : runningText;
+    },
+    showProgress() {
+      return !this.completed || !this.execCompleted;
+    },
+    colorTheme() {
+      if (this.settings.theme == "rundeck") {
+        return rootStore.theme.theme;
+      }
+      return this.settings.theme;
+    },
+    viewerEntriesByNode() {
+      return this.viewer.entries.reduce((acc, entry) => {
+        return {
+          ...acc,
+          [entry.node]: [...(acc[entry.node] || []), entry],
+        };
+      }, {});
+    },
+    viewerEntries() {
+      if (this.viewer == null) {
+        return [];
+      }
+      const entries = this.node
+        ? this.viewerFilteredEntries
+        : this.entriesFromViewer;
+      if (
+        !this.hideIncompleteNodes ||
+        !this.incompleteNodeNames ||
+        this.incompleteNodeNames.length < 1
+      ) {
+        return entries;
+      }
+      const hidden = new Set(this.incompleteNodeNames);
+      return (entries || []).filter((entry) => !hidden.has(entry.node));
+    },
+  },
+  watch: {
+    settings: {
+      handler() {
+        if (this.useUserSettings && this.settingsVisible) {
+          this.saveConfig();
+        }
+      },
+      deep: true,
+    },
+    logSize(val: number) {
+      if (val > this.maxLogSize) {
+        this.overSize = true;
+        this.nextProgress = 100;
+        this.completed = true;
+      }
+    },
+    consumeLogs(val: boolean) {
+      if (val) this.updateProgress();
+      else if (this.cancelProgress) this.cancelProgress.cancel();
+
+      if (val && !this.populateLogsProm) {
+        this.populateLogsProm = this.populateLogs();
+      }
+    },
+    viewer: {
+      handler(newVal) {
+        this.entriesFromViewer = newVal.entries;
+      },
+      deep: true,
+    },
+  },
+  beforeMount() {
+    this.loadConfig();
+    // Capture the raw ExecutionOutput reference before Vue wraps it in a
+    // reactive proxy, so MobX can properly track ObservableGroupMap accesses
+    // inside the autorun callback.
+    const rawViewer = rootStore.executionOutputStore.createOrGet(
+      this.executionId,
+    );
+    this.viewer = rawViewer;
+    if (this.node) {
+      const node = this.node;
+      const stepCtx = this.stepCtx;
+      this.autorunDisposer = autorun(() => {
+        const filtered = rawViewer.getEntriesFiltered(node, stepCtx);
+        this.viewerFilteredEntries = filtered ? [...filtered] : [];
+      });
+    }
+  },
+  beforeUnmount() {
+    if (this.autorunDisposer) {
+      this.autorunDisposer();
+      this.autorunDisposer = null;
+    }
+    if (this.eventBus && this.hideIncompleteStateListener) {
+      this.eventBus.off(
+        "execution-hide-incomplete-nodes-state",
+        this.hideIncompleteStateListener,
+      );
+      this.hideIncompleteStateListener = null;
+    }
+  },
+  async mounted() {
+    await this.viewer.init();
+
+    this.startTime = Date.now();
+    // In node view the outer scroller has overflow:hidden and the DynamicScroller
+    // handles its own scrolling. Applying addScrollBlocker there would call
+    // ev.preventDefault() on bubbled wheel events and prevent the DynamicScroller
+    // from scrolling. The LogNodeChunk handles follow detection via its own scroll
+    // listener and emits 'follow-change' instead.
+    if (!this.node) {
+      this.addScrollBlocker();
+    }
+
+    this.updateProgress();
+
+    this.execCompleted = this.viewer.execCompleted;
+    this.mfollow = !this.viewer.execCompleted;
+    this.bindHideIncompleteNodes();
+
+    if (this.viewer.execCompleted && this.viewer.size > this.maxLogSize) {
+      this.logSize = this.viewer.size;
+      this.nextProgress = 0;
+      this.updateProgress(100);
+      return;
+    }
+
+    this.populateLogsProm = await this.populateLogs();
+  },
+  methods: {
+    bindHideIncompleteNodes() {
+      if (!this.eventBus) {
+        return;
+      }
+      this.hideIncompleteStateListener = (payload) => {
+        this.onHideIncompleteState(payload);
+      };
+      this.eventBus.on(
+        "execution-hide-incomplete-nodes-state",
+        this.hideIncompleteStateListener,
+      );
+      this.eventBus.emit("execution-hide-incomplete-nodes-request");
+    },
+    onHideIncompleteState(payload: {
+      hide?: boolean;
+      applies?: boolean;
+      nodeNames?: string[];
+    }) {
+      this.hideIncompleteNodes = !!payload && !!payload.hide;
+      this.hideIncompleteApplies = !!payload && !!payload.applies;
+      this.incompleteNodeNames =
+        payload && payload.nodeNames ? payload.nodeNames : [];
+    },
+    onHideIncompleteCheckboxChange(event: Event) {
+      const target = event.target as HTMLInputElement;
+      if (this.eventBus) {
+        this.eventBus.emit(
+          "execution-hide-incomplete-nodes-toggle",
+          !!target.checked,
+        );
+      }
+    },
+    loadConfig() {
+      if (this.useUserSettings) {
+        const _settings = localStorage.getItem(CONFIG_STORAGE_KEY);
+
+        if (_settings) {
+          try {
+            const config = JSON.parse(_settings);
+            Object.assign(this.settings, config);
+          } catch (e) {
+            localStorage.removeItem(CONFIG_STORAGE_KEY);
+          }
+        }
+      }
+
+      Object.assign(this.settings, this.config || {});
+    },
+    saveConfig() {
+      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(this.settings));
+    },
+    addScrollBlocker() {
+      /**
+       * Allows us to prevent scrolling unless a certain amount of "resistence" is produced
+       */
+      const _scroller = this.$refs["scroller"] as HTMLElement;
+      _scroller.addEventListener(
+        "wheel",
+        (ev: UIEvent) => {
+          this.scrollCount++;
+
+          if (this.mfollow) {
+            ev.preventDefault();
+            ev.returnValue = false;
+          }
+
+          if (this.scrollCount > this.scrollTolerance) this.mfollow = false;
+        },
+        { passive: false },
+      );
+    },
+    handleExecutionLogResp() {
+      if (!this.trimOutput) return;
+    },
+    updateProgress(delay: number = 0) {
+      if (this.cancelProgress) this.cancelProgress.cancel();
+
+      this.cancelProgress = CancelToken.source();
+
+      (async (cancel: CancelToken) => {
+        const update = () => {
+          this.progress = this.nextProgress;
+        };
+        setTimeout(update, delay);
+        while (!cancel.signaled) {
+          await new Promise((res) => {
+            setTimeout(res, 1000);
+          });
+          if (this.progress == 100) this.cancelProgress?.cancel();
+          update();
+        }
+      })(this.cancelProgress.token);
+    },
+    scrollToLine(n: number | string) {
+      const _scroller = this.$refs["scroller"] as HTMLElement;
+      if (this.$refs["logEntryChunk"]) {
+        this.$refs["logEntryChunk"].scrollToLine(Number(n));
+      }
+
+      const target = this.$refs["logEntryChunk"]._container;
+      let parent = target.parentNode;
+
+      let offset = target.offsetTop;
+
+      // Traverse to root and accumulate offset
+      while (parent != _scroller) {
+        offset += parent.offsetTop;
+        parent = parent.parentNode;
+      }
+
+      _scroller.scrollTop = offset - 24; // Insure under stick header
+    },
+    onNodeFollowChange(val: boolean) {
+      // Only honor follow-change events from LogNodeChunk when in node view.
+      // In the log output view, addScrollBlocker + the Follow button manage
+      // mfollow; the DynamicScroller scroll listener must not interfere.
+      if (this.node) {
+        this.mfollow = val;
+      }
+    },
+    handleLineSelect(idx: number) {
+      if (this.overSize) {
+        alert("Line-linking is not supported for over-sized logs");
+        return;
+      }
+      if (this.selectedLineIdx === idx) {
+        this.selectedLineIdx = undefined;
+        this.$emit("line-deselect", idx);
+        this.eventBus.emit("line-deselect", idx);
+        return;
+      }
+      this.selectedLineIdx = idx;
+      this.$emit("line-select", idx);
+      this.eventBus.emit("line-select", idx);
+    },
+    toggleSettings(e) {
+      this.settingsVisible = !this.settingsVisible;
+      e.target.blur();
+    },
+    toggleFollow(e) {
+      this.mfollow = !this.mfollow;
+      e.target.blur();
+    },
+    closeSettings() {
+      this.settingsVisible = false;
+    },
+    toggleProgressBar() {
+      this.consumeLogs = !this.consumeLogs;
+    },
+    handleJump() {
+      this.scrollToLine(this.jumpToLine || 0);
+    },
+    handleJumpToEnd() {
+      this.scrollToLine(this.entries.length);
+    },
+    handleJumpToStart() {
+      this.scrollToLine(1);
+    },
+    async populateLogs() {
+      while (this.consumeLogs) {
+        if (!this.resp) this.resp = this.viewer.getOutput(this.batchSize);
+        await this.resp;
+        this.resp = undefined;
+
+        if (!this.viewer.completed) {
+          this.resp = this.viewer.getOutput(this.batchSize);
+          await new Promise<void>((res) =>
+            setTimeout(() => {
+              res();
+            }, 0),
+          );
+        }
+
+        this.execCompleted = this.viewer.execCompleted;
+        this.completed = this.viewer.completed;
+
+        this.nextProgress = Math.round(this.viewer.percentLoaded);
+
+        if (this.viewer.error) this.errorMessage = this.viewer.error;
+
+        this.logSize = this.viewer.offset;
+        this.logLines = this.stepCtx
+          ? this.entriesFromViewer.filter(
+              (entry) => entry.stepctx === this.stepCtx,
+            ).length
+          : this.viewer.entries.length;
+        this.handleExecutionLogResp();
+
+        if (this.viewer.completed) break;
+      }
+      this.totalTime = Date.now() - this.startTime;
+      this.populateLogsProm = undefined;
+    },
+  },
+});
+</script>
+
+<style lang="scss">
+@import "./ansi.css";
+@import "./theme-light.scss";
+@import "./theme-dark.scss";
+
+.anticon {
+  display: inline-block;
+  color: inherit;
+  font-style: normal;
+  line-height: 0;
+  text-align: center;
+  text-transform: none;
+  vertical-align: -0.125em;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.execution-log__progress-bar {
+  display: inline-block;
+  height: min-content;
+  flex: 1;
+  cursor: pointer;
+}
+
+.execution-log__progress-bar * {
+  transition: all 0.3s ease;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.5s;
+}
+.fade-enter-from,
+.fade-leave-to * {
+  opacity: 0;
+}
+
+.execution-log--no-transition * {
+  transition: none !important;
+}
+
+.execution-log__node-chunk {
+  contain: layout;
+  flex: 1;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.execution-log__chunk {
+  contain: layout;
+}
+
+.progress {
+  height: 20px;
+  margin: 0;
+}
+</style>
+
+<style lang="scss" scoped>
+.execution-log {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+.execution-log__settings {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  position: sticky;
+  top: -2px;
+  z-index: 1;
+  transition: top 0.3s;
+
+  .btn i {
+    margin-right: 5px;
+  }
+}
+
+.execution-log__settings:hover,
+.execution-log__settings:focus-within {
+  top: -2px;
+}
+
+.execution-log__stats {
+  flex: 0 0 1em;
+}
+
+.execution-log__scroller {
+  // height: 100%;
+  overflow-y: auto;
+  /** Causing FireFox scroll issues: translate3d(0,0,0) fixes but conflicts with modals */
+  // will-change: transform;
+  width: 100%;
+  flex: 1;
+}
+.execution-log__scroller-item-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  width: 100%;
+  height: 100%;
+}
+
+.execution-log__warning {
+  width: 100%;
+  text-align: center;
+}
+</style>

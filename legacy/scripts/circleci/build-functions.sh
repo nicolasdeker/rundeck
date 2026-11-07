@@ -1,0 +1,148 @@
+#!/bin/bash
+set -e
+
+rundeck_war_build() {
+    echo "== Versions =="
+    java -version
+    echo "NPM=$(npm -version)"
+    echo "Node=$(node --version)"
+    echo "Groovy=$(groovy --version)"
+
+    echo "== Launch War build =="
+    ./gradlew -Penvironment="${ENV}" ${GRADLE_BUILD_OPTS} publishToMavenLocal build -x check
+}
+
+rundeck_assemble_build() {
+    echo "== Versions =="
+    java -version
+    echo "NPM=$(npm -version)"
+    echo "Node=$(node --version)"
+    echo "Groovy=$(groovy --version)"
+
+    echo "== Assemble build =="
+    ./gradlew -Penvironment="${ENV}" ${GRADLE_BUILD_OPTS} rundeckapp:assemble
+}
+
+rundeck_gradle_tests() {
+    ./gradlew -Penvironment="${ENV}" ${GRADLE_BUILD_OPTS} check
+}
+
+rundeck_gui_tests() {
+    cd rundeckapp/grails-spa/packages/ui-trellis
+    npm run ci:test:unit
+}
+
+rundeck_docker_build() {
+    # Ensure the JRE version is set
+    local jreVersion=${1}
+    if [ -z "$jreVersion" ]; then
+        echo "Error: jreVersion is not set"
+        exit 1
+    fi
+
+    #Build image
+    ./gradlew ${GRADLE_BASE_OPTS} cleanOfficialBuild officialBuild -Penvironment=${ENV} -PdockerRepository=${DOCKER_REPO} -PdockerTags=latest,SNAPSHOT -PjreVersion=${jreVersion}
+
+    # Append -j25 suffix to tags when JRE version contains 25
+    local TAG_SUFFIX=""
+    if [[ "${jreVersion}" == *"25"* ]]; then
+        TAG_SUFFIX="-j25"
+    fi
+
+    docker tag "${DOCKER_REPO}:latest" "${DOCKER_CI_REPO}:${DOCKER_IMAGE_BUILD_TAG}${TAG_SUFFIX}"
+
+    # CircleCI tag builds do not have a branch set
+    if [[ -n "${RUNDECK_BRANCH_CLEAN}" ]]; then
+        local CI_BRANCH_TAG=${DOCKER_CI_REPO}:${RUNDECK_BRANCH_CLEAN}${TAG_SUFFIX}
+        docker tag "${DOCKER_REPO}:latest" "$CI_BRANCH_TAG"
+    fi
+
+}
+
+rundeck_docker_push() {
+    local jreVersion=${1}
+    local TAG_SUFFIX=""
+    if [[ "${jreVersion}" == *"25"* ]]; then
+        TAG_SUFFIX="-j25"
+    fi
+
+    docker_login
+
+    docker push "${DOCKER_CI_REPO}:${DOCKER_IMAGE_BUILD_TAG}${TAG_SUFFIX}"
+
+    # CircleCI tag builds do not have a branch set
+    if [[ -n "${RUNDECK_BRANCH_CLEAN}" ]]; then
+        local CI_BRANCH_TAG=${DOCKER_CI_REPO}:${RUNDECK_BRANCH_CLEAN}${TAG_SUFFIX}
+        docker push "$CI_BRANCH_TAG"
+    fi
+
+    if [[ "${RUNDECK_MAIN_BUILD}" = true && -z "${RUNDECK_TAG}" ]]; then
+        ./gradlew ${GRADLE_BASE_OPTS} officialPush -PdockerRepository=${DOCKER_REPO} -PdockerTags=SNAPSHOT
+    fi
+}
+
+# Builds the test images once per pipeline and pushes them with per-pipeline tags, so the test
+# jobs pull them instead of running "docker build" (and apt) on every job. Images are built with
+# --no-cache so no layer from another pipeline can influence test results.
+#   <repo>:ci-build-N-rdtest            (jre independent, built only when jreVersion is not 25)
+#   <repo>:ci-build-N-rundeckansible    (jre independent, built only when jreVersion is not 25)
+#   <repo>:ci-build-N[-j25]-oss         (functional-test image on top of the rundeck CI image)
+rundeck_test_images_build_push() {
+    local jreVersion=${1:-}
+    local TAG_SUFFIX=""
+    if [[ "${jreVersion}" == *"25"* ]]; then
+        TAG_SUFFIX="-j25"
+    fi
+    local baseTag="${DOCKER_CI_REPO}:${DOCKER_IMAGE_BUILD_TAG}"
+
+    docker_login
+
+    if [[ -z "${TAG_SUFFIX}" ]]; then
+        copy_rundeck_war test/docker/rundeck-launcher.war
+        (
+            set -e
+            cd test/docker/
+            source common.sh
+            RDTEST_DOCKER_BUILD_OPTS="--no-cache" build_rdtest_docker
+            RDTEST_DOCKER_BUILD_OPTS="--no-cache" build_rundeckansible_docker
+        )
+        docker tag rdtest:latest "${baseTag}-rdtest"
+        docker tag rundeckansible:latest "${baseTag}-rundeckansible"
+        docker push "${baseTag}-rdtest"
+        docker push "${baseTag}-rundeckansible"
+    fi
+
+    # Only the "tools" stage (apt/pip installs): the ssh keys layer is added by the tests on every run.
+    docker build --no-cache --target tools \
+        --build-arg IMAGE="${baseTag}${TAG_SUFFIX}" \
+        -t "${baseTag}${TAG_SUFFIX}-oss" \
+        functional-test/src/test/resources/docker/compose/oss
+    docker push "${baseTag}${TAG_SUFFIX}-oss"
+}
+
+rundeck_docker_publish() {
+    docker_login
+    ./gradlew ${GRADLE_BASE_OPTS} -Penvironment="${ENV}" -PdockerRepository=${DOCKER_REPO} docker:officialPush
+}
+
+rundeck_verify_build() {
+    ./gradlew ${GRADLE_BASE_OPTS} \
+        -Penvironment="${ENV}" \
+        verifyBuild
+}
+
+rundeck_gradle_functional_tests() {
+    local test_files_args=()
+    if [[ -n "${TEST_FILES:-}" ]]; then
+        test_files_args=(-PtestFiles="${TEST_FILES}")
+    fi
+    # Use the tools image prebuilt by the Build job when it was pulled (rundeck_pull_oss_image)
+    local oss_tools_image="tools"
+    if docker image inspect rundeck-functional-oss-tools:latest >/dev/null 2>&1; then
+        oss_tools_image="rundeck-functional-oss-tools:latest"
+    fi
+    TEST_OSS_TOOLS_IMAGE=${oss_tools_image} TEST_IMAGE=${TEST_IMAGE:-} ./gradlew :functional-test:${GRADLE_TASK} \
+        -Penvironment="${ENV}" \
+        "${test_files_args[@]}" \
+        ${GRADLE_BUILD_OPTS} --info
+}

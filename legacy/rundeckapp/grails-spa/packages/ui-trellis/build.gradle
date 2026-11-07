@@ -1,0 +1,264 @@
+buildscript {
+    repositories {
+        maven { url "https://repo.grails.org/grails/core" }
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath "com.github.node-gradle:gradle-node-plugin:7.1.0"
+    }
+}
+
+// plugins {
+//   id "com.github.node-gradle.node"
+//   id 'base'
+// }
+apply plugin: 'com.github.node-gradle.node'
+apply plugin: 'base'
+
+configurations{
+  lib
+  packages
+}
+
+node{
+    // Whether to download and install a specific Node.js version or not
+    // If false, it will use the globally installed Node.js
+    download = false
+}
+
+apply from: "../../../../gradle/node-version.gradle"
+def pinnedNodeBin = project.ext.pinnedNodeBin
+
+def sourceDirs = [
+        '.storybook',
+        'eslint',
+        'lib',
+        'src'
+]
+def sourceFiles = ['package.json', 'README.md']
+def sources = sourceDirs + sourceFiles
+
+def runNpmBuild = tasks.register('runNpmBuild', NpmTask) {
+    it.inputs.file 'package.json'
+    it.inputs.file 'package-lock.json'
+    it.inputs.file 'vue.config.library.js'
+    it.inputs.file 'tsconfig.json'
+
+    it.inputs.dir 'src'
+
+    it.outputs.dir(file("$buildDir"))
+    it.outputs.cacheIf { false }
+
+    def npmCommand = System.env.CI ?
+      'ci:library:build' :
+      'dev:library:build'
+
+    args = ['run', npmCommand]
+
+    execOverrides {
+        if (pinnedNodeBin != null) {
+            it.environment('PATH', "${pinnedNodeBin}${File.pathSeparator}${System.getenv('PATH')}")
+        }
+        def token = project.findProperty('CLOUDSMITH_NPM_TOKEN') ?: System.getenv('CLOUDSMITH_NPM_TOKEN')
+        if (token) {
+            it.environment('CLOUDSMITH_NPM_TOKEN', token)
+        }
+    }
+}
+
+/** Takes package.json and sets the version in it */
+def runNpmVersion = tasks.register('runNpmVersion', NpmTask) {t ->
+    t.dependsOn runNpmBuild
+    // Gradle 8.14 strictness: Since lib/ is in sourceDirs, must declare dependency
+    // even though Java's build/lib/classes and NPM's lib/ are actually different directories
+    if (tasks.findByName('compileJava')) {
+        t.dependsOn compileJava
+    }
+    if (tasks.findByName('jar')) {
+        t.dependsOn jar
+    }
+
+    sourceDirs.each {t.inputs.dir it }
+    t.inputs.files sourceFiles
+    t.outputs.dir 'build/pack-version'
+    t.outputs.cacheIf {true}
+
+    args = [ 'version' ]
+
+    if (findProperty('environment')?:'development' == 'release' || project.buildType == 'release') {
+        if (project.vTag == 'GA') {
+            args.add("${project.vNum}".toString())
+        }
+        else if(project.vNum ==~ /^\d+\.\d+$/){
+            args.add("${project.vNum}.0-${project.vTag}.${new Date().getTime()}".toString())
+        }
+        else {
+            args.add("${project.vNum}-${project.vTag}.${new Date().getTime()}".toString())
+        }
+    }
+    else {
+        // Hash sources, excluding generated lib/, to keep snapshot versions stable between edits.
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        (sourceDirs.findAll { it != 'lib' } + sourceFiles).sort().each { path ->
+            def f = file(path)
+            if (f.isDirectory()) {
+                fileTree(f).files.sort { it.path }.each { digest.update(it.bytes) }
+            } else if (f.exists()) {
+                digest.update(f.bytes)
+            }
+        }
+        def contentHash = digest.digest().encodeHex().toString().take(12)
+        args.add("${project.vNum}-snapshot.${contentHash}".toString())
+    }
+
+    /** Copy to staging location where we will modify it */
+    t.doFirst {
+        copy {
+            from 'package.json'
+            into 'build/pack-version'
+        }
+    }
+
+    t.execOverrides {
+        it.workingDir = 'build/pack-version'
+        if (pinnedNodeBin != null) {
+            it.environment('PATH', "${pinnedNodeBin}${File.pathSeparator}${System.getenv('PATH')}")
+        }
+    }
+}
+
+/** Gather all the build bits together for publishing or packing */
+def stagePackage = tasks.register('stagePackage') {t ->
+    t.dependsOn runNpmVersion
+
+    sourceDirs.each {t.inputs.dir it }
+    t.inputs.files sourceFiles
+    t.outputs.dir 'build/pack'
+    t.outputs.cacheIf {true}
+
+    t.doFirst {
+        project.delete('build/pack')
+    }
+
+    t.doLast {
+        sourceDirs.each { source ->
+            copy {
+                from source
+                into "build/pack/${source}"
+            }
+        }
+        sourceFiles.each {source ->
+            copy {
+                from source
+                into 'build/pack'
+            }
+        }
+        copy {
+            from 'build/pack-version/package.json'
+            into 'build/pack'
+        }
+    }
+}
+
+/** Creates a tarball package and copies to an output location */
+def runNpmPack = tasks.register('runNpmPack', NpmTask) {
+    it.group 'build'
+    it.dependsOn stagePackage
+
+    it.inputs.dir 'build/pack'
+
+    it.outputs.dir("build/package")
+    it.outputs.cacheIf { true }
+
+    args = ['pack']
+
+    it.execOverrides {
+        it.workingDir = 'build/pack'
+        if (pinnedNodeBin != null) {
+            it.environment('PATH', "${pinnedNodeBin}${File.pathSeparator}${System.getenv('PATH')}")
+        }
+    }
+
+    it.doFirst {
+        project.delete('build/package')
+    }
+
+    it.doLast {
+        copy {
+            from 'build/pack'
+            into 'build/package'
+            include '*.tgz'
+            rename '(.+).tgz', 'rundeck-ui-trellis.tgz'
+        }
+        /** Keeps the output dir pristine for Gradle caching */
+        project.delete fileTree('build/pack').matching {
+            include '*.tgz'
+        }
+    }
+}
+
+tasks.register('runNpmPublish', NpmTask) {t ->
+    t.dependsOn stagePackage
+
+    def dryRun = (findProperty('dryRun') as String ?: 'true').toBoolean()
+
+    List myArgs = ['publish', '--dry-run']
+
+    if (!dryRun)
+        myArgs = myArgs - '--dry-run'
+
+    if (project.findProperty('environment') != 'release') {
+        myArgs += ['--tag', 'snapshot']
+    }
+    args=myArgs
+
+    t.execOverrides {
+        it.workingDir = 'build/pack'
+        if (pinnedNodeBin != null) {
+            it.environment('PATH', "${pinnedNodeBin}${File.pathSeparator}${System.getenv('PATH')}")
+        }
+    }
+}
+
+assemble.dependsOn runNpmBuild
+
+tasks.register('runNpmTest', NpmTask) {
+    group = 'test'
+    inputs.file 'package.json'
+    inputs.file 'package-lock.json'
+
+    inputs.dir 'src'
+    inputs.dir 'tests'
+
+    def npmCommand = System.env.CI ?
+                     'ci:test:unit' :
+                     'dev:test:unit'
+
+    args = ['run', npmCommand]
+
+    execOverrides {
+        if (pinnedNodeBin != null) {
+            it.environment('PATH', "${pinnedNodeBin}${File.pathSeparator}${System.getenv('PATH')}")
+        }
+        def token = project.findProperty('CLOUDSMITH_NPM_TOKEN') ?: System.getenv('CLOUDSMITH_NPM_TOKEN')
+        if (token) {
+            it.environment('CLOUDSMITH_NPM_TOKEN', token)
+        }
+    }
+}
+//check.dependsOn runNpmTest
+
+artifacts {
+  lib(file: file(buildDir), name: "${project.name}", type: 'directory', builtBy: runNpmBuild)
+  packages(file: file("$projectDir/build/package/rundeck-ui-trellis.tgz"), type: 'file', builtBy: runNpmPack)
+}
+
+// Gradle 8.14 strictness: Handle optional Java plugin tasks if they exist
+// Core applies base plugin which creates jar task, Pro doesn't
+afterEvaluate {
+    if (tasks.findByName('jar')) {
+        tasks.named('jar').configure {
+            dependsOn runNpmBuild
+        }
+    }
+}

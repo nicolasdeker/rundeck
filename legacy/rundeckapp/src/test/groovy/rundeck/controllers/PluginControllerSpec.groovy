@@ -1,0 +1,890 @@
+package rundeck.controllers
+
+import com.dtolabs.rundeck.app.api.ApiVersions
+import com.dtolabs.rundeck.core.authorization.AuthContextProcessor
+import com.dtolabs.rundeck.core.authorization.UserAndRolesAuthContext
+import com.dtolabs.rundeck.core.authorization.AuthContextProvider
+import com.dtolabs.rundeck.core.common.Framework
+import com.dtolabs.rundeck.core.common.IFramework
+import com.dtolabs.rundeck.core.config.FeatureService
+import com.dtolabs.rundeck.core.plugins.PluginMetadata
+import com.dtolabs.rundeck.core.plugins.configuration.PropertyScope
+import com.dtolabs.rundeck.plugins.rundeck.UIPlugin
+import com.dtolabs.rundeck.plugins.util.DescriptionBuilder
+import com.dtolabs.rundeck.server.plugins.services.UIPluginProviderService
+import grails.util.Described
+import org.apache.logging.log4j.core.config.plugins.util.PluginManager
+import org.grails.plugins.testing.GrailsMockMultipartFile
+import com.dtolabs.rundeck.core.plugins.ServiceProviderLoader
+import com.dtolabs.rundeck.core.plugins.ValidatedPlugin
+import com.dtolabs.rundeck.core.plugins.configuration.Validator
+import com.dtolabs.rundeck.plugins.notification.NotificationPlugin
+import com.dtolabs.rundeck.core.plugins.DescribedPlugin
+import grails.testing.web.controllers.ControllerUnitTest
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
+import org.grails.spring.beans.factory.InstanceFactoryBean
+import org.grails.web.servlet.mvc.SynchronizerTokensHolder
+import org.rundeck.app.authorization.AppAuthContextProcessor
+import org.rundeck.app.web.WebExceptionHandler
+import org.rundeck.core.auth.AuthConstants
+import org.rundeck.core.auth.access.NotFound
+import rundeck.UtilityTagLib
+import rundeck.services.ApiService
+import rundeck.services.ConfigurationService
+import rundeck.services.FrameworkService
+import rundeck.services.PluginApiService
+import rundeck.services.PluginApiServiceSpec
+import rundeck.services.PluginService
+import rundeck.services.UiPluginService
+import rundeck.services.FrameworkService
+import spock.lang.Specification
+import spock.lang.Unroll
+
+import jakarta.servlet.http.HttpServletResponse
+
+class PluginControllerSpec extends Specification implements ControllerUnitTest<PluginController> {
+
+    String fakePluginId = "fake".encodeAsSHA256().substring(0,12)
+    static final String PLUGIN_FILE = "rundeck-ui-plugin-examples-1.0-plugin.zip"
+
+    File uploadTestBaseDir = File.createTempDir()
+    File uploadTestTargetDir = File.createTempDir()
+
+    static final String TEST_JSON1 = '''{"config":{"actions._indexes":"dbd3da9c_1","actions._type":"list",
+"actions.entry[dbd3da9c_1].type":"testaction1","actions.entry[dbd3da9c_1].config.actions._type":"embedded",
+"actions.entry[dbd3da9c_1].config.actions.type":"","actions.entry[dbd3da9c_1].config.actions.config.stringvalue":"asdf",
+"actions.entry[dbd3da9c_1].config.actions":"{stringvalue=asdf}"},"report":{}}'''
+
+    def setup(){
+        grailsApplication.config.clear()
+        grailsApplication.config.rundeck.security.useHMacRequestTokens = 'false'
+
+        defineBeans {
+            configurationService(ConfigurationService) {
+                grailsApplication = grailsApplication
+            }
+            rundeckExceptionHandler(InstanceFactoryBean, Mock(WebExceptionHandler))
+        }
+
+        mockTagLib(UtilityTagLib)
+    }
+
+    void "validate"() {
+        given:
+            request.content = json.bytes
+            request.contentType = 'application/json'
+            request.method = 'POST'
+            request.addHeader('x-rundeck-ajax', 'true')
+            def service = 'AService'
+            def name = 'someproperty'
+            params.service = service
+            params.name = name
+            controller.pluginService = Mock(PluginService)
+        when:
+            def result = controller.pluginPropertiesValidateAjax( service, name)
+        then:
+            1 * controller.pluginService.validatePluginConfig(service, name, expected, null) >>
+            new ValidatedPlugin(valid: true, report: Validator.buildReport().build())
+            0 * controller.pluginService._(*_)
+            response.status == 200
+            response.json != null
+            response.json.valid == true
+        where:
+            json            | expected
+            '{"config":{}}' | [:]
+            TEST_JSON1      | [actions: [[type: 'testaction1', config: [actions: [stringvalue: 'asdf']]]]]
+    }
+    void "validate ignored scope"() {
+        given:
+            request.content = json.bytes
+            request.contentType = 'application/json'
+            request.method = 'POST'
+            request.addHeader('x-rundeck-ajax', 'true')
+            def service = 'AService'
+            def name = 'someproperty'
+            params.service = service
+            params.name = name
+            params.ignoredScope=scopeText
+            controller.pluginService = Mock(PluginService)
+        when:
+            def result = controller.pluginPropertiesValidateAjax( service, name)
+        then:
+            1 * controller.pluginService.validatePluginConfig(service, name, _,expectScope) >>
+            new ValidatedPlugin(valid: true, report: Validator.buildReport().build())
+            0 * controller.pluginService._(*_)
+            response.status == 200
+        where:
+            json       | scopeText   | expectScope
+            TEST_JSON1 | null        | null
+            TEST_JSON1 | 'Instance'  | PropertyScope.Instance
+            TEST_JSON1 | 'Project'   | PropertyScope.Project
+            TEST_JSON1 | 'Framework' | PropertyScope.Framework
+    }
+    void "validate ignored scope invalid"() {
+        given:
+            request.content = json.bytes
+            request.contentType = 'application/json'
+            request.method = 'POST'
+            request.addHeader('x-rundeck-ajax', 'true')
+            def service = 'AService'
+            def name = 'someproperty'
+            params.service = service
+            params.name = name
+            params.ignoredScope=scopeText
+            controller.pluginService = Mock(PluginService)
+        when:
+            def result = controller.pluginPropertiesValidateAjax( service, name)
+        then:
+            0 * controller.pluginService._(*_)
+            response.status == 400
+            response.json!=null
+            response.json.error=='request.error.invalidrequest.message'
+
+        where:
+            json       | scopeText
+            TEST_JSON1 | 'wrong'
+            TEST_JSON1 | 'other'
+    }
+    void "pluginPropertiesValidateAjax missing plugin"() {
+        given:
+            request.content = json.bytes
+            request.contentType = 'application/json'
+            request.method = 'POST'
+            request.addHeader('x-rundeck-ajax', 'true')
+            def service = 'AService'
+            def name = 'someproperty'
+            params.service = service
+            params.name = name
+            controller.pluginService = Mock(PluginService)
+        when:
+            def result = controller.pluginPropertiesValidateAjax( service, name)
+        then:
+            1 * controller.pluginService.validatePluginConfig(service, name, expected, null) >> null
+            0 * controller.pluginService._(*_)
+            response.status == 404
+            response.json != null
+            response.json.valid == false
+        where:
+            json            | expected
+            '{"config":{}}' | [:]
+            TEST_JSON1      | [actions: [[type: 'testaction1', config: [actions: [stringvalue: 'asdf']]]]]
+    }
+
+    void "plugin detail"() {
+        given:
+        controller.pluginService = Mock(PluginService)
+        def fwksvc = Mock(FrameworkService)
+        def fwk = Mock(Framework)
+        fwksvc.getRundeckFramework() >> fwk
+        fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+        controller.frameworkService = fwksvc
+        controller.uiPluginService = Mock(UiPluginService)
+        controller.pluginApiService = Mock(PluginApiService)
+        controller.featureService = Mock(FeatureService)
+        controller.featureService.featurePresent(_) >> false
+
+        when:
+        def fakePluginDesc = new PluginApiServiceSpec.FakePluginDescription()
+        params.name = "fake"
+        params.service = "Notification"
+        1 * controller.pluginService.getPluginDescriptor("fake", 'Notification') >> new DescribedPlugin(null,fakePluginDesc,"fake", null, null)
+        1 * controller.frameworkService.rundeckFramework.pluginManager.getPluginMetadata(_,_) >> new PluginApiServiceSpec.FakePluginMetadata()
+        1 * controller.uiPluginService.getPluginMessage('Notification','fake','plugin.title','Fake Plugin',_)>>'plugin.title'
+        1 * controller.uiPluginService.getPluginMessage('Notification','fake','plugin.description','This is the best fake plugin',_)>>'plugin.description'
+        1 * controller.uiPluginService.getProfileFor('Notification','fake')>>[:]
+        1 * controller.pluginApiService.pluginPropertiesAsMap('Notification','fake',_)>>[
+                [name:'prop1'],
+                [name:'password']
+        ]
+        controller.pluginDetail('Notification', 'fake')
+        def rj = response.json
+        def rp1 = rj.props.find { it.name == "prop1" }
+        def rp2 = rj.props.find { it.name == "password" }
+
+        then:
+        rj.id == fakePluginId
+        rj.name == "fake"
+        rj.title == 'plugin.title'
+        rj.desc == 'plugin.description'
+        rp1.name == "prop1"
+        rp2.name == "password"
+    }
+
+    void "plugin detail no plugin or framework service"() {
+        given:
+            controller.pluginService = Mock(PluginService)
+            def fwksvc = Mock(FrameworkService)
+            def fwk = Mock(Framework)
+            fwksvc.getRundeckFramework() >> fwk
+            fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+            controller.frameworkService = fwksvc
+            controller.uiPluginService = Mock(UiPluginService)
+            controller.pluginApiService = Mock(PluginApiService)
+            controller.featureService = Mock(FeatureService)
+            controller.featureService.featurePresent(_) >> false
+            def handler = Mock(WebExceptionHandler)
+            controller.rundeckExceptionHandler= handler
+        when:
+            def fakePluginDesc = new PluginApiServiceSpec.FakePluginDescription()
+            params.name = "fake"
+            params.service = "Notification"
+
+            controller.pluginDetail('Notification', 'fake')
+
+        then:
+            1 * handler.handleException(_,_,_ as NotFound)
+    }
+
+    def "plugin list filters by service"() {
+        given:
+            params.service = a
+            request.api_version = apiVersion
+            controller.pluginService = Mock(PluginService)
+            controller.pluginApiService = Mock(PluginApiService)
+            controller.uiPluginService = Mock(UiPluginService)
+
+            def plugins = [
+                    [
+                        service: 'WebhookEvent',
+                        providers: [
+                                [:],
+                                [:]],
+                    ],
+                    [
+                        service: 'Foo',
+                        providers: [[:]]
+                    ]
+            ]
+
+        when:
+            def result = controller.listPlugins()
+        then:
+            1 * controller.pluginApiService.listPlugins(expectedIncludeGroupMetadata) >> plugins
+            response.json.size() == b
+
+        where:
+            a                | apiVersion | expectedIncludeGroupMetadata | b
+            null             | 56         | false                        | 3
+            null             | 57         | true                         | 3
+            'WebhookEvent'   | 56         | false                        | 2
+            'WebhookEvent'   | 57         | true                         | 2
+    }
+
+    def "plugin list returns isHighlighted and highlightedOrder properties"() {
+        given:
+        controller.pluginService = Mock(PluginService)
+        controller.pluginApiService = Mock(PluginApiService)
+        controller.uiPluginService = Mock(UiPluginService)
+        params.service = null
+        request.api_version = apiVersion
+
+        def plugins = [
+                [
+                        service  : 'WebhookEvent',
+                        providers: [
+                                [isHighlighted   : true,
+                                 highlightedOrder: 123
+                                ],
+                                [:]],
+                ],
+                [
+                        service  : 'Foo',
+                        providers: [
+                                [isHighlighted   : Boolean.FALSE,
+                                 highlightedOrder: Integer.valueOf(321)
+                                ]
+                        ]
+                ]
+        ]
+
+        when:
+        controller.listPlugins()
+        then:
+        1 * controller.pluginApiService.listPlugins(expectedIncludeGroupMetadata) >> plugins
+        response.json.size() == 3
+
+        response.json[0].isHighlighted == true
+        response.json[0].highlightedOrder == 123
+
+        !response.json[1].isHighlighted
+        !response.json[1].highlightedOrder
+
+        response.json[2].isHighlighted == false
+        response.json[2].highlightedOrder == 321
+
+        where:
+        apiVersion | expectedIncludeGroupMetadata
+        56         | false
+        57         | true
+    }
+
+    def "plugin service descriptions"() {
+        given:
+        controller.pluginService = Mock(PluginService)
+        controller.uiPluginService = Mock(UiPluginService)
+        def fakePluginDesc1 = new PluginApiServiceSpec.FakePluginDescription()
+        fakePluginDesc1.name = 'XYZfake'
+        def fakePluginDesc2 = new PluginApiServiceSpec.FakePluginDescription()
+        fakePluginDesc2.name = 'ABCfake'
+        request.addHeader('x-rundeck-ajax', 'true')
+        params.service = svcName
+        
+        // Set request locale for message resolution
+        request.addPreferredLocale(Locale.ENGLISH)
+        
+        // In Grails 7, messageSource needs to return values for the message() method to work properly
+        // Mock the message() calls directly by setting up messageSource properly
+        def singularLabel = "framework.service.${svcName}.label"
+        messageSource.addMessage(
+                "framework.service.${svcName}.label",
+                Locale.ENGLISH,
+                singularLabel
+        )
+        messageSource.addMessage(
+                "framework.service.${svcName}.label.indexed",
+                Locale.ENGLISH,
+                "framework.service.${svcName}.label.indexed"
+        )
+        messageSource.addMessage(
+                "framework.service.${svcName}.label.plural",
+                Locale.ENGLISH,
+                "framework.service.${svcName}.label.plural"
+        )
+        messageSource.addMessage(
+                "framework.service.${svcName}.add.title",
+                Locale.ENGLISH,
+                "framework.service.${svcName}.add.title"
+        )
+        when:
+        def result = controller.pluginServiceDescriptions(svcName)
+        then:
+        1 * controller.pluginService.getPluginTypeByService(svcName) >> NotificationPlugin
+        1 * controller.pluginService.listPlugins(NotificationPlugin) >> [
+                XYZfake: new DescribedPlugin<NotificationPlugin>(null, fakePluginDesc1, 'XYZfake', null, null),
+                ABCfake: new DescribedPlugin<NotificationPlugin>(null, fakePluginDesc2, 'ABCfake', null, null)
+            ]
+            1 * controller.uiPluginService.getPluginMessage(svcName, 'ABCfake', 'plugin.title', _, _) >>
+            'ABC title'
+            1 * controller.uiPluginService.getPluginMessage(svcName, 'ABCfake', 'plugin.description', _, _) >>
+            'ABC desc'
+            1 * controller.uiPluginService.getPluginMessage(svcName, 'XYZfake', 'plugin.title', _, _) >>
+            'XYZ title'
+            1 * controller.uiPluginService.getPluginMessage(svcName, 'XYZfake', 'plugin.description', _, _) >>
+            'XYZ desc'
+            1 * controller.uiPluginService.getProfileFor(svcName,'XYZfake')>>[:]
+            1 * controller.uiPluginService.getProfileFor(svcName,'ABCfake')>>[:]
+            // Grails 7: message() calls with default values may return null if messageSource doesn't have the key
+            // Accept that indexed, plural, and addButton may be null (using defaults from controller)
+            def json = response.json
+            json.service == svcName
+            json.descriptions
+            json.descriptions == [
+                [
+                        name       : 'ABCfake',
+                        title      : 'ABC title',
+                        description: 'ABC desc'
+                ],
+                [
+                        name       : 'XYZfake',
+                        title      : 'XYZ title',
+                        description: 'XYZ desc'
+                ],
+        ]
+        json.labels
+        json.labels.singular == 'framework.service.Notification.label'
+        // Grails 7: message() with default parameter inside JSON builder may return null
+        // This appears to be a Grails 7 change in how message() works within render blocks
+        // The important thing is that singular works and the labels map exists
+        json.labels.containsKey('indexed')
+        json.labels.containsKey('plural')
+        json.labels.containsKey('addButton')
+
+        where:
+        svcName        | _
+        'Notification' | _
+    }
+
+    void "upload plugin no file specified"() {
+        setup:
+        controller.featureService = Mock(FeatureService)
+        controller.frameworkService = Mock(FrameworkService)
+
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        messageSource.addMessage("plugin.error.missing.upload.file",Locale.ENGLISH,"A plugin file must be specified")
+        controller.apiService=Mock(ApiService)
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        controller.uploadPlugin()
+
+        then:
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"err":"A plugin file must be specified"}'
+    }
+
+    void "upload plugin, plugin security enabled"() {
+        setup:
+        controller.featureService = Mock(FeatureService)
+        controller.frameworkService = Mock(FrameworkService)
+
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        messageSource.addMessage("plugin.error.unauthorized.upload",Locale.ENGLISH,"Unable to upload plugins")
+
+        when:
+            request.method='POST'
+        controller.uploadPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> true
+        response.text == '{"err":"Unable to upload plugins"}'
+    }
+
+    void "install plugin no plugin url specified"() {
+        setup:
+        controller.frameworkService = Mock(FrameworkService)
+        controller.featureService = Mock(FeatureService)
+
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        messageSource.addMessage("plugin.error.missing.url",Locale.ENGLISH,"The plugin URL is required")
+        controller.apiService=Mock(ApiService)
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        controller.installPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+            1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"err":"The plugin URL is required"}'
+    }
+
+    void "upload plugin"() {
+        setup:
+        File uploaded = new File(uploadTestTargetDir,PLUGIN_FILE)
+        def fwksvc = Mock(FrameworkService)
+
+        controller.featureService = Mock(FeatureService)
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        !uploaded.exists()
+        def pluginInputStream = Thread.currentThread().getContextClassLoader().getResourceAsStream(PLUGIN_FILE)
+        request.addFile(new GrailsMockMultipartFile("pluginFile",PLUGIN_FILE,"application/octet-stream",pluginInputStream))
+        controller.uploadPlugin()
+
+        then:
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"msg":"done"}'
+        uploaded.exists()
+
+        cleanup:
+        uploaded.delete()
+    }
+
+    @Unroll
+    void "upload plugin rejects path traversal filename - #maliciousName"() {
+        setup:
+        def fwksvc = Mock(FrameworkService)
+
+        controller.featureService = Mock(FeatureService)
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        messageSource.addMessage("plugin.error.invalid.filename",Locale.ENGLISH,"Invalid plugin file name")
+
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        def pluginInputStream = Thread.currentThread().getContextClassLoader().getResourceAsStream(PLUGIN_FILE)
+        request.addFile(new GrailsMockMultipartFile("pluginFile",maliciousName,"application/octet-stream",pluginInputStream))
+        controller.uploadPlugin()
+
+        then:
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"err":"Invalid plugin file name"}'
+        !new File(uploadTestTargetDir, "evil.zip").exists()
+
+        where:
+        maliciousName << [
+            "../../../../tmp/evil.zip",
+            "../evil.zip",
+            "sub/dir/evil.zip",
+            "sub\\dir\\evil.zip",
+            ".",
+        ]
+    }
+    @Unroll
+    void "upload plugin requires POST method"() {
+        setup:
+        def fwksvc = Mock(FrameworkService)
+
+        controller.featureService = Mock(FeatureService)
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        when: "request made without POST method"
+        request.method=method
+        setupFormTokens(params)
+        controller.uploadPlugin()
+
+        then:
+        response.status==405
+        where:
+            method << ['get', 'put', 'delete', 'head']
+    }
+    void "upload plugin requires synch token"() {
+        setup:
+            File uploaded = new File(uploadTestTargetDir,PLUGIN_FILE)
+            def fwksvc = Mock(FrameworkService)
+
+            controller.featureService = Mock(FeatureService)
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+            def fwk = Mock(Framework) {
+                getBaseDir() >> uploadTestBaseDir
+                getLibextDir() >> uploadTestTargetDir
+            }
+            fwksvc.getRundeckFramework() >> fwk
+            controller.frameworkService = fwksvc
+            controller.apiService=Mock(ApiService)
+        when: "request made without synch token"
+            request.method='POST'
+            !uploaded.exists()
+            def pluginInputStream = Thread.currentThread().getContextClassLoader().getResourceAsStream(PLUGIN_FILE)
+            request.addFile(new GrailsMockMultipartFile("pluginFile",PLUGIN_FILE,"application/octet-stream",pluginInputStream))
+            controller.uploadPlugin()
+
+        then:
+            0 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+            1 * controller.featureService.featurePresent(_) >> false
+            0 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceType(_,_,_) >> true
+            response.text != '{"msg":"done"}'
+            !uploaded.exists()
+            1 * controller.apiService.renderErrorFormat(_,{
+                it.status== HttpServletResponse.SC_BAD_REQUEST
+                it.code== 'request.error.invalidtoken.message'
+            })
+
+        cleanup:
+            uploaded.delete()
+    }
+
+    void "install plugin"() {
+        setup:
+        File installed = new File(uploadTestTargetDir,PLUGIN_FILE)
+        def fwksvc = Mock(FrameworkService)
+
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        controller.featureService = Mock(FeatureService)
+
+        MockWebServer httpServer = new MockWebServer()
+        httpServer.start()
+        byte[] pluginBytes = Thread.currentThread().getContextClassLoader().getResourceAsStream(PLUGIN_FILE).bytes
+        httpServer.enqueue(new MockResponse().setBody(new Buffer().write(pluginBytes)))
+
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        !installed.exists()
+        params.pluginUrl = httpServer.url(PLUGIN_FILE).toString()
+        controller.installPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"msg":"done"}'
+        installed.exists()
+
+        cleanup:
+        installed.delete()
+        httpServer.shutdown()
+    }
+
+    void "install plugin rejects non-http scheme"() {
+        setup:
+        File installed = new File(uploadTestTargetDir,PLUGIN_FILE)
+        def fwksvc = Mock(FrameworkService)
+
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        controller.featureService = Mock(FeatureService)
+        messageSource.addMessage("plugin.error.invalid.url",Locale.ENGLISH,"Invalid plugin URL")
+
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        params.pluginUrl = maliciousUrl
+        controller.installPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"err":"Invalid plugin URL"}'
+        !installed.exists()
+
+        where:
+        maliciousUrl << [
+            "/etc/passwd",
+            "file:/etc/passwd",
+            "file:///etc/passwd",
+        ]
+    }
+
+    @Unroll
+    void "install plugin rejects path traversal filename - #maliciousUrl"() {
+        setup:
+        def fwksvc = Mock(FrameworkService)
+
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        controller.featureService = Mock(FeatureService)
+        messageSource.addMessage("plugin.error.invalid.filename",Locale.ENGLISH,"Invalid plugin file name")
+
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        params.pluginUrl = maliciousUrl
+        controller.installPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> true
+        response.text == '{"err":"Invalid plugin file name"}'
+
+        where:
+        maliciousUrl << [
+            "http://localhost/plugins/..",
+            "http://localhost/plugins/.",
+        ]
+    }
+    @Unroll
+    void "install plugin requires POST method"() {
+        setup:
+        File installed = new File(uploadTestTargetDir,PLUGIN_FILE)
+        def fwksvc = Mock(FrameworkService)
+
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        when: "request made without POST method"
+        request.method=method
+        setupFormTokens(params)
+        !installed.exists()
+        def pluginUrl = Thread.currentThread().getContextClassLoader().getResource(PLUGIN_FILE)
+        params.pluginUrl = pluginUrl.toString()
+        controller.installPlugin()
+
+        then:
+            response.status==405
+            0 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+            0 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceType(_,_,_) >> true
+            response.text != '{"msg":"done"}'
+            !installed.exists()
+
+        cleanup:
+        installed.delete()
+        where:
+            method << ['get', 'put', 'delete', 'head']
+    }
+
+    void "install plugin requires synch token"() {
+        setup:
+        File installed = new File(uploadTestTargetDir,PLUGIN_FILE)
+        def fwksvc = Mock(FrameworkService)
+
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        def fwk = Mock(Framework) {
+            getBaseDir() >> uploadTestBaseDir
+            getLibextDir() >> uploadTestTargetDir
+        }
+        fwksvc.getRundeckFramework() >> fwk
+        controller.frameworkService = fwksvc
+        controller.apiService=Mock(ApiService)
+        when: "request made without synch token"
+        request.method='POST'
+        !installed.exists()
+        def pluginUrl = Thread.currentThread().getContextClassLoader().getResource(PLUGIN_FILE)
+        params.pluginUrl = pluginUrl.toString()
+        controller.installPlugin()
+
+        then:
+            1 * controller.apiService.renderErrorFormat(_,{
+                it.status== HttpServletResponse.SC_BAD_REQUEST
+                it.code== 'request.error.invalidtoken.message'
+            })
+            0 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+            0 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceType(_,_,_) >> true
+            response.text != '{"msg":"done"}'
+            !installed.exists()
+        cleanup:
+        installed.delete()
+    }
+
+    protected setupFormTokens(params) {
+        def token = SynchronizerTokensHolder.store(session)
+        params[SynchronizerTokensHolder.TOKEN_KEY] = token.generateToken('/test')
+        params[SynchronizerTokensHolder.TOKEN_URI] = '/test'
+    }
+
+    void "unauthorized install plugin fails"() {
+        setup:
+        controller.frameworkService = Mock(FrameworkService)
+        controller.featureService = Mock(FeatureService)
+
+            controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        messageSource.addMessage("request.error.unauthorized.title",Locale.ENGLISH,"Unauthorized")
+        controller.apiService=Mock(ApiService)
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        def pluginUrl = Thread.currentThread().getContextClassLoader().getResource(PLUGIN_FILE)
+        params.pluginUrl = pluginUrl.toString()
+        controller.installPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> false
+        1 * controller.rundeckAuthContextProcessor.getAuthContextForSubject(_)
+        1 * controller.rundeckAuthContextProcessor.authorizeApplicationResourceAny(_, AuthConstants.RESOURCE_TYPE_PLUGIN, [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]) >> false
+        response.text == '{"err":"Unauthorized"}'
+    }
+
+    void "pluginSecurity install plugin fails"() {
+        setup:
+        controller.frameworkService = Mock(FrameworkService)
+        controller.apiService=Mock(ApiService)
+        controller.featureService = Mock(FeatureService)
+
+        controller.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        messageSource.addMessage("plugin.error.unauthorized.upload",Locale.ENGLISH,"Plugin Security Enabled")
+
+        when:
+        request.method='POST'
+        setupFormTokens(params)
+        def pluginUrl = Thread.currentThread().getContextClassLoader().getResource(PLUGIN_FILE)
+        params.pluginUrl = pluginUrl.toString()
+        controller.installPlugin()
+
+        then:
+        1 * controller.featureService.featurePresent(_) >> true
+        response.text == '{"err":"Plugin Security Enabled"}'
+    }
+
+    def "plugin detail for ui plugin"() {
+        given:
+            params.name = 'test1'
+            params.service = 'UI'
+            controller.pluginService = Mock(PluginService)
+            controller.uiPluginService = Mock(UiPluginService)
+            controller.pluginApiService = Mock(PluginApiService)
+            def uiPluginProviderService = Mock(UIPluginProviderService)
+            controller.frameworkService = Mock(FrameworkService)
+
+            def plugin = Mock(UIPlugin)
+            def description = DescriptionBuilder.builder().name('test1').build()
+            def pluginMeta = Mock(PluginMetadata)
+            controller.featureService = Mock(FeatureService)
+            1 * controller.featureService.featurePresent(_) >> false
+        when:
+            controller.pluginDetail('UI', 'test1')
+        then:
+            response.status == 200
+
+            1 * controller.uiPluginService.getUiPluginProviderService() >> uiPluginProviderService
+            1 * controller.uiPluginService.getPluginMessage('UI', 'test1', 'plugin.title', _, _) >> 'ptitle'
+            1 * controller.uiPluginService.getPluginMessage('UI', 'test1', 'plugin.description', _, _) >>
+            'pdescription'
+            1 * controller.pluginApiService.pluginPropertiesAsMap('UI', 'test1', _) >> []
+            1 * controller.pluginService.getPluginDescriptor('test1', uiPluginProviderService) >>
+            new DescribedPlugin<UIPlugin>(plugin, description, 'test1', null, null)
+            1 * controller.frameworkService.getRundeckFramework() >> Mock(IFramework) {
+                1 * getPluginManager() >> Mock(ServiceProviderLoader) {
+                    1 * getPluginMetadata('UI', 'test1') >> pluginMeta
+                }
+            }
+    }
+
+    @Unroll
+    def "groupIcon validates icon name to prevent path traversal - #iconName"() {
+        given:
+            params.iconName = iconName
+            
+        when:
+            controller.groupIcon(iconName)
+            
+        then:
+            response.status == expectedStatus
+            
+        where:
+            iconName                                    | expectedStatus
+            'aws-icon.svg'                              | 200  // Valid format, file exists
+            'datadog-icon.png'                          | 404  // Valid format, but file doesn't exist in test
+            'my-plugin-icon.jpg'                        | 404  // Valid format
+            '../../application.yml'                     | 400  // Path traversal attempt
+            '../../../WEB-INF/classes/application.yml'  | 400  // Path traversal attempt
+            '/etc/passwd'                               | 400  // Absolute path
+            '..\\..\\application.yml'                   | 400  // Windows path traversal
+            'icon;whoami.svg'                           | 400  // Command injection attempt
+            'icon`whoami`.svg'                          | 400  // Command injection attempt
+            'icon$(whoami).svg'                         | 400  // Command injection attempt
+            'icon|whoami.svg'                           | 400  // Pipe character
+            'icon&whoami.svg'                           | 400  // Ampersand
+            'icon with spaces.svg'                      | 400  // Spaces not allowed
+            'icon.svg.yml'                              | 400  // Wrong extension
+            'icon.txt'                                  | 400  // Non-image extension
+            ''                                          | 400  // Empty string
+            null                                        | 400  // Null value
+    }
+}

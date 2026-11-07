@@ -1,0 +1,14 @@
+[package]
+name = "rdx-web"
+description = "embedded SPA (rust-embed), security headers, legacy deep-link redirects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,281 @@
+<template>
+  <div
+    class="well well-sm matchednodes node_filter_results__matched_nodes"
+    :class="{ 'no-margin-bottom': noMarginBottom }"
+  >
+    <div class="row">
+      <div class="col-sm-6">
+        <span
+          v-if="loaded && !loading"
+          class="text-info node_filter_results__matched_nodes_count"
+        >
+          {{ $t("count.nodes.matched", [total, $t("Node.count.vue", total)]) }}
+        </span>
+        <span v-if="loading" class="text-muted">
+          <i class="glyphicon glyphicon-time"></i>
+          {{ $t("loading.matched.nodes") }}
+        </span>
+
+        <span v-if="total > maxShown">
+          <span class="text-strong">
+            {{
+              $t("count.nodes.shown", [
+                maxShown,
+                $t("Node.count.vue", maxShown),
+              ])
+            }}
+          </span>
+        </span>
+      </div>
+
+      <div class="col-sm-6">
+        <div class="pull-right" style="margin-top: -5px">
+          <a
+            v-if="loaded && !loading && nodeFilter"
+            :href="viewInNodesPageUrl"
+            class="text-muted"
+            style="margin-right: 10px"
+          >
+            {{ $t("view.in.nodes.page.prompt") }}
+          </a>
+          <btn
+            type="default btn-sm refresh_nodes"
+            data-loading-text="${g.message(code: 'loading')}"
+            :disabled="loading"
+            :title="$t('click.to.refresh')"
+            @click="update"
+          >
+            {{ $t("refresh") }}
+            <i class="glyphicon glyphicon-refresh"></i>
+          </btn>
+        </div>
+      </div>
+    </div>
+    <div id="matchednodes" class="clearfix row">
+      <div class="col-sm-12 container-fluid">
+        <node-list-embed
+          :nodes="nodeSet.nodes"
+          :tagsummary="nodeSet.tagsummary"
+          :show-exclude-filter-links="true"
+          @filter="handleFilter"
+        >
+        </node-list-embed>
+      </div>
+    </div>
+  </div>
+</template>
+<script lang="ts">
+import NodeListEmbed from "../../job/resources/NodeListEmbed.vue";
+import { _genUrl } from "../../../../library/utilities/genUrl";
+import { url } from "../../../../library";
+import axios from "axios";
+import { defineComponent, ref, computed } from "vue";
+
+import { getRundeckContext, getAppLinks } from "../../../../library";
+
+export default defineComponent({
+  name: "NodeFilterResults",
+  components: {
+    NodeListEmbed,
+  },
+  props: {
+    nodeFilter: {
+      type: String,
+      required: true,
+    },
+    nodeExcludeFilter: {
+      type: String,
+      required: false,
+    },
+    excludeFilterUncheck: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
+    project: {
+      type: String,
+      required: false,
+      default: () => getRundeckContext().projectName,
+    },
+    noMarginBottom: {
+      type: Boolean,
+      required: false,
+      default: false,
+    },
+  },
+  emits: ["filter", "update:total", "update:loading", "update:error"],
+  setup(props) {
+    const paging = ref(true);
+    const loaded = ref(false);
+    const loading = ref(false);
+    const total = ref(0);
+    const allcount = ref(0);
+    const pagingMax = ref(30);
+    const maxShown = ref(30);
+    const page = ref(0);
+    const emptyMode = ref("all");
+    const view = ref("");
+    const error = ref("");
+    const truncated = ref(false);
+    const colkeys = ref([]);
+    const nodeSet = ref({ nodes: [], tagsummary: {} });
+
+    const viewInNodesPageUrl = computed(() => {
+      if (!props.nodeFilter) return "#";
+      const projectName = props.project || getRundeckContext().projectName;
+      const nodesUrl = _genUrl(`/project/${projectName}/nodes`, {
+        filter: props.nodeFilter,
+      });
+      return url(nodesUrl).href;
+    });
+
+    return {
+      paging,
+      loaded,
+      loading,
+      total,
+      allcount,
+      pagingMax,
+      maxShown,
+      page,
+      emptyMode,
+      view,
+      error,
+      truncated,
+      colkeys,
+      nodeSet,
+      viewInNodesPageUrl,
+    };
+  },
+  watch: {
+    nodeFilter() {
+      this.update();
+    },
+    nodeExcludeFilter() {
+      this.update();
+    },
+    excludeFilterUncheck() {
+      this.update();
+    },
+    total(newVal, oldVal) {
+      if (newVal !== oldVal) {
+        this.$emit("update:total", newVal);
+      }
+    },
+    loading(newVal, oldVal) {
+      if (newVal !== oldVal) {
+        this.$emit("update:loading", newVal);
+      }
+    },
+    error(newVal, oldVal) {
+      if (newVal !== oldVal) {
+        this.$emit("update:error", newVal || null);
+      }
+    },
+  },
+  mounted() {
+    if (this.nodeFilter) {
+      this.update();
+    }
+  },
+  methods: {
+    clear() {
+      this.page = 0;
+      this.total = 0;
+      this.error = "";
+      this.allcount = 0;
+      this.truncated = false;
+      this.colkeys = [];
+      this.nodeSet = { nodeset: [], tagsummary: {} };
+    },
+    handleFilter(val: any) {
+      this.$emit("filter", val);
+    },
+    async update() {
+      if (this.nodeFilter && this.emptyMode == "blank") {
+        return;
+      }
+      const filterdata = this.nodeFilter ? { filter: this.nodeFilter } : {};
+      const filterExcludedata = this.nodeExcludeFilter
+        ? { filterExclude: this.nodeExcludeFilter }
+        : {};
+      const page = this.page;
+      const view = this.view ? this.view : "table";
+      const basedata: any = {
+        view: view,
+        declarenone: true,
+        fullresults: true,
+        expanddetail: true,
+        inlinepaging: false,
+        // nodefilterLinkId: this.nodefilterLinkId,
+        excludeFilterUncheck: this.excludeFilterUncheck,
+      };
+      if (this.paging) {
+        basedata.page = page;
+        basedata.max = this.pagingMax;
+        basedata.inlinepaging = true;
+        if (page != 0) {
+          basedata.view = "tableContent";
+        }
+      }
+      if (this.maxShown) {
+        basedata.maxShown = this.maxShown;
+      }
+      const params = Object.assign({}, basedata, filterdata, filterExcludedata);
+      if (this.emptyMode == "localnode" && !this.nodeFilter) {
+        params.localNodeOnly = "true";
+      } else if (this.emptyMode == "blank" && !this.nodeFilter) {
+        this.clear();
+        return;
+      }
+      params.nodeExcludePrecedence = "true";
+      this.loading = true;
+      this.total = 0;
+
+      axios
+        .request({
+          method: "GET",
+          headers: {
+            "x-rundeck-ajax": "true",
+          },
+          url: _genUrl(getAppLinks().frameworkNodesQueryAjax, params),
+        })
+        .then((result) => {
+          this.loading = false;
+          if (result.status === 403) {
+            this.error = "Not authorized";
+          } else if (result.status >= 300) {
+            if (result.data.message) {
+              this.error = result.data.message;
+            } else {
+              this.error = "Error: " + result.status;
+            }
+          } else {
+            this.loaded = true;
+            const data = result.data;
+            this.nodeSet = {
+              nodes: data.allnodes,
+              tagsummary: data.tagsummary,
+            };
+            this.allcount = data.allcount;
+            this.total = data.total;
+            this.truncated = data.truncated;
+            this.colkeys = data.colkeys;
+            this.maxShown = data.max;
+          }
+        })
+        .catch((err) => {
+          this.loading = false;
+          console.log("Nodes Query: request failed: " + err);
+          this.error = "Nodes Query: request failed: " + err;
+        });
+    },
+  },
+});
+</script>
+
+<style scoped>
+.no-margin-bottom {
+  margin-bottom: 0 !important;
+}
+</style>

@@ -1,0 +1,485 @@
+/*
+ * Copyright 2020 Rundeck, Inc. (http://rundeck.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.rundeck.app.components
+
+import com.dtolabs.rundeck.core.authorization.AuthContext
+import com.dtolabs.rundeck.core.authorization.UserAndRolesAuthContext
+import com.dtolabs.rundeck.core.plugins.configuration.Validator
+import com.dtolabs.rundeck.plugins.scm.JobSerializer
+import groovy.transform.CompileStatic
+import groovy.transform.TypeCheckingMode
+import org.rundeck.app.components.jobs.ImportedJob
+import org.rundeck.app.components.jobs.JobDefinitionException
+import org.rundeck.app.components.jobs.JobDefinitionManager
+import org.rundeck.app.components.jobs.JobFormat
+import org.rundeck.app.components.jobs.JobDefinitionComponent
+import org.rundeck.app.components.jobs.UnsupportedFormatException
+import org.rundeck.app.data.model.v1.job.workflow.WorkflowStepData
+import org.springframework.context.ApplicationContext
+import org.springframework.context.ApplicationContextAware
+import rundeck.ScheduledExecution
+import rundeck.services.JobFromMapSerializer
+
+/**
+ * Handles job definition import/export processing
+ */
+@CompileStatic
+class RundeckJobDefinitionManager implements JobDefinitionManager<ScheduledExecution>, ApplicationContextAware {
+    ApplicationContext applicationContext
+
+    private Map<String, JobFormat> defaultFormats = new HashMap<>()
+
+
+    RundeckJobDefinitionManager() {
+        defaultFormats.put('xml', new JobXMLFormat())
+        defaultFormats.put('yaml', new JobYAMLFormat())
+        defaultFormats.put('json', new JobJSONFormat())
+    }
+
+    /**
+     * @return JobDefinitionComponents keyed by name
+     */
+    public Map<String, JobDefinitionComponent> getJobDefinitionComponents() {
+        def beans = applicationContext?.getBeansOfType(JobDefinitionComponent)
+        beans?.values()?.collectEntries { [it.name, it] }
+    }
+
+    /**
+     * @return JobFormats keyed by format name
+     */
+    public Map<String, JobFormat> getJobFormats() {
+        def beans = applicationContext?.getBeansOfType(JobFormat)
+        beans?.values()?.collectEntries { [it.format, it] }
+    }
+
+
+    /**
+     * Duplicate a job definition
+     * @param from
+     * @return
+     */
+    ImportedJob copy(ScheduledExecution from) {
+        jobFromMap(jobToMap(from))
+    }
+
+    /**
+     * Validate imported component associations
+     * @param importedJob
+     * @return true if valid
+     */
+    Validator.ReportSet validateImportedJob(ImportedJob<ScheduledExecution> importedJob) {
+        boolean valid=true
+        def validations=new HashMap<String, Validator.Report>()
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            def report = jobImport.validateImported(importedJob.job, importedJob.associations[jobImport.name])
+            if (report && !report.valid) {
+                valid = false
+            }
+            if (report != null) {
+                validations[jobImport.name] = report
+            }
+        }
+        return new Validator.ReportSet(valid, validations)
+    }
+
+    /**
+     * Validate if a job can be exported to the specified format.
+     * Checks if jobs with conditional steps are being exported to XML format,
+     * which is not supported.
+     * @param scheduledExecution The job to validate
+     * @param format The export format (e.g., 'xml', 'yaml', 'json')
+     * @return Validator.Report indicating if the export is valid
+     */
+    @CompileStatic
+    Validator.Report validateJobForExport(ScheduledExecution scheduledExecution, String format) {
+        if (format == 'xml' && scheduledExecution && isV2JobDefinition(scheduledExecution)) {
+            return Validator.buildReport()
+                .error(
+                    'workflow',
+                    "Cannot export jobs with conditional steps to XML format. " +
+                    "Conditional steps are only supported in JSON and YAML formats."
+                )
+                .build()
+        }
+        return Validator.buildReport().build()
+    }
+
+
+    /**
+     * Persist component associations via JobImport beans
+     * @param importedJob
+     * @param authContext
+     * @return
+     */
+    void persistComponents(ImportedJob<ScheduledExecution> importedJob, UserAndRolesAuthContext authContext) {
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            jobImport.persist(importedJob.job, importedJob.associations[jobImport.name], authContext)
+        }
+    }
+    /**
+     * Callback to indicate persistence completed
+     * @param importedJob
+     * @param authContext
+     * @return
+     */
+    void waspersisted(ImportedJob<ScheduledExecution> importedJob, UserAndRolesAuthContext authContext) {
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            jobImport.wasPersisted(importedJob.job, importedJob.associations[jobImport.name], authContext)
+        }
+    }
+
+    /**
+     * Callback to indicate job delete will begin
+     * @param importedJob
+     * @param authContext
+     * @return
+     */
+    void beforeDelete(ScheduledExecution job, AuthContext authContext) {
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            jobImport.willDeleteJob(job, authContext)
+        }
+    }
+
+    /**
+     * Callback to indicate job delete will begin
+     * @param importedJob
+     * @param authContext
+     * @return
+     */
+    void afterDelete(ScheduledExecution job, AuthContext authContext) {
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            jobImport.didDeleteJob(job, authContext)
+        }
+    }
+
+    /**
+     * Find specified format
+     * @param format
+     * @return
+     * @throws JobDefinitionException
+     */
+    JobFormat getFormat(String format) throws UnsupportedFormatException {
+        def found = jobFormats?.get(format)
+        if (!found) {
+            if (defaultFormats[format]) {
+                return defaultFormats[format]
+            }
+            throw new UnsupportedFormatException("Format not found: $format")
+        }
+        found
+    }
+
+    /**
+     * Create a single Job definition from canonical map
+     * @param map
+     * @return
+     */
+    ImportedJob<ScheduledExecution> jobFromMap(Map map) {
+        def job = ScheduledExecution.fromMap(map)
+        def Map<String, Object> associates = [:]
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            def result = jobImport.importCanonicalMap(job, map)
+            if (result) {
+                associates[jobImport.name] = result
+            }
+        }
+        importedJob(job, associates)
+    }
+
+    /**
+     * Update job definition
+     * @param job job to update
+     * @param importedJob an imported job definition used for updating
+     * @param params request params map
+     * @return imported job contains job definition and associations map
+     */
+    ImportedJob<ScheduledExecution> updateJob(ScheduledExecution job, ImportedJob<ScheduledExecution> importedJob, Map params) {
+        def Map<String, Object> associates = importedJob?.associations ?: [:]
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent jobImport ->
+            def jcParams = getParamsForJobComponent(params, jobImport)
+            def result = jobImport.updateJob(job, importedJob?.job, associates[jobImport.name], jcParams ?: params)
+            if (result) {
+                associates[jobImport.name] = result
+            }
+        }
+        RundeckJobDefinitionManager.importedJob(job, associates)
+    }
+
+    static String getFormFieldPrefixForJobComponent(String name) {
+        return "jobComponent.${name}.configMap."
+    }
+    static String getMessagesTypeForJobComponent(String name) {
+        return "jobComponent.${name}"
+    }
+
+    public Map getParamsForJobComponent(Map params, JobDefinitionComponent jobImport) {
+        if (params.get('jobComponent') instanceof Map) {
+            Map jc = (Map) params['jobComponent']
+            if (jc.get(jobImport.name) instanceof Map) {
+                Map jc1 = (Map) jc[jobImport.name]
+                if (jc1.get('configMap') instanceof Map) {
+                    return (Map) jc1['configMap']
+                }
+            }
+        }
+        return null
+    }
+
+    Map<String, Map> getJobDefinitionComponentValues(ScheduledExecution job) {
+        Map<String, Map> jobComponentValues = [:]
+        jobDefinitionComponents?.each { name, comp ->
+            if (comp.inputProperties) {
+                jobComponentValues[name] = comp.getInputPropertyValues(job, null)
+            }
+        }
+        jobComponentValues
+    }
+
+    Map<String, Map> getImportedJobDefinitionComponentValues(ImportedJob<ScheduledExecution> importedJob) {
+        Map<String, Map> jobComponentValues = [:]
+        jobDefinitionComponents?.each { name, comp ->
+            if (comp.inputProperties) {
+                jobComponentValues[name] = comp.getInputPropertyValues(importedJob.job, importedJob.associations[name])
+            }
+        }
+        jobComponentValues
+    }
+
+    /**
+     * Create jobs from collection of canonical job Maps
+     * @param list
+     * @return
+     * @throws Exception if
+     */
+    List<ImportedJob<ScheduledExecution>> createJobs(Collection<?> dataset) throws JobDefinitionException {
+        ArrayList list = new ArrayList()
+        if (dataset instanceof Collection) {
+            //iterate through list of jobs
+            dataset.each { jobobj ->
+                if (jobobj instanceof Map) {
+                    try {
+                        list << jobFromMap(jobobj)
+                    } catch (Exception e) {
+                        throw new JobDefinitionException("Unable to create Job: " + e.getMessage(), e)
+                    }
+                } else {
+                    throw new JobDefinitionException("Unexpected data type: " + jobobj.getClass().name)
+                }
+            }
+        } else {
+            throw new JobDefinitionException("Unexpected data type: " + dataset.class.name)
+        }
+        return list
+    }
+
+    /**
+     * Create a job serializer
+     * @param job
+     * @return
+     */
+    JobSerializer createJobSerializer(ScheduledExecution job) {
+        new JobFromMapSerializer(this, jobToMap(job))
+    }
+
+    /**
+     * Create canonical map from a job defintion
+     * @param job
+     * @return
+     */
+    Map jobToMap(ScheduledExecution job, Boolean isXml = false) {
+        def oMap = job.toMap()
+        // Add project with a temporary key for XML codec processing
+        // This will be removed in JobsXMLCodec.convertJobMap() and won't appear in YAML/JSON
+        if(isXml) oMap['_xml_project'] = job.project
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent export ->
+            def vMap = export.exportCanonicalMap(oMap)
+            if (vMap) {
+                oMap = vMap
+            }
+        }
+        return oMap
+    }
+    /**
+     * Create canonical map from a imported defintion
+     * @param imported
+     * @return
+     */
+    Map jobToMap(ImportedJob<ScheduledExecution> imported) {
+        def oMap = imported.job.toMap()
+        jobDefinitionComponents?.each { String name, JobDefinitionComponent export ->
+            def vMap = export.exportCanonicalMap(oMap, imported.associations[name])
+            if (vMap) {
+                oMap = vMap
+            }
+        }
+        return oMap
+    }
+
+    /**
+     * Check if a ScheduledExecution has conditional steps in its workflow
+     * @param job The ScheduledExecution to check
+     * @return true if the workflow contains conditional steps
+     */
+    @CompileStatic
+    static boolean isV2JobDefinition(ScheduledExecution job) {
+        def workflowData = job.getWorkflowData()
+        if (workflowData && workflowData.getSteps()) {
+            return workflowData.getSteps().any { WorkflowStepData step ->
+               step.getConditionSet() != null
+            }
+        }
+        return false
+    }
+
+    /**
+     * Convert canonical map to Xmap
+     * @param map canonical map
+     * @param preserveUuid if true, preserve job uuid
+     * @param replaceId replacement ID
+     * @param stripJobRef 'name' or 'uuid', strips this value from job references
+     * @return
+     */
+    @CompileStatic(TypeCheckingMode.SKIP)
+    Map jobMapToXMap(
+            Map map,
+            boolean preserveUuid = true,
+            String replaceId = null,
+            String stripJobRef = null
+    ) {
+        //nb: used when exporting execution xml and including job definition, we hardcode reference to JobXmlFormat
+        JobXMLFormat jobXmlFormat = (JobXMLFormat) getFormat('xml')
+        jobXmlFormat.jobMapToXMap(map, preserveUuid, replaceId, stripJobRef)
+    }
+
+
+    @Override
+    String exportAsXml(List<ScheduledExecution> list) {
+        exportAs('xml', list)
+    }
+
+
+    @Override
+    String exportAsYaml(List<ScheduledExecution> list) {
+        exportAs('yaml', list)
+    }
+
+    @Override
+    String exportAs(String format, List<ScheduledExecution> list) {
+        def writer = new StringWriter()
+        exportAs(format, list, writer)
+        return writer.toString()
+    }
+
+    @Override
+    String exportImportedAs(String format, List<ImportedJob<ScheduledExecution>> list) {
+        def writer = new StringWriter()
+        exportImportedAs(format, list, writer)
+        return writer.toString()
+    }
+
+    @Override
+    void exportAs(String format, List<ScheduledExecution> list, Writer writer) {
+        exportAs(format, list, JobFormat.defaultOptions(), writer)
+    }
+
+    @Override
+    void exportImportedAs(String format, List<ImportedJob<ScheduledExecution>> list, Writer writer) {
+        exportImportedAs(format, list, JobFormat.defaultOptions(), writer)
+    }
+
+    @Override
+    void exportAs(String format, List<ScheduledExecution> list, JobFormat.Options options, Writer writer) throws JobDefinitionException {
+        def mapList = list.collect { jobToMap(it, format == "xml") }
+        getFormat(format).encode(mapList, options, writer)
+    }
+
+    @Override
+    void exportImportedAs(String format, List<ImportedJob<ScheduledExecution>> list, JobFormat.Options options, Writer writer) throws JobDefinitionException {
+        def mapList = list.collect { jobToMap(it) }
+        getFormat(format).encode(mapList, options, writer)
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeXml(File file) throws JobDefinitionException {
+        decodeFormat('xml', file)
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeXml(Reader reader) throws JobDefinitionException {
+        decodeFormat('xml', reader)
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeYaml(File file) throws JobDefinitionException {
+        decodeFormat('yaml', file)
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeYaml(Reader reader) throws JobDefinitionException {
+        decodeFormat('yaml', reader)
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeFormat(String format, File file) throws JobDefinitionException {
+        file.withReader('UTF-8') {
+            decodeFormat(format, it)
+        }
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeFormat(String format, InputStream inputStream)
+            throws JobDefinitionException {
+        inputStream.withReader('UTF-8') {
+            decodeFormat(format, it)
+        }
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeFormat(String format, String content) throws JobDefinitionException {
+        decodeFormat(format, new StringReader(content))
+    }
+
+
+    @Override
+    List<ImportedJob<ScheduledExecution>> decodeFormat(String format, Reader reader) throws JobDefinitionException {
+        def jobMaps = getFormat(format).decode(reader)
+        createJobs(jobMaps)
+    }
+
+    /**
+     * Create an imported job from job and associations
+     * @param job
+     * @param associations
+     * @return
+     */
+    static ImportedJob<ScheduledExecution> importedJob(ScheduledExecution job, Map<String, Object> associations = [:]) {
+        new ImportedJobDefinition(job: job, associations: associations)
+    }
+
+    static class ImportedJobDefinition implements ImportedJob<ScheduledExecution> {
+        ScheduledExecution job
+        Map<String, Object> associations = [:]
+    }
+}
+

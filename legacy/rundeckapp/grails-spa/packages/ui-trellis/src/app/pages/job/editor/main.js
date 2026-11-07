@@ -1,0 +1,149 @@
+// The Vue build version to load with the `import` command
+// (runtime-only or standalone) has been set in webpack.base.conf with an alias.
+import { createApp, markRaw } from "vue";
+import { createPinia } from "pinia";
+import VueCookies from "vue-cookies";
+import * as uiv from "uiv";
+import moment from "moment";
+
+import NotificationsEditorSection from "./NotificationsEditorSection.vue";
+import ResourcesEditorSection from "./ResourcesEditorSection.vue";
+import SchedulesEditorSection from "./SchedulesEditorSection.vue";
+import OtherEditorSection from "./OtherEditorSection.vue";
+import { initI18n, commonAddUiMessages } from "../../../utilities/i18n";
+import { observer } from "../../../utilities/uiSocketObserver";
+import { getRundeckContext } from "@/library";
+import { loadJsonData } from "@/app/utilities/loadJsonData";
+import DetailsEditorSection from "@/app/pages/job/editor/DetailsEditorSection.vue";
+import ExecutionEditorSection from "./ExecutionEditorSection.vue";
+import WorkflowEditorSection from "@/app/pages/job/editor/WorkflowEditorSection.vue";
+import WorkflowEditWarning from "@/app/pages/job/editor/WorkflowEditWarning.vue";
+import "primeicons/primeicons.css";
+import HeaderSection from "@/app/pages/job/editor/HeaderSection.vue";
+import { configurePrimeVue } from "@/library/utilities/primeVueConfig";
+
+const locale = window._rundeck.locale || "en_US";
+moment.locale(locale);
+
+const i18n = initI18n();
+const EventBus = getRundeckContext().eventBus;
+const uiMeta = loadJsonData("pageUiMeta");
+const uiType = uiMeta?.uiType || "current";
+const pinia = createPinia();
+
+const jobSections = [
+  {
+    name: "JobEditDetailsApp",
+    component: { DetailsEditorSection },
+    elementClass: "job-editor-details-vue",
+    visible: uiType === "next",
+  },
+  {
+    name: "JobEditHeaderApp",
+    component: { HeaderSection },
+    elementClass: "job-editor-header-vue",
+    visible: uiType === "next",
+  },
+  {
+    name: "JobEditNotificationsApp",
+    component: { NotificationsEditorSection },
+    elementClass: "job-editor-notifications-vue",
+    addEventBus: true,
+    addCookies: true,
+    visible: true,
+  },
+  {
+    name: "JobEditResourcesApp",
+    component: { ResourcesEditorSection },
+    elementClass: "job-editor-resources-vue",
+    addEventBus: true,
+    addUiMessages: true,
+    visible: true,
+  },
+  {
+    name: "JobEditExecutionApp",
+    component: { ExecutionEditorSection },
+    elementClass: "job-editor-execution-vue",
+    visible: true,
+  },
+  {
+    name: "JobEditSchedulesApp",
+    component: { SchedulesEditorSection },
+    elementClass: "job-editor-schedules-vue",
+    addEventBus: true,
+    addUiMessages: true,
+    visible: true,
+  },
+  {
+    name: "JobEditOtherApp",
+    component: { OtherEditorSection },
+    elementClass: "job-editor-other-vue",
+    addEventBus: true,
+    visible: true,
+  },
+  {
+    name: "JobEditWorkflowApp",
+    component: { WorkflowEditorSection },
+    elementClass: "job-editor-workflow-vue",
+    addUiMessages: true,
+    visible: true,
+  },
+];
+
+const mountSection = (section) => {
+  section.elements = document.body.getElementsByClassName(section.elementClass);
+
+  if (!section.elements || section.elements.length === 0) {
+    return;
+  }
+  try {
+    section.elements.forEach((element) => {
+      const app = createApp({
+        name: section.name,
+        components: { ...section.component },
+        data() {
+          return section.addEventBus ? { EventBus } : {};
+        },
+      });
+      app.use(uiv);
+      app.use(i18n);
+      if (section.addUiMessages) {
+        app.provide("addUiMessages", async (messages) =>
+          commonAddUiMessages(i18n, messages),
+        );
+      }
+      if (section.addCookies) {
+        app.use(VueCookies);
+      }
+      configurePrimeVue(app, { includeTooltip: true });
+      app.use(pinia);
+      app.mount(element);
+    });
+  } catch (e) {
+    console.warn(e, section);
+  }
+};
+
+//on job edit page listen for dom content changes and install UI Sockets
+window.addEventListener("DOMContentLoaded", () => {
+  // Job Editing page - Workflow Tab
+  jobSections.forEach((section) => section.visible && mountSection(section));
+
+  const elem = document.querySelector("#workflowContent .pflowlist.edit");
+  if (elem) {
+    observer.observe(elem, { subtree: true, childList: true });
+  }
+
+  // Register workflow-edit-warning UiSocket widget
+  const rootStore = getRundeckContext()?.rootStore;
+  if (rootStore) {
+    rootStore.ui.addItems([
+      {
+        section: "job-editor",
+        location: "workflow-edit-warning",
+        visible: true,
+        widget: markRaw(WorkflowEditWarning),
+      },
+    ]);
+  }
+});

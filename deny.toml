@@ -1,0 +1,74 @@
+# cargo-deny configuration (MISSION §4 "Security"): licenses allow-list, no duplicate versions, crates.io only,
+# RustSec advisories. Checked by `make deny` and ci.yml. Format: cargo-deny 0.20 (version-2 semantics, where every
+# advisory — vulnerability, unmaintained, unsound, notice — is an error unless listed in `ignore` with a reason).
+
+[graph]
+# Check the whole feature surface, not just the defaults, so an optional feature cannot smuggle a dependency in.
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---- advisories --------------------------------------------------------------------------------------------
+# Vulnerabilities: deny (not configurable in this cargo-deny version; every advisory is an error).
+# Unmaintained: checked for the whole graph; an unmaintained advisory is an error unless waived below with a reason
+# and an expiry date in the reason text (MISSION §4 "clean or documented waivers with expiry").
+# Yanked crate versions: deny.
+[advisories]
+db-path = "$CARGO_HOME/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+unmaintained = "all"
+yanked = "deny"
+# The cloud sandbox reaches GitHub only through the HTTPS proxy that the git CLI is configured for.
+git-fetch-with-cli = true
+ignore = [
+    # { id = "RUSTSEC-0000-0000", reason = "why, and until when (YYYY-MM-DD)" },
+]
+
+# ---- licenses ----------------------------------------------------------------------------------------------
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    # MPL-2.0 is accepted case by case (MISSION §4): file-level copyleft is compatible with the Apache-2.0 binary
+    # as long as the crate is used unmodified. Any MPL-2.0 crate added to the tree is named in `exceptions` below
+    # with its justification; this entry only makes the SPDX expression resolvable.
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+# Case-by-case entries (crate = "...", allow = ["MPL-2.0"], reason) go here; none in Phase 0.
+exceptions = []
+
+[licenses.private]
+# Workspace crates are not published; their license fields still have to parse.
+ignore = true
+
+# ---- bans ------------------------------------------------------------------------------------------------
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = [
+    # MISSION §3.2: rustls only, no OpenSSL in the binary.
+    { crate = "openssl", reason = "rustls only (MISSION §3.2)" },
+    { crate = "openssl-sys", reason = "rustls only (MISSION §3.2)" },
+    { crate = "native-tls", reason = "rustls only (MISSION §3.2)" },
+]
+# Duplicate-version waivers (skip / skip-tree) need a reason and are reviewed at every phase gate; none in Phase 0.
+skip = []
+skip-tree = []
+
+# ---- sources -----------------------------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

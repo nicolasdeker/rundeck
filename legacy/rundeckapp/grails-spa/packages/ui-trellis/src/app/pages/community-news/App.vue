@@ -1,0 +1,38 @@
+<template>
+  <div>
+    <div class="col-xs-12">
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">
+            {{ $t("message_communityNews") }}
+          </h2>
+        </div>
+        <div class="card-content">
+          <community-news-feed />
+        </div>
+        <div class="card-footer"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import { defineComponent } from "vue";
+import CommunityNewsFeed from "./CommunityNewsFeed.vue";
+
+export default defineComponent({
+  name: "CommunityNews",
+  components: {
+    CommunityNewsFeed,
+  },
+  data() {
+    return {
+      RundeckContext: null,
+    };
+  },
+  mounted() {},
+  methods: {},
+});
+</script>
+
+<style lang="scss" scoped></style>

@@ -1,0 +1,42 @@
+# tests/parity-skips.toml — upstream functional tests that `rdx` is allowed to fail (MISSION §8: "a legacy-specific or
+# wrong test goes in tests/parity-skips.toml with a justification and stays deviated/blocked in PARITY.md").
+#
+# Read by scripts/parity-report.py (called from scripts/parity.sh and .github/workflows/parity.yml). A failure that
+# matches an entry is "excused": still counted as failed in the report, but it does not fail the rdx gate. Entries
+# apply to the `rdx` target only — on the `legacy` baseline every failure is a fact to record, never excused.
+# The file is validated strictly: unknown keys, an unknown status or a `ref` that does not exist fail the run.
+#
+# Schema (schema = 1):
+#   [[skip]]
+#   spec   = "org.rundeck.tests.functional.api.<package>.<Spec>"   # fully qualified Spock class; fnmatch globs allowed
+#   test   = "name of the feature method"                           # or "*" for every test of the spec; globs allowed
+#   status = "deviated"                                             # deviated = behaviour intentionally differs (needs an ADR)
+#                                                                   # blocked  = cannot pass yet (needs a BLOCKED/ file)
+#   reason = "one sentence: why the upstream test cannot or must not pass against rdx"
+#   ref    = "docs/adr/000N-<slug>.md"                              # or "BLOCKED/<id>.md" — the file must exist
+#
+# Example (NOT active — there are no entries yet):
+#   [[skip]]
+#   spec   = "org.rundeck.tests.functional.api.system.SystemInfoSpec"
+#   test   = "system info reports the JVM vendor"
+#   status = "deviated"
+#   reason = "rdx has no JVM; ADR-0003 replaces the jvm block with the Rust runtime description"
+#   ref    = "docs/adr/0003-system-info-runtime.md"
+
+schema = 1
+
+# The two SCM specs fail on the legacy oracle itself (gitea fixture refuses the repository creation) in both Phase 0
+# baseline runs — see PARITY.md "Oracle baseline" and BLOCKED/oracle-scm-gitea-fixture.md.
+[[skip]]
+spec   = "org.rundeck.tests.functional.api.scm.ScmPluginSetupSpec"
+test   = "*"
+status = "blocked"
+reason = "fails at initialization on rundeck/rundeck:6.3.0 itself: GiteaApiRemoteRepo cannot create repoExample in the gitea fixture"
+ref    = "BLOCKED/oracle-scm-gitea-fixture.md"
+
+[[skip]]
+spec   = "org.rundeck.tests.functional.api.scm.ScmPluginJobDiffSpec"
+test   = "*"
+status = "blocked"
+reason = "fails at initialization on rundeck/rundeck:6.3.0 itself: GiteaApiRemoteRepo cannot create repoExample4 in the gitea fixture"
+ref    = "BLOCKED/oracle-scm-gitea-fixture.md"

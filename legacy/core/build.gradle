@@ -1,0 +1,196 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+plugins {
+    id "org.dvaske.gradle.git-build-info"
+    id "java-library"
+    id 'com.github.gmazzo.buildconfig' version '3.1.0'
+
+}
+import java.text.SimpleDateFormat
+
+/**
+ * The Rundeck Core API build file
+ **/
+evaluationDependsOn(':rundeck-storage')
+apply plugin: 'idea'
+apply plugin: "org.dvaske.gradle.git-build-info"
+apply plugin: 'signing'
+apply plugin: 'java-library'
+
+description = 'The Rundeck Core API project'
+
+archivesBaseName = 'rundeck-core'
+defaultTasks 'clean'
+apply plugin: "groovy"
+
+apply from: "../gradle/java-version.gradle"
+
+configurations {
+     provided
+}
+sourceSets {
+     main { compileClasspath += configurations.provided }
+}
+
+tasks.withType(Javadoc) {
+     classpath += configurations.provided
+}
+dependencies {
+    api project(":rundeck-storage:rundeck-storage-api")
+    api project(":rundeck-storage:rundeck-storage-data")
+    api project(":rundeck-storage:rundeck-storage-conf")
+    api project(":rundeck-authz:rundeck-authz-api")
+    api project(":rundeck-authz:rundeck-authz-core")
+    api project(":rundeck-authz:rundeck-authz-yaml")
+    api project(":rundeck-data-models")
+
+    api ("com.google.guava:guava:${guavaVersion}") {
+        exclude group:'org.codehaus.mojo', module: 'animal-sniffer-annotations'
+        exclude group:'org.checkerframework', module: 'checker-compat-qual'
+        exclude group:'com.google.errorprone', module: 'error_prone_annotations'
+        exclude group:'com.google.j2objc', module: 'j2objc-annotations'
+        exclude group:'com.google.code.findbugs', module: 'jsr305'
+        exclude group:'org.checkerframework', module: 'checker-qual'
+    }
+
+    api('org.dom4j:dom4j:2.2.0'){
+        exclude group:'javax.xml.bind', module: 'jaxb-api'
+        exclude group: 'pull-parser'
+    }
+
+    api "org.apache.ant:ant:${antVersion}",
+        "org.slf4j:slf4j-api:${slf4jVersion}",
+        "commons-codec:commons-codec:${commonsCodecVersion}",
+        'commons-collections:commons-collections:3.2.2',
+        "org.apache.commons:commons-lang3:${commonsLang3Version}",
+        "jaxen:jaxen:${jaxenVersion}",
+        "com.fasterxml.jackson.core:jackson-databind:${jacksonDatabindVersion}",
+        "org.yaml:snakeyaml:${snakeyamlVersion}",
+        "com.squareup.retrofit2:retrofit:3.0.0",
+        "com.squareup.retrofit2:converter-jackson:3.0.0",
+        "com.squareup.retrofit2:converter-jaxb:3.0.0",
+        "jakarta.servlet:jakarta.servlet-api:${jakartaServletVersion}"
+
+    implementation "org.springframework.security:spring-security-crypto:${project.property('spring-security.version')}"
+    implementation "org.eclipse.jetty:jetty-util:${project.property('jetty.version')}"
+
+    implementation ("commons-beanutils:commons-beanutils:${beanutilsVersion}")
+
+    implementation ("org.apache.httpcomponents:httpclient:${httpClientVersion}"){
+      exclude group:'commons-codec', module: 'commons-codec'
+      exclude group:'org.apache.httpcomponents', module: 'httpcore'
+    }
+
+    implementation ("org.apache.httpcomponents:httpcore:${httpCoreVersion}")
+
+    compileOnly "org.projectlombok:lombok:${lombokVersion}"
+    annotationProcessor "org.projectlombok:lombok:${lombokVersion}"
+    testImplementation "junit:junit:${junitVersion}"
+    testImplementation "org.mockito:mockito-core:${mockitoInlineVersion}"
+    testImplementation "net.bytebuddy:byte-buddy:${byteBuddyVersion}"
+    testImplementation "org.objenesis:objenesis:${objenesisVersion}"
+
+    testImplementation "org.apache.groovy:groovy-all:${groovyVersion}"
+    testImplementation platform("org.spockframework:spock-bom:${spockVersion}")
+    testImplementation "org.spockframework:spock-core"
+    testImplementation "org.spockframework:spock-junit4"
+    testImplementation "com.squareup.retrofit2:retrofit-mock:3.0.0"
+    testImplementation "com.squareup.okhttp3:mockwebserver:${okhttpVersion}"
+    testImplementation "cglib:cglib-nodep:${cglibNoDepVersion}"
+
+
+    testRuntimeOnly 'org.junit.vintage:junit-vintage-engine'
+    testImplementation group: 'org.junit-pioneer', name: 'junit-pioneer', version: '1.9.1'
+
+    // Add constraints to fix transitive dependency conflicts
+    constraints {
+        implementation ("org.jetbrains.kotlin:kotlin-stdlib:${kotlinVersion}")
+    }
+}
+
+
+buildConfig {
+    className("BuildConfig")
+    packageName(project.group + '.meta')
+
+    buildConfigField('String', 'NAME', "\"rundeck\"")
+    buildConfigField('String', 'VERSION', "\"${project.version}\"")
+    buildConfigField('String', 'GIT_COMMIT', "\"${project.gitCommit}\"")
+    buildConfigField('String', 'GIT_BRANCH', "\"${project.gitBranch}\"")
+    buildConfigField('String', 'GIT_DESCRIPTION', "\"${project.gitDescribeInfo}\"")
+    buildConfigField('String', 'BUILD_NUM', "\"0\"")
+    buildConfigField('String', 'BUILD_IDENT', "\"${version + '-0'}\"")
+}
+
+def archiveName = project.name
+
+
+if (! archiveName.startsWith('rundeck'))
+    archiveName = "rundeck-${project.name}"
+else if (archiveName.startsWith('rundeckapp'))
+    archiveName = project.name.replace('rundeckapp', 'rundeck')
+
+task gitInfo {
+    doLast {
+        println "HEAD:     $project.gitHead"
+        println "Describe: $project.gitDescribeInfo"
+        println "Commit:   $project.gitCommit"
+        println "Branch:   $project.gitBranch"
+        println "Remote:   $project.gitRemote"
+    }
+}
+
+jar.doFirst {
+    manifest {
+        attributes 'Rundeck-Version': version
+        attributes 'Rundeck-Build-Date': "${new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssX").format(new Date())}"
+    }
+}
+
+task expandTemplate {
+    inputs.file "$projectDir/src/main/meta/com/dtolabs/rundeck/core/application.properties"
+    outputs.file "$projectDir/src/main/resources/META-INF/com/dtolabs/rundeck/core/application.properties"
+
+    doLast {
+        ant.delete(file: "$projectDir/src/main/resources/META-INF/com/dtolabs/rundeck/core/application.properties")
+        def datestring = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssX").format(new Date())
+        println("Building: $version-0 ($datestring)")
+        copy {
+            expand('version': version, 'version_build': '0', 'version_ident': version + '-0', date: datestring)
+            from "$projectDir/src/main/meta/com/dtolabs/rundeck/core/application.properties"
+            into "$projectDir/src/main/resources/META-INF/com/dtolabs/rundeck/core/"
+        }
+    }
+}
+processResources.dependsOn tasks.expandTemplate
+// Note: sourceJar/sourcesJar dependencies on expandTemplate are handled by exported-project.gradle afterEvaluate
+
+test{
+    systemProperties 'rdeck.base': "$projectDir/build/rdeck_base"
+    useJUnitPlatform()
+    
+    // Java 17 + CGLIB/Spock: Open modules for mocking
+    jvmArgs = [
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.io=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED'
+    ]
+}
+
+ext.description= "Rundeck project ${project.name}"
+ext.publishName = project.name
+//apply from: "${rootDir}/gradle/exported-project.gradle"

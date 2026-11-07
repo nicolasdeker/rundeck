@@ -1,0 +1,652 @@
+package org.rundeck.util.gui.pages.jobs
+
+import groovy.transform.CompileStatic
+import org.openqa.selenium.By
+import org.openqa.selenium.StaleElementReferenceException
+import org.openqa.selenium.WebElement
+import org.openqa.selenium.support.ui.ExpectedConditions
+import org.openqa.selenium.support.ui.Select
+import org.openqa.selenium.support.ui.WebDriverWait
+import org.rundeck.util.container.SeleniumContext
+import org.rundeck.util.gui.pages.BasePage
+import org.rundeck.util.gui.pages.execution.ExecutionShowPage
+import org.rundeck.util.gui.pages.project.ActivityListTrait
+import org.rundeck.util.gui.scm.ScmStatusBadge
+
+import java.time.Duration
+
+/**
+ * Job show page
+ */
+@CompileStatic
+class JobShowPage extends BasePage implements ActivityListTrait {
+
+    By jobUuidBy = By.xpath("//*[@class='rd-copybox__content']")
+    By stepsInJobDefinitionBy = By.cssSelector(".pflowitem.wfctrlholder")
+    By jobDefinitionModalBy = By.cssSelector('a[href="#job-definition-modal"]')
+    By jobDefinitionModalButtonBy = By.cssSelector('a[href="#job-definition-modal"][data-toggle="modal"]')
+    By jobDefinitionModalContentBy = By.id("job-definition-modal")
+    By createdByBy = By.cssSelector("[data-testid='created-by']")
+    By lastModifiedByBy = By.cssSelector("[data-testid='last-modified-by']")
+    By executionAclWarningBadgeBy = By.cssSelector("[data-testid='execution-acl-warning-badge']")
+    By executionAclWarningBy = By.cssSelector("[data-testid='execution-acl-warning']")
+    By executionAclFixLinkBy = By.cssSelector("[data-testid='execution-acl-fix-link']")
+    By detailTableBy = By.id("detailtable")
+    By notificationDefinitionBy = By.cssSelector('#detailtable.tab-pane > div.row > div.col-sm-12.table-responsive > table.table.item_details> tbody > tr > td.container > div.row > div.col-sm-12 > div.overflowx')
+    By closeJobDefinitionModalBy = By.xpath("//*[contains(@id,'job-definition-modal_footer')]//*[@type='submit']")
+    By jobInfoGroupBy = By.cssSelector('div.jobInfoSection a.text-secondary')
+    By descriptionText = By
+            .xpath("//*[contains(@class, 'section-space')]//*[contains(@class, 'h5') and contains(@class, 'text-strong')] | //*[contains(@class, 'markdown-body')]")
+    By cronBy = By.xpath("//*[@class='cronselected']")
+    By scheduleTimeBy = By.xpath("//*[@class='scheduletime']")
+    By multipleExecBy = By.xpath("//*[@id=\"detailtable\"]//td[text()='Multiple Executions?']")
+    By multipleExecYesBy = By.xpath("//*[@id=\"detailtable\"]//td[contains(text(),'Yes')]")
+    By workflowDetailBy = By.xpath("//*[@id='workflowstrategydetail']//*[@class='col-sm-12']")
+    By nodeFilterSectionMatchedNodesBy = By.cssSelector("#detailtable.tab-pane  tr#exec_detail_nodes  .exec_detail__matchednodes")
+    By threadCountBy = By.cssSelector("div[class\$='threadcount'] span[class*='text-strong']")
+    By nodeKeepGoingBy = By.cssSelector("div[class='exec_detail__nodeKeepgoing'] span[class^='text-strong']")
+    By nodeRankOrderAscendingBy = By.cssSelector("div[class\$='nodeRankOrderAscending'] span[class^='text-strong']")
+    By nodeSelectedByDefaultBy = By.cssSelector("div[class\$='nodeSelectedByDefault'] span[class^='text-strong']")
+    By orchestratorNameBy = By.xpath("//details[contains(@id, 'exec_detail__orchestrator')]")
+    By closeDefinitionModalBy = By.cssSelector("div[id='job-definition-modal_footer'] button[data-dismiss='modal']")
+    By jobActionBy = By.xpath("//div[contains(@class, 'job-action-button')]")
+    By jobActionEditBy = By.xpath("//a[@title='Edit this Job']")
+    /**
+     * Run UI: jobs list loads the exec fragment in {@code #execDiv}; only match when the modal is visible
+     * ({@code .in} / {@code .show}) so a stale hidden fragment is not used. Job show embeds the form in {@code #runjob}.
+     */
+    By nodeFilterInputBy = By.cssSelector(
+            "#execDiv.modal.in #doReplaceFilters, #execDiv.modal.show #doReplaceFilters, #runjob #doReplaceFilters")
+    By nodeFilterOverrideBy = By.cssSelector(
+            "#execDiv.modal.in #filterradio, #execDiv.modal.show #filterradio, #runjob #filterradio")
+    By nodeFilterInputValueBy = By.cssSelector(
+            "#execDiv.modal.in input[name=\"extra.nodefilter\"], #execDiv.modal.show input[name=\"extra.nodefilter\"], #runjob input[name=\"extra.nodefilter\"]")
+    By dropDownToggleBy = By.cssSelector("button[data-testid='nfi-toggle']")
+    By selectAllNodesLinkBy = By.cssSelector("a.xnodefilterlink.job_edit__node_filter__filter_select_all")
+    By localhostNodeBy = By.cssSelector(".col-xs-6.node_ident.embedded_node.tight.server .fas.fa-hdd")
+    By popoverContentBy = By.cssSelector("div.popover-content")
+    By nodeFilterLinkBy = By.cssSelector("node-filter-link[params*='linkicon']")
+    By arrowIconBy = By.cssSelector("i.glyphicon-circle-arrow-right")
+    By schedJobNodeFilterBy = By.cssSelector(
+            "#execDiv.modal.in div.input-group.nodefilters.multiple-control-input-group, " +
+                    "#execDiv.modal.show div.input-group.nodefilters.multiple-control-input-group, " +
+                    "#runjob div.input-group.nodefilters.multiple-control-input-group")
+    By jobLinkTitleBy = By.xpath("//a[contains(@class, 'job-header-link')]")
+    By autocompleteJobStepDefinitionBy = By.cssSelector("#wfitem_0 > span > div > div > span > span > span.text-success")
+    By runFormBy = By.cssSelector(
+            "#execDiv.modal.in #exec_options_form #formbuttons #execFormRunButton, " +
+                    "#execDiv.modal.show #exec_options_form #formbuttons #execFormRunButton, " +
+                    "#runjob #exec_options_form #formbuttons #execFormRunButton")
+    By optionValidationWarningBy = By.cssSelector("#execDiv #exec_options_form #optionSelect #_commandOptions div.form-group.has-warning p.text-warning")
+    By jobRowBy = By.cssSelector("#job_group_tree .jobname.job_list_row[data-job-id] > a[data-job-id]")
+    By jobSearchBy = By.xpath("//span[@title='Click to modify filter']")
+    By jobSearchNameBy = By.cssSelector('#jobs_filters form input[name="jobFilter"]')
+    By jobSearchGroupBy = By.cssSelector('#jobs_filters form input[name="groupPath"]')
+    By jobSearchSubmitBy = By.cssSelector('#jobs_filters form #jobs_filters_footer input[type="submit"][name="_action_jobs"]')
+    By runJobBtnBy = By.id("execFormRunButton")
+    By logOutputBtn = By.id('btn_view_output')
+    By jobActionsListButtonBy = By.linkText("Action")
+    By jobDeleteButtonBy = By.linkText("Delete this Job")
+    By jobDeleteConfirmBy = By.xpath("//*[@value=\"Delete\"]")
+    By jobDeleteModalBy = By.id("jobdelete")
+    By runJobLaterBy = By.linkText("Run Job Later...")
+    By runJobLaterMinuteArrowUpBy = By.cssSelector("td:nth-child(3) .glyphicon-chevron-up")
+    By runJobLaterSchedulerModalBy = By.cssSelector("#scheduler.modal.in")
+    By runJobLaterScheduleCreateButtonBy = By.cssSelector("#scheduler_buttons button.schedule-button")
+    By jobStatusBarBy = By.className("job-stats-value")
+    By jobOptionValuesBy = By.cssSelector(".optionvalues")
+    By jobOptionValueInputBy = By.cssSelector(".optionvalues > option:nth-child(6)")
+    By extraOptionSearchBy = By.name("extra.option.search")
+    By datetimepickerWidgetBy = By.cssSelector(".bootstrap-datetimepicker-widget.dropdown-menu.timepicker-sbs.bottom")
+    By jobDisableScheduleButtonBy = By.linkText("Disable Schedule")
+    By jobEnableScheduleButtonBy = By.linkText("Enable Schedule")
+    By jobInfoSectionBy = By.id("jobInfo_")
+    By jobDisableScheduleModalButtonBy = By.cssSelector("[value='Disable Schedule']")
+    By jobExecutionDisabledIconBy = By.cssSelector(".glyphicon.glyphicon-ban-circle")
+    By jobExecToggleModalBy = By.id("jobexectoggle")
+    By jobScheduleToggleModalBy = By.id("jobdschedtoggle")
+    By buttonDangerBy = By.cssSelector(".btn.btn-danger.btn-sm")
+    By jobDisableExecutionButtonBy = By.linkText("Disable Execution")
+    By jobEnableExecutionButtonBy = By.linkText("Enable Execution")
+    By jobOptionsDropdownBy = By.cssSelector("select.optionvalues, select[name^='extra.option.']")
+    By duplicateJobButtonBy = By.partialLinkText("Duplicate this Job")
+    By duplicateJobToProjectButtonBy = By.partialLinkText("Duplicate this Job to other Project")
+    By projectDropDownToDuplicateBy = By.id("jobProject")
+    By duplicateJobToProjectSubmitBy = By.id("submittbn")
+    By jobStatsBy = By.cssSelector(".col-xs-12.col-sm-4.job-stats-item")
+    By optionInputBy = By.cssSelector(".optionvaluesfield")
+    By jobOptionAlertBy = By.cssSelector(".alert.alert-danger")
+
+
+    static class NextUi {
+        static By descriptionText = By
+                .xpath("//*[@class=\"markdown-body\"]")
+    }
+
+    static final String PAGE_PATH = "/job/show"
+    String loadPath = "/job/show"
+    private String project
+
+    boolean getNextUi() { isFlagEnabled('nextUi') }
+    void setNextUi(boolean value) { withFlag('nextUi', value) }
+
+    JobShowPage(final SeleniumContext context) {
+        super(context)
+    }
+
+    JobShowPage(final SeleniumContext context, String project) {
+        super(context)
+        this.project = project
+        this.loadPath = "/project/$project/jobs"
+    }
+
+    JobShowPage forJob(String jobUuid){
+        this.loadPath = "/project/$project/job/show/$jobUuid"
+        return this
+    }
+
+    ExecutionShowPage runJob(boolean waitForFinalState = false){
+        getRunJobBtn().click()
+
+        ExecutionShowPage execution = new ExecutionShowPage(context)
+        if(waitForFinalState) {
+            execution.waitForRunAgainLink()
+            execution.waitForFinalState()
+        }
+
+        return execution
+    }
+
+    ScmStatusBadge getScmStatusBadge(){
+        return new ScmStatusBadge(this)
+    }
+
+    List<WebElement> getOptionsFields(){
+        driver.findElements(By.xpath("//input[contains(@name, 'extra.option.')]"))
+    }
+
+    WebElement getJobExecutionDisabledIcon(){
+        el jobExecutionDisabledIconBy
+    }
+
+    WebElement getJobDefinitionModal(){
+        el jobDefinitionModalBy
+    }
+
+    WebElement getJobDefinitionModalButton(){
+        el jobDefinitionModalButtonBy
+    }
+
+    WebElement getJobDefinitionModalContent(){
+        waitForElementVisible jobDefinitionModalContentBy
+        el jobDefinitionModalContentBy
+    }
+
+    /**
+     * Get the 'Created By' element from the job definition modal
+     * @return WebElement containing the created by information
+     */
+    WebElement getCreatedByElement() {
+        def modalContent = getJobDefinitionModalContent()
+        modalContent.findElement(createdByBy)
+    }
+
+    /**
+     * Get the 'Last Modified By' element from the job definition modal
+     * @return WebElement containing the last modified by information
+     */
+    WebElement getLastModifiedByElement() {
+        def modalContent = getJobDefinitionModalContent()
+        modalContent.findElement(lastModifiedByBy)
+    }
+
+    /**
+     * Get the warning banner shown when a scheduled job's saved owner is not
+     * authorized to run it.
+     * @return WebElement containing the warning banner
+     */
+    WebElement getExecutionAclWarning() {
+        waitForElementVisible executionAclWarningBy
+        el executionAclWarningBy
+    }
+
+    /**
+     * Get the header badge shown alongside the job name when a scheduled job's
+     * saved owner is not authorized to run it.
+     * @return WebElement containing the warning badge
+     */
+    WebElement getExecutionAclWarningBadge() {
+        waitForElementVisible executionAclWarningBadgeBy
+        el executionAclWarningBadgeBy
+    }
+
+    /**
+     * Get the remediation link that opens the project ACL editor pre-filled with a
+     * policy granting the saved owner run access. Only rendered for viewers who are
+     * themselves authorized to create project ACLs.
+     * @return WebElement containing the remediation link
+     */
+    WebElement getExecutionAclFixLink() {
+        // clickable rather than merely visible: this link is meant to be followed
+        byAndWaitClickable executionAclFixLinkBy
+    }
+
+    /**
+     * Whether the warning banner is present. Callers asserting absence must first
+     * wait for the page to render, since absence is indistinguishable from not
+     * having loaded yet.
+     * @return true if the warning banner is rendered
+     */
+    boolean hasExecutionAclWarning() {
+        !els(executionAclWarningBy).isEmpty()
+    }
+
+    /**
+     * Whether the header warning badge is present. The same caveat about asserting
+     * absence applies as for {@link #hasExecutionAclWarning}.
+     * @return true if the warning badge is rendered
+     */
+    boolean hasExecutionAclWarningBadge() {
+        !els(executionAclWarningBadgeBy).isEmpty()
+    }
+
+    /**
+     * Whether the remediation link is present. It is rendered only for viewers
+     * authorized to create project ACLs, so its absence is a meaningful assertion.
+     * @return true if the remediation link is rendered
+     */
+    boolean hasExecutionAclFixLink() {
+        !els(executionAclFixLinkBy).isEmpty()
+    }
+
+    /**
+     * Get the calendar button for an option input field
+     * Finds the parent of the option input and then locates the calendar button
+     * @param optionInputField The option input WebElement
+     * @return WebElement representing the calendar button
+     */
+    WebElement getCalendarButtonForOption(WebElement optionInputField) {
+        WebElement optionParent = optionInputField.findElement(By.xpath("./.."))
+        optionParent.findElement(By.cssSelector(".glyphicon.glyphicon-calendar"))
+    }
+
+    WebElement getNotificationDefinition(){
+        el notificationDefinitionBy
+    }
+
+    WebElement getCloseJobDefinitionModalButton() {
+        el closeJobDefinitionModalBy
+    }
+
+    WebElement getJobInfoGroupLabel() {
+        waitForElementVisible jobInfoGroupBy
+        el jobInfoGroupBy
+    }
+
+    WebElement getDescriptionTextLabel() {
+        el nextUi ? NextUi.descriptionText : descriptionText
+    }
+
+    List<WebElement> getCronLabel() {
+        els cronBy
+    }
+
+    WebElement getScheduleTimeLabel() {
+        el scheduleTimeBy
+    }
+
+    WebElement getMultipleExecField() {
+        el multipleExecBy
+    }
+
+    WebElement getMultipleExecYesField() {
+        el multipleExecYesBy
+    }
+
+    WebElement getWorkflowDetailField() {
+        el workflowDetailBy
+    }
+
+    WebElement getNodeFilterSectionMatchedNodesLabel() {
+        el nodeFilterSectionMatchedNodesBy
+    }
+
+    WebElement getThreadCountLabel() {
+        el threadCountBy
+    }
+
+    WebElement getNodeKeepGoingLabel() {
+        el nodeKeepGoingBy
+    }
+
+    WebElement getNodeRankOrderAscendingLabel() {
+        el nodeRankOrderAscendingBy
+    }
+
+    WebElement getNodeSelectedByDefaultLabel() {
+        el nodeSelectedByDefaultBy
+    }
+
+    WebElement getOrchestratorNameLabel() {
+        el orchestratorNameBy
+    }
+
+    WebElement getCloseDefinitionModalButton() {
+        el closeDefinitionModalBy
+    }
+
+    WebElement getJobActionDropdownButton() {
+        el jobActionBy
+    }
+
+    WebElement getEditJobLink() {
+        el jobActionEditBy
+    }
+
+    WebElement getJobLinkTitleLabel() {
+        el jobLinkTitleBy
+    }
+
+    WebElement getAutocompleteJobStepDefinitionLabel() {
+        el autocompleteJobStepDefinitionBy
+    }
+
+    WebElement optionInputText(String name) {
+        def by = By.cssSelector("#optionSelect #_commandOptions input[type=text][name='extra.option.${name}']")
+        waitForElementVisible(by)
+        el by
+    }
+
+    WebElement runJobLink(String uuid) {
+        el By.cssSelector("#job_group_tree a.act_execute_job[data-job-id='${uuid}']")
+    }
+
+    WebElement getRunFormButton() {
+        el runFormBy
+    }
+
+    /**
+     * After clicking a job run link, waits until the run form is usable: visible jobs modal ({@code #execDiv.modal.in|.show})
+     * or job show {@code #runjob}, with a clickable Run button. Do not rely on URL alone — {@code /job/show} can match early.
+     */
+    void waitForRunJobExecFormReady(Duration timeout = Duration.ofSeconds(60)) {
+        new WebDriverWait(driver, timeout).until(ExpectedConditions.elementToBeClickable(runFormBy))
+    }
+
+    /**
+     * Waits until the "change target nodes" checkbox is visible in the exec modal or job show form.
+     * Does not require WebDriver "clickable" — radios in the jobs exec modal often fail that check in CI.
+     */
+    void waitForNodeFilterReplaceCheckboxClickable(Duration timeout = Duration.ofSeconds(90)) {
+        // Native checkbox inputs are styled with opacity:0 and zero dimensions (Bootstrap custom checkbox).
+        // visibilityOfElementLocated requires non-zero size — always times out on styled checkboxes.
+        // Use presenceOfElementLocated: the element is in the DOM, just visually replaced by its label.
+        new WebDriverWait(driver, timeout)
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.presenceOfElementLocated(nodeFilterInputBy))
+        def cb = driver.findElement(nodeFilterInputBy)
+        executeScript("arguments[0].scrollIntoView({block: 'center'});", cb)
+    }
+
+    /**
+     * Toggles the "change the target nodes" checkbox via script click (avoids click-intercepted flakes in headless CI).
+     */
+    void clickNodeFilterReplaceCheckbox() {
+        def cb = driver.findElement(nodeFilterInputBy)
+        executeScript("arguments[0].scrollIntoView({block: 'center'});", cb)
+        executeScript("arguments[0].click();", cb)
+    }
+
+    /**
+     * Waits for the node filter override radio to be present, then clicks it via JS.
+     * Like #doReplaceFilters, #filterradio is a Bootstrap-styled radio with zero dimensions.
+     */
+    void waitAndClickNodeFilterOverride(Duration timeout = Duration.ofSeconds(30)) {
+        new WebDriverWait(driver, timeout)
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.presenceOfElementLocated(nodeFilterOverrideBy))
+        def radio = driver.findElement(nodeFilterOverrideBy)
+        executeScript("arguments[0].scrollIntoView({block: 'center'});", radio)
+        executeScript("arguments[0].click();", radio)
+    }
+
+    WebElement getOptionValidationWarningText() {
+        el optionValidationWarningBy
+    }
+
+    WebElement getNodeFilterInput() {
+        el nodeFilterInputBy
+    }
+
+    WebElement getNodeFilterOverride() {
+        el nodeFilterOverrideBy
+    }
+
+    WebElement getNodeFilterInputValue(){
+        el nodeFilterInputValueBy
+    }
+
+    WebElement getDropDownToggle(){
+        el dropDownToggleBy
+    }
+
+    WebElement getSelectAllNodesLink(){
+        el selectAllNodesLinkBy
+    }
+
+    WebElement getLocalhostNode(){
+        el localhostNodeBy
+    }
+
+    WebElement getNodeFilterArrowIcon(){
+        el(popoverContentBy).findElement(nodeFilterLinkBy).findElement(arrowIconBy)
+    }
+
+    WebElement getSchedJobNodeFilter(){
+        el schedJobNodeFilterBy
+    }
+
+    List<WebElement> getJobRowLink() {
+        els jobRowBy
+    }
+
+    WebElement getJobSearchButton() {
+        el jobSearchBy
+    }
+
+    WebElement getJobSearchNameField() {
+        el jobSearchNameBy
+    }
+
+    WebElement getJobSearchGroupField() {
+        el jobSearchGroupBy
+    }
+
+    WebElement getJobSearchSubmitButton() {
+        el jobSearchSubmitBy
+    }
+
+    WebElement getRunJobBtn(){
+        waitIgnoringForElementToBeClickable(runJobBtnBy)
+    }
+
+    WebElement getLogOutputBtn(){
+        el logOutputBtn
+    }
+
+    WebElement getJobOptionsValuesDropdown(){
+        el jobOptionValuesBy
+    }
+
+    WebElement getJobOptionValueListItem(String name){
+        waitForNumberOfElementsToBeOne(By.xpath("//option[. = '${name}']"))
+        driver.findElement(By.xpath("//option[. = '${name}']"))
+    }
+
+    WebElement getJobOptionValueInput(){
+        el jobOptionValueInputBy
+    }
+
+    WebElement getJobOptionsDropdown(){
+        waitForElementVisible(jobOptionsDropdownBy)
+        el(jobOptionsDropdownBy)
+    }
+
+    /**
+     * Waits for the log output to have more than `qtty` log entries containing logLineText
+     * @param logLineText text to match log entries
+     * @param minimum number of log entries that should contain logLineText
+     * @param timeout to be waiting for results
+     */
+    void waitForLogOutput (String logLineText, Integer minimum = 0, Integer timeout = 10) {
+        By logLineSelector = By.xpath("//span[contains(text(),'${logLineText}')]")
+        new WebDriverWait(driver, Duration.ofSeconds(timeout)).until(ExpectedConditions.numberOfElementsToBeMoreThan(logLineSelector, minimum))
+    }
+
+    WebElement getExecutionOptionsDropdown(){
+        driver.findElement(By.id("execOptFormRunButtons")).findElement(By.className("btn-secondary"))
+    }
+
+    WebElement getRunJobLaterOption() {
+        el runJobLaterBy
+    }
+
+    WebElement getRunJobLaterMinuteArrowUp(){
+        el runJobLaterMinuteArrowUpBy
+    }
+
+    WebElement getRunJobLaterCreateScheduleButton(){
+        el runJobLaterScheduleCreateButtonBy
+    }
+
+    WebElement getJobStatusBar(){
+        el jobStatusBarBy
+    }
+
+    void selectOptionFromOptionListByName(String optionListName,int optionNo){
+        def select = new Select(getOptionSelectByName(optionListName))
+        select.selectByValue("option${optionNo}")
+    }
+
+    WebElement getOptionSelectByName(String name){
+        driver.findElement(By.name("extra.option.${name}"))
+    }
+
+    List<WebElement> getOptionSelectChildren(String name){
+        final By optionSelector = By.name("extra.option.${name}")
+
+        waitForElementVisible(optionSelector)
+        driver.findElements(optionSelector)
+    }
+
+    /**
+     * Waits for all option checkboxes to be selected, handling StaleElementReferenceException
+     * that can occur when the DOM is updated between fetching elements and checking their state.
+     *
+     * @param name The option name
+     * @param timeoutSeconds Timeout in seconds (default 30)
+     * @return true if all options are selected within the timeout
+     */
+    boolean waitForAllOptionsToBeSelected(String name, int timeoutSeconds = 30) {
+        final By optionSelector = By.name("extra.option.${name}")
+        new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds))
+                .ignoring(StaleElementReferenceException.class)
+                .until { drv ->
+                    def elements = drv.findElements(optionSelector)
+                    elements.size() > 0 && elements.every { it.isSelected() }
+                }
+    }
+
+    void waitForLogOutput (By logOutput, Integer number, Integer seconds){
+        new WebDriverWait(driver, Duration.ofSeconds(seconds)).until(ExpectedConditions.numberOfElementsToBeMoreThan(logOutput,number))
+    }
+
+    void goToJob(String jobUuidText){
+        go(PAGE_PATH + "/$jobUuidText")
+    }
+
+    def expectNumberOfStepsToBe(int steps){
+        new WebDriverWait(driver,  Duration.ofSeconds(10)).until(
+                ExpectedConditions.numberOfElementsToBe(stepsInJobDefinitionBy, steps)
+        )
+    }
+
+    /**
+     * It returns the list of "Actions" buttons
+     */
+    def getJobActionsButtonList(){
+        (el jobActionsListButtonBy)
+    }
+
+    def getJobDeleteButtons(){
+        (el jobDeleteButtonBy)
+    }
+
+    def getJobDisableScheduleButtonBy(){
+        (el jobDisableScheduleButtonBy)
+    }
+
+    def getJobEnableScheduleButtonBy(){
+        (el jobEnableScheduleButtonBy)
+    }
+
+    def getJobDisableExecutionButton(){
+        (el jobDisableExecutionButtonBy)
+    }
+
+    def getJobEnableExecutionButton(){
+        (el jobEnableExecutionButtonBy)
+    }
+
+    def getJobDeleteConfirmBy(){
+        (el jobDeleteConfirmBy)
+    }
+
+    def waitForJobDeleteModalToBeShown() {
+        new WebDriverWait(driver, Duration.ofSeconds(5)).until(
+                ExpectedConditions.visibilityOf(el jobDeleteModalBy)
+        )
+    }
+
+    WebElement getJobUuid(){
+        el jobUuidBy
+    }
+
+    WebElement getDeleteJobBtn(){
+        waitForElementVisible jobDeleteModalBy
+        el jobDeleteModalBy findElement(By.cssSelector(".btn.btn-danger.btn-sm"))
+    }
+
+    List<WebElement> getExtraOptFirsts(String optionName){
+        els By.name("extra.option.$optionName")
+    }
+
+    WebElement getDuplicateJobButton(){
+        el duplicateJobButtonBy
+    }
+
+    WebElement getDuplicateJobToProjectButtonBy(){
+        el duplicateJobToProjectButtonBy
+    }
+
+    void selectProjectToDuplicateJob(String projectName){
+        Select selector = new Select(el(projectDropDownToDuplicateBy))
+        selector.selectByValue(projectName)
+    }
+
+    WebElement getDuplicateJobToProjectSubmitButton(){
+        el duplicateJobToProjectSubmitBy
+    }
+
+    List<WebElement> getJobStatsElements(){
+        els jobStatsBy
+    }
+
+    List<WebElement> getOptionInputs(){
+        return (els optionInputBy)
+    }
+
+    WebElement getJobOptionAlertBy(){
+        el jobOptionAlertBy
+    }
+}

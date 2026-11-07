@@ -1,0 +1,125 @@
+/*
+ * Copyright 2013 SimplifyOps
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.rundeck.jaas.jetty;
+
+import org.rundeck.jaas.AbstractSharedLoginModule;
+import org.rundeck.jaas.UserInfo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.security.auth.Subject;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.UnsupportedCallbackException;
+import javax.security.auth.login.LoginException;
+import java.io.IOException;
+import java.security.Principal;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Property file-based authentication module that only performs authentication
+ * (no role assignment) and supports shared credentials.
+ * 
+ * DESIGN CHANGE from Jetty JAAS implementation:
+ * - Previously used org.eclipse.jetty.jaas.spi.PropertyFileLoginModule
+ * - Now uses org.rundeck.jaas.jetty.ReloadablePropertyFileLoginModule (our implementation)
+ * - Same functionality, independent of Jetty JAAS packages
+ */
+public class JettyAuthPropertyFileLoginModule extends AbstractSharedLoginModule {
+    public static final Logger logger = LoggerFactory.getLogger(JettyAuthPropertyFileLoginModule.class.getName());
+    ReloadablePropertyFileLoginModule module = new ReloadablePropertyFileLoginModule();
+    UserInfo            userInfo;
+
+    @Override
+    public void initialize(Subject subject, CallbackHandler callbackHandler, Map shared, Map options) {
+        super.initialize(subject, callbackHandler, shared, options);
+        if(!options.containsKey("hotReload") || !options.get("hotReload").equals("true")) {
+            module.setHotReload(false);
+        }
+        module.initialize(subject, callbackHandler, shared, options);
+    }
+
+    /**
+     * Uses jetty callbacks to retrieve auth credentials
+     * @return
+     * @throws IOException
+     * @throws UnsupportedCallbackException
+     * @throws LoginException
+     */
+    protected Object[] getCallBackAuth() throws IOException, UnsupportedCallbackException, LoginException {
+        return JettySupport.performCallbacks(getCallbackHandler());
+    }
+
+    @Override
+    protected Principal createUserPrincipal() {
+        return JettySupport.createUserPrincipal(userInfo.getUserName());
+    }
+
+    /**
+     * Does not generate role principals for the user.
+     * @return
+     */
+    @Override
+    protected List<Principal> createRolePrincipals() {
+        //Do not use roles from property file.
+        return null;
+    }
+
+
+    @Override
+    protected boolean authenticate(String userName, char[] chars) throws LoginException {
+        try {
+            this.userInfo = module.getUserInfo(userName);
+            if (null == this.userInfo) {
+                debug(String.format("JettyAuthPropertyFileLoginModule: userInfo not found for %s", userName));
+                return false;
+            }
+            boolean b = this.userInfo.getCredential().check(new String(chars));
+            debug(String.format("JettyAuthPropertyFileLoginModule: checkCredential? %s", b));
+            return b;
+        } catch (Exception e) {
+            if (isDebug()) {
+                e.printStackTrace();
+            }
+            return false;
+        }
+    }
+
+    @Override
+    public boolean commit() throws LoginException {
+        if (!isAuthenticated()) {
+            userInfo = null;
+        }
+        return super.commit();
+    }
+
+    @Override
+    public boolean abort() throws LoginException {
+        userInfo = null;
+
+        return super.abort();
+    }
+
+    @Override
+    public boolean logout() throws LoginException {
+
+        userInfo = null;
+
+        return super.logout();
+    }
+
+}

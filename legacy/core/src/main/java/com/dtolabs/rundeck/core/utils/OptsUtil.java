@@ -1,0 +1,132 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*
+* OptsUtil.java
+* 
+* User: Greg Schueler <a href="mailto:greg@dtosolutions.com">greg@dtosolutions.com</a>
+* Created: Sep 20, 2010 10:18:42 AM
+* $Id$
+*/
+package com.dtolabs.rundeck.core.utils;
+
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.CharUtils;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+
+/**
+ * OptsUtil is ...
+ *
+ * @author Greg Schueler <a href="mailto:greg@dtosolutions.com">greg@dtosolutions.com</a>
+ * @version $Revision$
+ */
+public class OptsUtil {
+    /**
+     * Bursts input string that may have emebedded quoted text into a String array. Single quoted text is preserved as a
+     * single token
+     *
+     * @param argLine input string
+     *
+     * @return String array of parsed tokens
+     */
+    public static String[] burst(final String argLine) {
+        return QuotedStringTokenizer.tokenizeToArray(argLine);
+    }
+
+    public static String join(String first, String[] args) {
+        return join(first, Arrays.asList(args));
+    }
+
+    public static String join(String[] args) {
+        return join(Arrays.asList(args));
+    }
+
+    public static String join(String first, List<String> args) {
+        List<String> strings = new ArrayList<String>(args.size() + 1);
+        strings.add(first);
+        strings.addAll(args);
+        return join(strings);
+    }
+
+    public static String join(Collection<String> args) {
+        StringBuilder sb = new StringBuilder();
+        for (String str : args) {
+            if (sb.length() > 0) {
+                sb.append(" ");
+            }
+            sb.append(escapeChars(str));
+        }
+        return sb.toString();
+    }
+
+    private static final char DBL_QUOTE = '"';
+    private static final char SINGLE_QUOTE = '\'';
+    private static final char[] CSV_SEARCH_CHARS = new char[]{' ', DBL_QUOTE, SINGLE_QUOTE, CharUtils.CR, CharUtils.LF};
+
+    public static String escapeChars(String str) {
+        StringBuilder stringBuilder = new StringBuilder();
+        escapeChars(stringBuilder, str);
+        return stringBuilder.toString();
+    }
+
+    public static void escapeChars(StringBuilder out, String str) {
+        // A value is only safe to emit unquoted if it contains none of the CSV search chars AND no
+        // control/whitespace char with code <= 32. QuotedStringTokenizer.burst() splits on any char
+        // <= 32 (StrMatcher.trimMatcher()), so a value containing e.g. a TAB that is not quoted here
+        // would be re-split on burst() — breaking the join()/burst() round-trip and allowing extra
+        // tokens (arg smuggling). Quoting such values keeps the round-trip intact. See RUN-4693.
+        if (StringUtils.containsNone(str, CSV_SEARCH_CHARS) && !"".equals(str) && !containsControlChar(str)) {
+            if (str != null) {
+                out.append(str);
+            }
+            return;
+        }
+        out.append(DBL_QUOTE);
+        for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            if (c == DBL_QUOTE) {
+                out.append(DBL_QUOTE); // escape double quote
+            }
+            out.append(c);
+        }
+        out.append(DBL_QUOTE);
+    }
+
+    /**
+     * @param str input (may be null)
+     * @return true if the string contains any character with code point &lt;= 32 (space and control
+     * characters such as TAB, VT, FF), which {@link QuotedStringTokenizer} treats as a delimiter.
+     * Only ASCII control/whitespace is matched; all non-ASCII text (e.g. Japanese, full-width space
+     * U+3000) is above 32 and is not affected.
+     */
+    private static boolean containsControlChar(final String str) {
+        if (str == null) {
+            return false;
+        }
+        for (int i = 0; i < str.length(); i++) {
+            if (str.charAt(i) <= 32) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+}

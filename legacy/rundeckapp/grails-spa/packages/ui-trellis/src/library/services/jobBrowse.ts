@@ -1,0 +1,198 @@
+import axios from "axios";
+import { getAppLinks, getRundeckContext } from "../rundeckService";
+import { api } from "./api";
+import { JobBrowseList, JobBrowseMeta } from "../types/jobs/JobBrowse";
+
+/** Passed as `metaExclude` on jobs/browse and job meta API (API v58+). */
+export const JOB_BROWSE_META_EXCLUDE_STATS = "stats";
+
+export async function getProjectMeta(
+  project: string,
+  meta: string = "*",
+): Promise<JobBrowseMeta[]> {
+  const resp = await getRundeckContext().rootStore.cachedApi(
+    `project/${project}/meta?meta=${encodeURIComponent(meta)}`,
+  );
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+
+export async function browsePath(
+  project: string,
+  path: string,
+  meta: string = "*",
+  breakpoint: number = 100,
+): Promise<JobBrowseList> {
+  const resp = await api.get(`project/${project}/jobs/browse/`, {
+    params: { path, meta, breakpoint },
+  });
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+export async function queryPath(
+  project: string,
+  path: string,
+  meta: string = "*",
+  breakpoint: number = 100,
+  query: { [key: string]: any },
+  metaExclude?: string | null,
+): Promise<JobBrowseList> {
+  const params = Object.assign({}, query, { path, meta, breakpoint });
+  if (metaExclude != null && metaExclude !== "") {
+    params.metaExclude = metaExclude;
+  }
+  const resp = await api.get(`project/${project}/jobs/browse/`, { params });
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+export async function getJobMeta(
+  project: string,
+  id: string,
+  meta: string = "*",
+  metaExclude?: string | null,
+): Promise<JobBrowseMeta[]> {
+  const qp = new URLSearchParams({ meta });
+  if (metaExclude != null && metaExclude !== "") {
+    qp.set("metaExclude", metaExclude);
+  }
+  const resp = await getRundeckContext().rootStore.cachedApi(
+    `job/${id}/meta?${qp.toString()}`,
+  );
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+export async function scmProjectToggle(
+  project: string,
+  enabled: boolean,
+): Promise<ToggleResult> {
+  const resp = await api.post(`project/${project}/scm/toggle`, {
+    enabled,
+  });
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+
+export interface ToggleResult {
+  modified: boolean;
+}
+export interface ResultItem {
+  id: string;
+  message?: string;
+  errorCode?: string;
+}
+
+export interface BulkDeleteResponse {
+  failed: ResultItem[];
+  failedCount: number;
+  successCount: number;
+  requestCount: number;
+  allsuccessful: boolean;
+}
+
+export interface BulkToggleResponse {
+  failed: ResultItem[];
+  succeeded: ResultItem[];
+  enabled: boolean;
+  requestCount: number;
+  allsuccessful: boolean;
+}
+
+export async function bulkDeleteJobs(
+  project: string,
+  ids: string[],
+): Promise<BulkDeleteResponse> {
+  const resp = await api.post(`jobs/delete`, { ids });
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+export async function bulkScheduleEnableDisable(
+  project: string,
+  ids: string[],
+  enabled: boolean,
+): Promise<BulkToggleResponse> {
+  const resp = await api.post(
+    `jobs/schedule/${enabled ? "enable" : "disable"}`,
+    { ids },
+  );
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+export async function bulkExecutionEnableDisable(
+  project: string,
+  ids: string[],
+  enabled: boolean,
+): Promise<BulkToggleResponse> {
+  const resp = await api.post(
+    `jobs/execution/${enabled ? "enable" : "disable"}`,
+    { ids },
+  );
+  if (resp.status !== 200) {
+    throw { message: resp.data.message, response: resp };
+  } else {
+    return resp.data;
+  }
+}
+
+/**
+ * A single job returned by the job name search endpoint.
+ */
+export interface JobSearchResult {
+  /** Job name, without the group path. */
+  name: string;
+  /** Group path the job belongs to, empty for jobs at the root. */
+  group: string;
+  /** Project the job belongs to. */
+  project: string;
+  /** Job UUID. */
+  id: string;
+}
+
+/**
+ * Search the jobs of a project by (partial) job name.
+ *
+ * Unlike {@link browsePath} and {@link queryPath}, which are bound to a single
+ * group path and collapse anything below it into group entries, this returns a
+ * flat list of jobs across every group, filtered server side. That makes it
+ * suitable for name autocomplete on projects with a large number of jobs.
+ *
+ * @param project project name to search within
+ * @param jobFilter partial job name to match, empty to match all jobs
+ * @param runAuthRequired when true, only jobs the user is authorized to run
+ * @returns the matching jobs, flattened across group paths
+ */
+export async function searchJobsByName(
+  project: string,
+  jobFilter: string,
+  runAuthRequired: boolean = true,
+): Promise<JobSearchResult[]> {
+  const appLinks = getAppLinks();
+  const resp = await axios.get(appLinks.menuJobSearchJson, {
+    headers: { "x-rundeck-ajax": "true" },
+    params: { project, jobFilter, runAuthRequired },
+  });
+  if (resp.status !== 200) {
+    throw { message: resp.data?.message, response: resp };
+  }
+  return Array.isArray(resp.data) ? resp.data : [];
+}

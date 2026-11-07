@@ -1,0 +1,295 @@
+import { defineComponent, markRaw } from "vue";
+import { getRundeckContext } from "../../../library";
+import { NodeFilterStore } from "../../../library/stores/NodeFilterLocalstore";
+import NodeFilterInput from "../../components/job/resources/NodeFilterInput.vue";
+import NodeCard from "../../components/job/resources/NodeCard.vue";
+import { observer } from "../../utilities/uiSocketObserver";
+
+const rundeckContext = getRundeckContext();
+export const FilterInputComp = defineComponent({
+  name: "NodeFilter",
+  components: { NodeFilterInput },
+  props: ["itemData", "extraAttrs"],
+  data() {
+    return {
+      project: rundeckContext.projectName,
+      filterValue: this.itemData["filter"],
+      showInputTitle: this.itemData["showInputTitle"],
+      autofocus: this.itemData["autofocus"],
+      filterFieldName: this.itemData["filterFieldName"] || "filter",
+      filterFieldId: this.itemData["filterFieldId"],
+      queryFieldPlaceholderText: this.itemData["queryFieldPlaceholderText"],
+      koFieldName: this.itemData["koFieldName"],
+      koParam: this.itemData["koParam"],
+      subs: [] as Array<{ dispose(): void }>,
+    };
+  },
+  computed: {
+    isNodeStoreAvailable() {
+      return !!this.extraAttrs.nodeFilterStore;
+    },
+  },
+  watch: {
+    isNodeStoreAvailable(val) {
+      if (val) {
+        if (this.extraAttrs.nodeFilterStore.selectedFilter) {
+          this.filterValue = this.extraAttrs.nodeFilterStore.selectedFilter;
+        }
+      }
+    },
+  },
+  beforeUnmount() {
+    this.subs.forEach((s) => s.dispose());
+  },
+  mounted() {
+    this.attachKnockout(5);
+    if (this.isNodeStoreAvailable) {
+      if (this.extraAttrs.nodeFilterStore.selectedFilter) {
+        this.filterValue = this.extraAttrs.nodeFilterStore.selectedFilter;
+      }
+    }
+  },
+  methods: {
+    updatedValue(val: string) {
+      this.nodeFilterKo()?.selectNodeFilter({ filter: val }, false);
+      if (this.isNodeStoreAvailable) {
+        this.extraAttrs.nodeFilterStore.setSelectedFilter(val);
+      } else {
+        // Emit EventBus event for adhoc page and other pages without NodeFilterStore
+        console.debug(
+          "[FilterInputComp] Emitting nodefilter:value:changed event with filter:",
+          val,
+        );
+        rundeckContext.eventBus.emit("nodefilter:value:changed", {
+          filter: val,
+        });
+      }
+    },
+    filterClicked(filter: any) {
+      this.nodeFilterKo()?.selectNodeFilter(filter, false);
+      if (this.isNodeStoreAvailable) {
+        this.extraAttrs.nodeFilterStore.setSelectedFilter(filter.filter);
+      } else {
+        // Emit EventBus event for adhoc page and other pages without NodeFilterStore
+        rundeckContext.eventBus.emit("nodefilter:value:changed", {
+          filter: filter.filter || filter,
+        });
+      }
+    },
+    nodeFilterKo(): any {
+      if (
+        this.koFieldName &&
+        this.koParam &&
+        window[this.koFieldName] &&
+        window[this.koFieldName][this.koParam]
+      ) {
+        return window[this.koFieldName][this.koParam];
+      } else if (this.koFieldName && window[this.koFieldName]) {
+        return window[this.koFieldName];
+      } else if (!this.koFieldName) {
+        return (window as any).nodeFilter;
+      }
+    },
+    attachKnockout(retry: number) {
+      //set up reactive connection to existing Knockout
+      if (this.nodeFilterKo()) {
+        this.subs.push(
+          this.nodeFilterKo().filter.subscribe(
+            (val: string) => (this.filterValue = val),
+          ),
+        );
+        const koVal = this.nodeFilterKo().filter();
+        if (this.filterValue) {
+          this.nodeFilterKo().selectNodeFilter(
+            { filter: this.filterValue },
+            false,
+          );
+        } else {
+          this.filterValue = koVal;
+        }
+      } else if (retry > 0) {
+        setTimeout(() => this.attachKnockout(retry - 1), 1000);
+      } else {
+        console.debug(
+          "Did not find ko component: ",
+          this.koFieldName,
+          this.koParam,
+        );
+      }
+    },
+  },
+  template: `
+          <node-filter-input :project="project"
+                             :value="filterValue"
+                             :show-title="showInputTitle"
+                             :autofocus="autofocus"
+                             :filterFieldName="filterFieldName"
+                             :filter-field-id="filterFieldId"
+                             :query-field-placeholder-text="queryFieldPlaceholderText"
+                             :help-button="itemData?.helpButton !== false"
+                             search-btn-type="cta"
+                             @update:value="updatedValue"
+                             @filter="filterClicked"
+                             v-bind="extraAttrs"
+          />
+        `,
+});
+function init() {
+  rundeckContext.rootStore.ui.addItems([
+    {
+      section: "nodes-page",
+      location: "node-filter-input",
+      visible: true,
+      widget: markRaw(
+        defineComponent({
+          components: { FilterInputComp },
+          props: ["itemData"],
+          data() {
+            return {
+              project: rundeckContext.projectName,
+            };
+          },
+          template: `
+                      <filter-input-comp :project="project"
+                                         :item-data="itemData"
+                                         :extra-attrs="{'class':'subtitle-head-item','style':'margin-bottom:0;'}"
+                      />
+                    `,
+        }),
+      ),
+    },
+    {
+      section: "nodes-page",
+      location: "main",
+      visible: true,
+      widget: markRaw(
+        defineComponent({
+          components: { FilterInputComp, NodeCard },
+          props: ["itemData"],
+          data() {
+            return {
+              project: rundeckContext.projectName,
+              nodeFilterStore: new NodeFilterStore({
+                filter: this.itemData.filter,
+              }),
+            };
+          },
+          methods: {
+            updateNodeFilter(val: any) {
+              const filterName = val && val.filter ? val.filter : val;
+              if (
+                filterName === ".*" ||
+                this.nodeFilterStore.selectedFilter === ".*"
+              ) {
+                this.nodeFilterStore.setSelectedFilter(filterName);
+              } else {
+                this.nodeFilterStore.setSelectedFilter(
+                  [this.nodeFilterStore.selectedFilter, filterName].join(" "),
+                );
+              }
+            },
+          },
+          template: `
+                        <div class="title">
+                          <span class="text-h3"><i class="fas fa-sitemap"></i> {{ $t('gui.menu.Nodes') }}</span>
+                        </div>
+                        <div style="margin-bottom:20px">
+                          <filter-input-comp
+                              :value="nodeFilterStore.selectedFilter"
+                              @update:value="nodeFilterStore.selectedFilter"
+                              :project="project"
+                              :item-data="itemData"
+                              :extra-attrs="{'class':'subtitle-head-item','style':'margin-bottom:0;', 'nodeFilterStore': nodeFilterStore}"
+                          />
+                        </div>
+                        <div id="nodesContent">
+                          <div class="container-fluid">
+                            <div class="row">
+                              <div class="col-xs-12">
+                                <node-card
+                                    :node-filter-store="nodeFilterStore"
+                                    :job-create-authorized="itemData.jobCreateAuthorized"
+                                    :run-authorized="itemData.runAuthorized"
+                                    :project="project"
+                                    @filter="updateNodeFilter"
+                                >
+                                </node-card>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                    `,
+        }),
+      ),
+    },
+    {
+      section: "adhoc-command-page",
+      location: "node-filter-input",
+      visible: true,
+      widget: markRaw(
+        defineComponent({
+          components: { FilterInputComp },
+          props: ["itemData"],
+          data() {
+            return {
+              project: rundeckContext.projectName,
+            };
+          },
+          template: `
+                      <filter-input-comp :project="project"
+                                         :item-data="itemData"
+                                         :extra-attrs="{'class':'input-group-lg tight'}"
+                      />
+                    `,
+        }),
+      ),
+    },
+    {
+      section: "job-show-page",
+      location: "exec-options-node-filter-input",
+      visible: true,
+      widget: markRaw(
+        defineComponent({
+          components: { FilterInputComp },
+          props: ["itemData"],
+          data() {
+            return {
+              project: rundeckContext.projectName,
+              nodeFilterStore: new NodeFilterStore(),
+            };
+          },
+          template: `
+                      <filter-input-comp :project="project" :item-data="itemData" :extra-attrs="{'nodeFilterStore': nodeFilterStore}"/>
+                    `,
+        }),
+      ),
+    },
+    {
+      section: "job-wfitem-edit",
+      location: "jobref-node-filter-input",
+      visible: true,
+      widget: markRaw(
+        defineComponent({
+          components: { FilterInputComp },
+          props: ["itemData"],
+          data() {
+            return {
+              project: rundeckContext.projectName,
+            };
+          },
+          template: `
+                      <filter-input-comp :project="project" :item-data="itemData" :extra-attrs="itemData.extraAttrs"/>
+                    `,
+        }),
+      ),
+    },
+  ]);
+}
+window.addEventListener("DOMContentLoaded", init);
+
+window.addEventListener("DOMContentLoaded", () => {
+  const elem = document.querySelector("#execDiv");
+  if (elem) {
+    observer.observe(elem, { subtree: true, childList: true });
+  }
+});

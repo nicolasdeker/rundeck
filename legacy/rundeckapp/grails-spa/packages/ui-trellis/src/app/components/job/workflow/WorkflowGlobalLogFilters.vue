@@ -1,0 +1,45 @@
+<template>
+  <log-filters
+    id="globalLogFilters"
+    v-model="model.LogFilter"
+    :title="$t('global.log.filters')"
+    :subtitle="$t('workflow.all.steps')"
+    :show-if-empty="true"
+  />
+</template>
+<script lang="ts">
+import { GlobalLogFiltersData } from "./types/workflowTypes";
+import { cloneDeep } from "lodash";
+import { defineComponent } from "vue";
+import LogFilters from "./LogFilters.vue";
+export default defineComponent({
+  name: "WorkflowGlobalLogFilters",
+  components: {
+    LogFilters,
+  },
+  props: {
+    modelValue: {
+      type: Object,
+      required: true,
+      default: () => ({ LogFilter: [] }) as GlobalLogFiltersData,
+    },
+  },
+  emits: ["update:modelValue"],
+  data() {
+    return {
+      model: { LogFilter: [] } as GlobalLogFiltersData,
+    };
+  },
+  watch: {
+    model: {
+      handler() {
+        this.$emit("update:modelValue", this.model);
+      },
+      deep: true,
+    },
+  },
+  async mounted() {
+    this.model = cloneDeep(this.modelValue);
+  },
+});
+</script>

@@ -1,0 +1,153 @@
+import java.util.regex.Matcher
+
+apply from: "${rootDir}/gradle/java.gradle"
+
+apply plugin: 'signing'
+apply plugin: 'java-library'
+apply plugin: 'maven-publish'
+
+def archiveName = project.name
+
+
+if (! archiveName.startsWith('rundeck'))
+    archiveName = "rundeck-${project.name}"
+else if (archiveName.startsWith('rundeckapp'))
+    archiveName = project.name.replace('rundeckapp', 'rundeck')
+
+if (project.name.startsWith('core')){
+    archiveName = "rundeck-core"
+}
+
+
+
+tasks.register('removeExisting') {
+    it.doLast {
+        delete("${buildDir}/existing")
+    }
+}
+
+tasks.register('copyExisting') {
+    it.dependsOn removeExisting
+
+    it.inputs.dir 'build/libs'
+    it.inputs.dir 'build/poms'
+    it.outputs.dir 'build/existing'
+
+    it.doLast {
+
+        copy {
+            from "build/libs"
+            from "build/poms"
+            into "build/existing"
+            exclude "*.original"
+            rename { file ->
+                if (file =~ /^pom/)
+                    return "$project.name-${version}.pom"
+            }
+        }
+    }
+}
+
+/** Loads configuration.existing with the existing artifacts */
+tasks.register('registerExisting') {
+    it.dependsOn copyExisting
+    it.inputs.dir 'build/existing'
+
+    it.doLast {
+        file("build/existing").eachFile {f ->
+            println(f)
+            artifacts {
+                existing file: f, name: project.name
+            }
+        }
+    }
+}
+
+publishing {
+     publications {
+         "${archiveName}"(MavenPublication) {
+             artifactId = archiveName
+             groupId = project.group
+             version = version
+             from components.java
+             pom {
+                 name = "Rundeck library ${archiveName}"
+                 description = project.description?:'Rundeck'
+                 url = 'http://rundeck.org'
+                 licenses {
+                     license {
+                         name = 'The Apache Software License, Version 2.0'
+                         url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                         distribution = 'repo'
+                     }
+                 }
+                 developers {
+                     developer {
+                         id = 'gschueler'
+                         name = 'Greg Schueler'
+                         email = 'greg@rundeck.com'
+                     }
+                 }
+                 scm {
+                     connection = 'scm:git:git@github.com/rundeck/rundeck.git'
+                     developerConnection = 'scm:git:git@github.com:rundeck/rundeck.git'
+                     url = 'https://github.com/rundeck/rundeck'
+                 }
+             }
+         }
+     }
+     repositories {
+         maven {
+             // change URLs to point to your repos, e.g. http://my.org/repo
+             def releasesRepoUrl = 'https://ossrh-staging-api.central.sonatype.com/service/local/'
+             def snapshotsRepoUrl = 'https://central.sonatype.com/repository/maven-snapshots/'
+             url = version.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
+             credentials {
+                 username findProperty('sonatypeUsername')
+                 password findProperty('sonatypePassword')
+             }
+         }
+     }
+ }
+
+if (project.hasProperty('signing.keyId') && project.hasProperty('signing.password')) {
+    signing {
+        sign(publishing.publications)
+    }
+}
+
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+// Gradle 8.14 strictness: Publishing tasks need explicit dependency on sourceJar task
+afterEvaluate {
+    // If expandTemplate exists, sourceJar tasks need to depend on it
+    if (tasks.findByName('expandTemplate')) {
+        if (tasks.findByName('sourcesJar')) {
+            tasks.named('sourcesJar').configure {
+                dependsOn tasks.expandTemplate
+            }
+        }
+        if (tasks.findByName('sourceJar')) {
+            tasks.named('sourceJar').configure {
+                dependsOn tasks.expandTemplate
+            }
+        }
+    }
+    
+    // Publishing tasks need explicit dependency on sourceJar (legacy task from java.gradle)
+    tasks.withType(PublishToMavenRepository).configureEach {
+        if (tasks.findByName('sourceJar')) {
+            dependsOn tasks.sourceJar
+        }
+    }
+    tasks.withType(GenerateModuleMetadata).configureEach {
+        if (tasks.findByName('sourceJar')) {
+            dependsOn tasks.sourceJar
+        }
+    }
+}
+

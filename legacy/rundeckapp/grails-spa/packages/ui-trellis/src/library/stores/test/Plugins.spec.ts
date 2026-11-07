@@ -1,0 +1,232 @@
+import {
+  expect,
+  jest,
+  describe,
+  beforeEach,
+  afterEach,
+  it,
+} from "@jest/globals";
+import { AxiosResponse } from "axios";
+import { apiClient, api } from "../../services/api";
+import { Plugin, PluginStore, ServiceType } from "../Plugins";
+import { RootStore } from "../RootStore";
+import {
+  mockWorkflowStepPlugins,
+  mockWorkflowNodeStepPlugins,
+  mockJobRefWorkflowStepPlugin,
+  mockJobRefWorkflowNodeStepPlugin,
+  mockPluginDetail,
+} from "./mocks/mockPluginData";
+import { getPluginDetail } from "../../services/plugins";
+
+jest.mock("../../services/plugins");
+jest.mock("../../services/api", () => {
+  const api = {
+    get: jest.fn(),
+    put: jest.fn(),
+    post: jest.fn(),
+  };
+  return {
+    api,
+    apiClient: jest.fn().mockImplementation(() => api),
+  };
+});
+jest.mock("@/library/rundeckService", () => ({
+  getRundeckContext: jest.fn().mockImplementation(() => ({
+    rdBase: "http://localhost:4440/",
+    projectName: "testProject",
+    apiVersion: "44",
+  })),
+}));
+
+const mockedGetPluginDetail = getPluginDetail as jest.MockedFunction<
+  typeof getPluginDetail
+>;
+const mockedApi = api as jest.Mocked<typeof api>;
+const mockedApiClient = apiClient as jest.MockedFunction<typeof apiClient>;
+const mockRootStore = {} as RootStore;
+
+const createMockResponse = (plugins: Plugin[]): AxiosResponse =>
+  ({ status: 200, data: plugins }) as unknown as AxiosResponse;
+
+describe("PluginStore", () => {
+  let pluginStore: PluginStore;
+
+  beforeEach(() => {
+    mockedApiClient.mockImplementation(() => mockedApi as any);
+    pluginStore = new PluginStore(mockRootStore, null as any);
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+    jest.resetAllMocks();
+  });
+
+  describe("load", () => {
+    it("should load plugins for a given service", async () => {
+      mockedApi.get.mockResolvedValueOnce(
+        createMockResponse(mockWorkflowStepPlugins),
+      );
+      const expectedResponse = [
+        mockJobRefWorkflowStepPlugin,
+        ...mockWorkflowStepPlugins,
+      ];
+
+      await pluginStore.load(ServiceType.WorkflowStep);
+
+      expect(pluginStore.plugins).toEqual(expectedResponse);
+      expect(pluginStore.pluginsByService[ServiceType.WorkflowStep]).toEqual(
+        expectedResponse,
+      );
+
+      const pluginNames = mockWorkflowStepPlugins.map(
+        (plugin) => `${plugin.name}-${plugin.service}`,
+      );
+
+      expect(mockedApi.get).toHaveBeenCalledWith("plugin/list", {
+        params: { service: ServiceType.WorkflowStep },
+      });
+      expect(pluginStore.pluginsById[pluginNames[0]]).toEqual([
+        mockWorkflowStepPlugins[0],
+      ]);
+      expect(pluginStore.pluginsById[pluginNames[1]]).toEqual([
+        mockWorkflowStepPlugins[1],
+      ]);
+    });
+
+    it("should load job reference plugin when service is WorkflowStep", async () => {
+      mockedApi.get.mockResolvedValueOnce(
+        createMockResponse(mockWorkflowStepPlugins),
+      );
+      const expectedResponse = [
+        mockJobRefWorkflowStepPlugin,
+        ...mockWorkflowStepPlugins,
+      ];
+
+      await pluginStore.load(ServiceType.WorkflowStep);
+
+      expect(pluginStore.plugins).toEqual(expectedResponse);
+      expect(pluginStore.pluginsByService[ServiceType.WorkflowStep]).toEqual(
+        expectedResponse,
+      );
+
+      const pluginNames = expectedResponse.map(
+        (plugin) => `${plugin.name}-${plugin.service}`,
+      );
+
+      expect(mockedApi.get).toHaveBeenCalledWith("plugin/list", {
+        params: { service: ServiceType.WorkflowStep },
+      });
+      expect(pluginStore.pluginsById[pluginNames[0]]).toEqual([
+        expectedResponse[0],
+      ]);
+      expect(pluginStore.pluginsById[pluginNames[1]]).toEqual([
+        expectedResponse[1],
+      ]);
+      expect(pluginStore.pluginsById[pluginNames[2]]).toEqual([
+        expectedResponse[2],
+      ]);
+    });
+
+    it("should not reload plugins if already loaded for the service", async () => {
+      mockedApi.get.mockResolvedValueOnce(
+        createMockResponse(mockWorkflowStepPlugins),
+      );
+      await pluginStore.load(ServiceType.WorkflowStep);
+
+      await pluginStore.load(ServiceType.WorkflowStep);
+
+      expect(mockedApi.get).toHaveBeenCalledWith("plugin/list", {
+        params: { service: ServiceType.WorkflowStep },
+      });
+      expect(mockedApi.get).toHaveBeenCalledTimes(1);
+    });
+
+    it("should not add duplicate plugins", async () => {
+      mockedApi.get.mockResolvedValue(
+        createMockResponse([mockWorkflowStepPlugins[0]]),
+      );
+      await pluginStore.load(ServiceType.WorkflowStep);
+      await pluginStore.load(ServiceType.WorkflowStep);
+      await pluginStore.load(ServiceType.WorkflowStep);
+
+      // it is 2: jobRef (static) + 1 API plugin
+      expect(pluginStore.plugins).toHaveLength(2);
+      expect(
+        pluginStore.pluginsByService[ServiceType.WorkflowStep],
+      ).toHaveLength(2);
+    });
+  });
+
+  describe("getServicePlugins", () => {
+    it("should return sorted plugins for a given service", async () => {
+      mockedApi.get.mockResolvedValue(
+        createMockResponse(mockWorkflowNodeStepPlugins),
+      );
+      await pluginStore.load(ServiceType.WorkflowNodeStep);
+
+      const result = pluginStore.getServicePlugins(
+        ServiceType.WorkflowNodeStep,
+      );
+
+      expect(result).toEqual([
+        mockJobRefWorkflowNodeStepPlugin, // highlighted, order 5
+        mockWorkflowNodeStepPlugins[1], // "Local Command" (L < S alphabetically)
+        mockWorkflowNodeStepPlugins[0], // "SSH Command"
+      ]);
+    });
+
+    it("should inject both static plugins for WorkflowNodeStep service", async () => {
+      mockedApi.get.mockResolvedValueOnce(createMockResponse([]));
+
+      await pluginStore.load(ServiceType.WorkflowNodeStep);
+
+      expect(pluginStore.plugins).toContainEqual(
+        mockJobRefWorkflowNodeStepPlugin,
+      );
+    });
+
+    it("should not inject static plugins for LogFilter service", async () => {
+      mockedApi.get.mockResolvedValueOnce(createMockResponse([]));
+
+      await pluginStore.load(ServiceType.LogFilter);
+
+      expect(pluginStore.plugins).toHaveLength(0);
+    });
+
+    it("should return an empty array for a service with no plugins", () => {
+      const result = pluginStore.getServicePlugins(ServiceType.LogFilter);
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe("getPluginDetail", () => {
+    it("should return the plugin detail for a service provider", async () => {
+      mockedGetPluginDetail.mockResolvedValue(mockPluginDetail);
+
+      const result = await pluginStore.getPluginDetail(
+        ServiceType.WorkflowStep,
+        mockWorkflowStepPlugins[0].name,
+      );
+
+      expect(result).toEqual(mockPluginDetail);
+    });
+
+    it("should return the cached plugin detail for a service provider", async () => {
+      mockedGetPluginDetail.mockResolvedValueOnce(mockPluginDetail);
+
+      const result1 = await pluginStore.getPluginDetail(
+        ServiceType.WorkflowStep,
+        mockWorkflowStepPlugins[0].name,
+      );
+      const result2 = await pluginStore.getPluginDetail(
+        ServiceType.WorkflowStep,
+        mockWorkflowStepPlugins[0].name,
+      );
+
+      expect(result1).toEqual(mockPluginDetail);
+      expect(result2).toEqual(mockPluginDetail);
+    });
+  });
+});

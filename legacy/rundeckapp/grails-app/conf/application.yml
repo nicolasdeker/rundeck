@@ -1,0 +1,417 @@
+---
+grails:
+    profile: web
+    codegen:
+        defaultPackage: rundeckapp
+    spring:
+        transactionManagement:
+            proxies: false
+    gorm:
+        reactor:
+            # Whether to translate GORM events into Reactor events
+            # Disabled by default for performance reasons
+            events: false
+    databinding:
+        trimStrings: false
+    servlet:
+        version: 3.0
+
+info:
+    app:
+        name: '@info.app.name@'
+        version: '@info.app.version@'
+        grailsVersion: '@info.app.grailsVersion@'
+
+logging:
+    level:
+        root: INFO
+        # Grails 7: Auth is working, reduced logging
+        org.springframework.security: INFO
+        grails.plugin.springsecurity: INFO
+        # Keep JAAS at DEBUG for troubleshooting if needed
+        org.springframework.security.authentication.jaas: INFO
+        com.dtolabs.rundeck.jaas: INFO
+        # Keep Hikari at DEBUG for connection pool monitoring
+        com.zaxxer.hikari: DEBUG
+        com.zaxxer.hikari.pool.HikariPool: DEBUG
+
+spring:
+    liquibase:
+        enabled: false  # Temporarily disabled for Grails 7 testing
+    cloud:
+        bootstrap:
+            enabled: false  # Spring Boot 3.x - bootstrap context deprecated
+        config:
+            enabled: false  # Disable external config server (not used in standard deployments)
+        consul:
+            enabled: false  # Disable Consul (enabled via rundeckpro-config when configured)
+    autoconfigure:
+        exclude:
+            - org.springframework.boot.autoconfigure.integration.IntegrationAutoConfiguration
+    security:
+        # Spring Security configured via grails.plugin.springsecurity.* in application.groovy
+    jpa:
+        hibernate:
+            naming:
+                implicit-strategy: org.hibernate.boot.model.naming.ImplicitNamingStrategyJpaCompliantImpl
+                physical-strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+    jmx:
+        unique-names: true
+    application:
+        name: rundeck
+    main:
+        banner-mode: "off"
+    groovy:
+        template:
+            check-template-location: false
+    devtools:
+        restart:
+            additional-exclude:
+                - '*.gsp'
+                - '**/*.gsp'
+                - '*.gson'
+                - '**/*.gson'
+                - 'logback.groovy'
+                - '*.properties'
+management:
+    endpoints:
+        enabled-by-default: true  # Enable endpoints so beans are created
+        web:
+            exposure:
+                # Disable Spring Boot Actuator web endpoints entirely
+                # MonitoringController at /monitoring/* calls MeterRegistry beans directly
+                exclude: '*'
+    health:
+        defaults:
+            enabled: true
+    endpoint:
+        health:
+            enabled: true
+            # Grails 7: Disable strict health contributor validation during startup
+            # The rundeckDataSourceHealthIndicator bean is registered but Spring Boot 3 validates before full initialization
+            validate-group-membership: false
+            probes:
+                enabled: true
+            show-details: always
+            group:
+                liveness:
+                    include:
+                        - livenessState
+                        - ping
+                readiness:
+                    include:
+                        - readinessState
+                        - rundeckDataSourceHealthIndicator
+        metrics:
+            enabled: true
+        prometheus:
+            enabled: true
+        info:
+            enabled: true
+        threaddump:
+            enabled: true
+    metrics:
+        enabled: true  # Explicitly enable metrics collection
+        export:
+            prometheus:
+                enabled: true  # Enable Prometheus registry bean
+            jmx:
+                enabled: true  # Export Micrometer metrics as JMX MBeans (jetty.threads.*, etc.) for dd-java-agent
+
+---
+
+grails:
+    mime:
+        file:
+            extensions: true
+        types:
+            all: '*/*'
+            atom: application/atom+xml
+            css: text/css
+            csv: text/csv
+            form: application/x-www-form-urlencoded
+            html:
+              - text/html
+              - application/xhtml+xml
+            js: text/javascript
+            json:
+              - application/json
+              - text/json
+            multipartForm: multipart/form-data
+            pdf: application/pdf
+            rss: application/rss+xml
+            text: text/plain
+            hal:
+              - application/hal+json
+              - application/hal+xml
+            xml:
+              - text/xml
+              - application/xml
+            yaml:
+              - text/yaml
+              - application/yaml
+        use:
+            accept:
+                header: true
+        disable:
+            accept:
+                header:
+                    userAgents: []
+
+    urlmapping:
+        cache:
+            maxsize: 1000
+    controllers:
+        defaultScope: singleton
+    converters:
+        encoding: UTF-8
+        json:
+            default:
+                deep: true
+    views:
+        default:
+            codec: none
+        gsp:
+            encoding: UTF-8
+            htmlcodec: xml
+            codecs:
+                expression: html
+                scriptlet: html
+                taglib: none
+                staticparts: none
+    enable:
+        native2ascii: true
+    json:
+        legacy:
+            builder: false
+    mail:
+        default:
+            from: rundeck-server@localhost
+    databinding:
+        trimStrings: false
+        dateFormats:
+#            default grails patterns
+            - yyyy-MM-dd HH:mm:ss.S
+            - yyyy-MM-dd'T'hh:mm:ss'Z'
+#            ISO8601 patterns
+            - yyyy-MM-dd'T'HH:mm:ssX
+            - yyyy-MM-dd'T'HH:mm:ss.SSSX
+            - yyyy-MM-dd'T'HH:mm:ssXX
+            - yyyy-MM-dd'T'HH:mm:ss.SSSXX
+            - yyyy-MM-dd'T'HH:mm:ssXXX
+            - yyyy-MM-dd'T'HH:mm:ss.SSSXXX
+            - yyyy-MM-dd'T'HH:mm:ss.XXX
+            - yyyy-MM-dd'T'HH:mm:ssZ
+            - yyyy-MM-dd'T'HH:mm:ss'Z'
+    plugins:
+        twitterbootstrap:
+            fixtaglib: true
+    assets:
+        bundle: true  # Force use of compiled/hashed assets even in development
+        minifyJs: false
+        minifyCss: false
+        enableDigests: true  # Enable digest/hash in asset names
+        less:
+            compile: less4j
+        plugin:
+            twitter-bootstrap:
+                excludes: ["**/*.less"]
+                includes: ["bootstrap.less"]
+---
+
+rdeck:
+    base: ${user.home}/dev-3-svr/server/config
+
+---
+rundeck:
+    executionMode: active
+    config:
+        location: ${user.home}/dev-3-svr/server/config/rundeck-config.properties
+        storage:
+            default: deleteMe
+    security:
+        apiCookieAccess:
+            enabled: true
+        authorization:
+            containerPrincipal:
+                enabled: true
+            container:
+                enabled: true
+            preauthenticated:
+                attributeName: REMOTE_USER_GROUPS
+                enabled: false
+                userNameHeader: null
+                userRolesHeader: null
+                delimiter: ','
+        useHMacRequestTokens: true
+        httpHeaders:
+            enabled: true
+            provider:
+                csp:
+                    enabled: true
+                    comment: the following policy definition should work in default rundeck install
+                    config:
+                        default-src: 'none'
+                        connect-src: 'self https://api.rundeck.com https://data.analytics.rundeck.com'
+                        style-src: 'self unsafe-inline'
+                        script-src: 'self https://content.analytics.rundeck.com unsafe-inline unsafe-eval'
+                        font-src: 'self data:'
+                        img-src: '* data:'
+                        form-action: 'self'
+        interceptor:
+            allowed:
+                controllers:
+                    - static
+                    - assets
+                    - feed
+                    - user-assets
+                    - health
+                    - agent
+                paths:
+                    - /assets
+                    - /static
+                    - /user-assets
+                    - /error
+                    - /favicon.ico
+                    - /health
+                    - /user/reset
+                    - /actuator/health
+                    - /actuator/health/liveness
+                    - /actuator/health/readiness
+                    - /monitoring
+                    - /monitoring/**
+                    - /metrics
+                    - /metrics/**
+                    - /.well-known
+    storage:
+        default: deleteMe
+    execution:
+        finalize:
+            retryMax: 10
+            retryDelay: 5000
+        status:
+            retryMax: 5
+            retryDelay: 5000
+        logs:
+            fileStorage:
+                cancelOnStorageFailure: true
+    mail:
+        template:
+            subject: '${notification.eventStatus} [${execution.project}] ${job.group}/${job.name} ${execution.argstring}'
+    metrics:
+        enabled: true
+        jmxEnabled: true
+        requestFilterEnabled: true
+        servletUrlPattern: '/metrics/*'
+        api:
+            enabled: true
+            metrics:
+                enabled: true
+            ping:
+                enabled: true
+            threads:
+                enabled: true
+            healthcheck:
+                enabled: true
+            cpuProfile:
+                enabled: false
+    gui:
+        execution:
+            tail:
+                lines:
+                    default: 20
+                    max: 500
+        job:
+            description:
+                disableHTML: false
+        clusterIdentityInHeader: false
+        clusterIdentityInFooter: true
+    pagination:
+        default:
+            max: 20
+    projectService:
+        deferredProjectDelete: true
+        projectExportCache:
+            spec: "expireAfterAccess=30m"
+    projectManagerService:
+        projectCache:
+            spec: 'expireAfterAccess=10m,refreshAfterWrite=1m'
+    logFileStorageService:
+        startup:
+            resumeMode: async
+    ajax:
+        compression: gzip
+        executionState:
+            compression:
+                nodeThreshold: 500
+    nodeService:
+        nodeCache:
+            enabled: true
+            spec: 'refreshInterval=30s'
+    feature:
+        #feature flags settings for all environments
+        webhooks:
+            enabled: true
+        enhancedNodes:
+            enabled: true
+        optionValuesPlugin:
+            enabled: true
+        workflowDynamicStepSummaryGUI:
+            enabled: true
+        cleanExecutionsHistoryJob:
+            enabled: true
+        cleanExecutionsHistoryJobAsyncStart:
+            enabled: true
+        executionLifecyclePlugin:
+            enabled: true
+        projectManagerServiceBootstrapWarmupCache:
+            enabled: true
+        authorizationServiceBootstrapWarmupCache:
+            enabled: true
+        sidebarProjectListing:
+            enabled: true
+        userSessionProjectsCache:
+            enabled: true
+        workflowDesigner:
+            enabled: true
+        projectKeyStorage:
+            enabled: true
+        notificationsOwnThread:
+            enabled: true
+        fileUploadPlugin:
+            enabled: true
+        vueKeyStorage:
+            enabled: true
+    health:
+        databaseValidationQuery: "SELECT 1"
+---
+
+beans:
+    cacheManager:
+        shared: true
+
+
+server:
+    port: 4440
+    servlet:
+        session:
+            persistent: false
+            cookie:
+                http-only: true
+                same-site: "Lax"
+                # secure is intentionally left unset here: JettyServletContainerCustomizer auto-enables
+                # it when grails.serverURL uses https, so HTTP-only deployments keep working. Set this
+                # explicitly (true/false) to override that auto-detection.
+            tracking-modes: 'cookie'
+rundeck:
+    web:
+      jetty:
+        servlet:
+          initParams:
+            'org.eclipse.jetty.servlet.SessionIdPathParameterName': "none"
+            'org.eclipse.jetty.servlet.SessionCookie': "JSESSIONID"
+---
+hibernate:
+    allow_update_outside_transaction: true
+    physical_naming_strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+    implicit_naming_strategy: org.hibernate.boot.model.naming.ImplicitNamingStrategyJpaCompliantImpl

@@ -1,0 +1,47 @@
+# docker-compose.rdx-cloud.yml — the upstream oracle fixture, adapted for the Claude Code cloud sandbox (no IPv6).
+#
+# Every service `extends` the service of the same name in the upstream file legacy/functional-test/src/test/resources/
+# docker/compose/oss/docker-compose.yml (this file is copied next to it into build/resources/test by the Gradle init
+# script scripts/gradle-init.d/rdx-oracle-overlay.gradle when RDX_ORACLE_COMPOSE_OVERLAY is set). Only two things differ:
+#   - rundeck: the JDWP debug agent binds 0.0.0.0:5005 instead of *:5005 — without IPv6 the JVM dies with
+#     "transport error 202: socket creation failed: Address family not supported by protocol".
+#   - ssh-node: nginx's IPv6 listen directives are dropped before the upstream start script runs (it uses set -e).
+# Nothing under test changes; CI runners (with IPv6) use the upstream file unchanged. See DECISIONS-PENDING.md D-005.
+services:
+  rundeck:
+    extends:
+      file: docker-compose.yml
+      service: rundeck
+    command:
+      - "-Dcom.sun.management.jmxremote"
+      - "-Dcom.sun.management.jmxremote.port=9012"
+      - "-Dcom.sun.management.jmxremote.authenticate=false"
+      - "-Dcom.sun.management.jmxremote.ssl=false"
+      - "-Dcom.sun.management.jmxremote.local.only=false"
+      - "-Dcom.sun.management.jmxremote.rmi.port=9012"
+      - "-Djava.rmi.server.hostname=localhost"
+      - "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=0.0.0.0:5005"
+  rundeck-db:
+    extends:
+      file: docker-compose.yml
+      service: rundeck-db
+  gitea:
+    extends:
+      file: docker-compose.yml
+      service: gitea
+  ssh-node:
+    extends:
+      file: docker-compose.yml
+      service: ssh-node
+    command:
+      - bash
+      - -c
+      - 'grep -rl "listen \[::\]" /etc/nginx 2>/dev/null | xargs -r sed -i "/listen \[::\]/d"; /usr/local/sbin/init && /usr/local/sbin/rdeck_ssh_start'
+  mock-server:
+    extends:
+      file: docker-compose.yml
+      service: mock-server
+
+networks:
+  default:
+    name: rundeck-network

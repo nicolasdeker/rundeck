@@ -1,0 +1,41 @@
+# Rust
+/target/
+/crates/**/target/
+*.profraw
+/lcov.info
+/fuzz/target/
+/fuzz/artifacts/
+
+# Frontend
+/ui/node_modules/
+/ui/dist/
+/ui/coverage/
+/ui/test-results/
+/ui/playwright-report/
+/ui/blob-report/
+/ui/.vite/
+/ui/storybook-static/
+
+# Oracle / parity runs (never commit oracle data)
+/.oracle/
+/parity-report*.json
+/legacy/.gradle/
+/legacy/**/build/
+/legacy/functional-test/.build/
+/legacy/build/
+/legacy/functional-test/src/test/resources/docker/compose/oss/keys/*
+!/legacy/functional-test/src/test/resources/docker/compose/oss/keys/README.md
+
+# Benchmarks
+/scripts/bench/results/
+
+# Python helper scripts
+__pycache__/
+*.pyc
+
+# OS / editors
+.DS_Store
+*.swp
+*~
+/.idea/
+/.vscode/

@@ -1,0 +1,543 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.plugins.util;
+
+import com.dtolabs.rundeck.core.plugins.configuration.*;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+
+/**
+ * A builder for Property objects
+ */
+public class PropertyBuilder {
+    private Property.Type type;
+    private String name;
+    private String title;
+    private String description;
+    private boolean required;
+    private String value;
+    private List<String> values;
+    private Map<String, String> labels;
+    private PropertyValidator validator;
+    private PropertyScope scope;
+    private Map<String, Object> renderingOptions = new HashMap<String, Object>();
+    private boolean dynamicValues;
+    private boolean blankIfUnexpandabled = true;
+    private String unexpandableBehaviorFrom;
+    private List<PluginOutputMetadata> outputMetadata;
+    private boolean outputOnly;
+
+    private PropertyBuilder() {
+
+    }
+
+    public static PropertyBuilder builder() {
+        return new PropertyBuilder();
+    }
+
+    /**
+     * Return a new instance preconfigured with a previously defined Property
+     * @param orig original property
+     *
+     * @return this builder
+     */
+    public static PropertyBuilder builder(final Property orig) {
+        return new PropertyBuilder()
+            .name(orig.getName())
+            .defaultValue(orig.getDefaultValue())
+            .required(orig.isRequired())
+            .type(orig.getType())
+            .description(orig.getDescription())
+            .title(orig.getTitle())
+            .values(orig.getSelectValues())
+            .labels(orig.getSelectLabels())
+            .validator(orig.getValidator())
+            .scope(orig.getScope())
+            .renderingOptions(orig.getRenderingOptions())
+            .blankIfUnexpandable(orig.isBlankIfUnexpandable())
+            .unexpandableBehaviorFrom(orig.getUnexpandableBehaviorFrom())
+            .outputMetadata(orig.getOutputMetadata())
+            .outputOnly(orig.isOutputOnly())
+            ;
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#String}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder string(final String name) {
+        name(name);
+        type(Property.Type.String);
+        return this;
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#AutogenInstanceId}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder autogenInstanceId(final String name) {
+        name(name);
+        type(Property.Type.AutogenInstanceId);
+        return defaultValue("").renderingOption(StringRenderingConstants.DISPLAY_TYPE_KEY, StringRenderingConstants.DisplayType.STATIC_TEXT);
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#Boolean}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder booleanType(final String name) {
+        name(name);
+        type(Property.Type.Boolean);
+        return this;
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#Integer}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder integer(final String name) {
+        name(name);
+        type(Property.Type.Integer);
+        return this;
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#Long}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder longType(final String name) {
+        name(name);
+        type(Property.Type.Long);
+        return this;
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#Select}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder select(final String name) {
+        name(name);
+        type(Property.Type.Select);
+        return this;
+    }
+
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#Select}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder options(final String name) {
+        name(name);
+        type(Property.Type.Options);
+        return this;
+    }
+
+    /**
+     * Return a new PropertyBuilder of type {@link Property.Type#FreeSelect}
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder freeSelect(final String name) {
+        name(name);
+        type(Property.Type.FreeSelect);
+        return this;
+    }
+
+    /**
+     * Set the type
+     * @param type type
+     *
+     * @return this builder
+     */
+    public PropertyBuilder type(final Property.Type type) {
+        this.type = type;
+        return this;
+    }
+
+    /**
+     * Set the name (identifier)
+     * @param name name
+     *
+     * @return this builder
+     */
+    public PropertyBuilder name(final String name) {
+        this.name = name;
+        return this;
+    }
+
+    /**
+     * Set the title (display name)
+     * @param title title
+     *
+     * @return this builder
+     */
+    public PropertyBuilder title(final String title) {
+        this.title = title;
+        return this;
+    }
+
+    /**
+     * Set the description
+     * @param description description
+     *
+     * @return this builder
+     */
+    public PropertyBuilder description(final String description) {
+        this.description = description;
+        return this;
+    }
+
+    /**
+     * Set required
+     * @param required true if required
+     *
+     * @return this builder
+     */
+    public PropertyBuilder required(final boolean required) {
+        this.required = required;
+        return this;
+    }
+
+    /**
+     * Set blankIfUnexpandable
+     * @param blankIfUnexpandable true if unexpanded variables get replaced with blanks
+     *
+     * @return this builder
+     */
+    public PropertyBuilder blankIfUnexpandable(final boolean blankIfUnexpandable) {
+        this.blankIfUnexpandabled = blankIfUnexpandable;
+        return this;
+    }
+
+    /**
+     * Resolve this property's unexpandable behavior from another instance config key at runtime
+     * (typically a Select exposed in the plugin UI).
+     *
+     * @param unexpandableBehaviorFrom name of a sibling config property
+     * @return this builder
+     */
+    public PropertyBuilder unexpandableBehaviorFrom(final String unexpandableBehaviorFrom) {
+        this.unexpandableBehaviorFrom = unexpandableBehaviorFrom;
+        return this;
+    }
+
+    /**
+     * Set the output metadata marking this property as an exposed output value for conditional-logic
+     * reference (see {@code com.dtolabs.rundeck.plugins.descriptions.PluginOutput}).
+     *
+     * @param outputMetadata output metadata entries, or null/empty if not exposed
+     * @return this builder
+     */
+    public PropertyBuilder outputMetadata(final List<PluginOutputMetadata> outputMetadata) {
+        this.outputMetadata = outputMetadata;
+        return this;
+    }
+
+    /**
+     * Mark this property as output-only: built from a field carrying only {@code @PluginOutput} (no
+     * {@code @PluginProperty}), so it must not be rendered as a job/step configuration input.
+     *
+     * @param outputOnly true if the property is output-only
+     * @return this builder
+     */
+    public PropertyBuilder outputOnly(final boolean outputOnly) {
+        this.outputOnly = outputOnly;
+        return this;
+    }
+
+    /**
+     * Set the default value
+     * @param value value
+     *
+     * @return this builder
+     */
+    public PropertyBuilder defaultValue(final String value) {
+        this.value = value;
+        return this;
+    }
+
+    /**
+     * Set the select values
+     * @param values values
+     *
+     * @return this builder
+     */
+    public PropertyBuilder values(final List<String> values) {
+        this.values = values;
+        return this;
+    }
+
+    /**
+     * Set the select labels
+     *
+     * @param labels map of value to label
+     *
+     * @return this builder
+     */
+    public PropertyBuilder labels(final Map<String, String> labels) {
+        this.labels = labels;
+        return this;
+    }
+
+    /**
+     * Set the select values
+     * @param values values
+     *
+     * @return this builder
+     */
+    public PropertyBuilder values(final String... values) {
+        this.values = Arrays.asList(values);
+        return this;
+    }
+
+    /**
+     * Set the property validator, only applies to String, Integer, Long, and FreeSelect types
+     * @param validator validator
+     *
+     * @return this builder
+     */
+    public PropertyBuilder validator(final PropertyValidator validator) {
+        this.validator = validator;
+        return this;
+    }
+
+    /**
+     * Set the property scope
+     * @param scope scope
+     *
+     * @return this builder
+     */
+    public PropertyBuilder scope(final PropertyScope scope) {
+        this.scope = scope;
+        return this;
+    }
+    
+    /**
+     * Adds all rendering options from the given renderingOptions
+     * @param renderingOptions options
+     *
+     * @return this builder
+     * @see StringRenderingConstants
+     */
+    public PropertyBuilder renderingOptions(final Map<String, Object> renderingOptions) {
+        this.renderingOptions.putAll(renderingOptions);
+        return this;
+    }
+
+    public PropertyBuilder dynamicValues(final boolean dynamicValues) {
+        this.dynamicValues = dynamicValues;
+        return this;
+    }
+    
+    /**
+     * Adds the given renderingOption
+     * @param optionKey key
+     * @param optionValue value
+     *
+     * @return this builder
+     * @see StringRenderingConstants
+     */
+    public PropertyBuilder renderingOption(final String optionKey, final Object optionValue) {
+        this.renderingOptions.put(optionKey, optionValue);
+        return this;
+    }
+    /**
+     * Set the string property to display as a Multi-line Text area.
+     * @return this builder
+     * @throws IllegalStateException if the property type is not {@link Property.Type#String}
+     */
+    public PropertyBuilder renderingAsTextarea() {
+        if (this.type != Property.Type.String) {
+            throw new IllegalStateException("stringRenderingTextarea can only be applied to a String property");
+        }
+        return renderingOption(StringRenderingConstants.DISPLAY_TYPE_KEY, StringRenderingConstants.DisplayType
+                .MULTI_LINE);
+    }
+    /**
+     * Set the string property to display as a Password.
+     * @return this builder
+     * @throws IllegalStateException if the property type is not {@link Property.Type#String}
+     */
+    public PropertyBuilder renderingAsPassword() {
+        if (this.type != Property.Type.String) {
+            throw new IllegalStateException("stringRenderingPassword can only be applied to a String property");
+        }
+        return renderingOption(StringRenderingConstants.DISPLAY_TYPE_KEY, StringRenderingConstants.DisplayType
+                .PASSWORD);
+    }
+
+    /**
+     * Build the Property object
+     * @return built property
+     * @throws IllegalStateException if type or name is not set
+     */
+    public Property build() {
+        if (null == type) {
+            throw new IllegalStateException("type is required");
+        }
+        if (null == name) {
+            throw new IllegalStateException("name is required");
+        }
+        Property built = PropertyUtil.forType(
+                type,
+                name,
+                title,
+                description,
+                required,
+                value,
+                values,
+                labels,
+                validator,
+                scope,
+                renderingOptions,
+                dynamicValues,
+                blankIfUnexpandabled,
+                unexpandableBehaviorFrom
+        );
+        if ((outputMetadata != null && !outputMetadata.isEmpty()) || outputOnly) {
+            return new OutputMetadataProperty(built, outputMetadata, outputOnly);
+        }
+        return built;
+    }
+
+    /**
+     * Decorates a built {@link Property} with output metadata and/or the output-only flag, without
+     * requiring changes to every concrete {@link Property} implementation returned by
+     * {@link PropertyUtil#forType}.
+     */
+    private static final class OutputMetadataProperty implements Property {
+        private final Property delegate;
+        private final List<PluginOutputMetadata> outputMetadata;
+        private final boolean outputOnly;
+
+        OutputMetadataProperty(
+                final Property delegate,
+                final List<PluginOutputMetadata> outputMetadata,
+                final boolean outputOnly
+        ) {
+            this.delegate = delegate;
+            this.outputMetadata = outputMetadata;
+            this.outputOnly = outputOnly;
+        }
+
+        @Override
+        public String getTitle() {
+            return delegate.getTitle();
+        }
+
+        @Override
+        public String getName() {
+            return delegate.getName();
+        }
+
+        @Override
+        public String getDescription() {
+            return delegate.getDescription();
+        }
+
+        @Override
+        public Type getType() {
+            return delegate.getType();
+        }
+
+        @Override
+        public PropertyValidator getValidator() {
+            return delegate.getValidator();
+        }
+
+        @Override
+        public boolean isRequired() {
+            return delegate.isRequired();
+        }
+
+        @Override
+        public String getDefaultValue() {
+            return delegate.getDefaultValue();
+        }
+
+        @Override
+        public List<String> getSelectValues() {
+            return delegate.getSelectValues();
+        }
+
+        @Override
+        public Map<String, String> getSelectLabels() {
+            return delegate.getSelectLabels();
+        }
+
+        @Override
+        public PropertyScope getScope() {
+            return delegate.getScope();
+        }
+
+        @Override
+        public Map<String, Object> getRenderingOptions() {
+            return delegate.getRenderingOptions();
+        }
+
+        @Override
+        public boolean isBlankIfUnexpandable() {
+            return delegate.isBlankIfUnexpandable();
+        }
+
+        @Override
+        public String getUnexpandableBehaviorFrom() {
+            return delegate.getUnexpandableBehaviorFrom();
+        }
+
+        @Override
+        public List<PluginOutputMetadata> getOutputMetadata() {
+            return outputMetadata;
+        }
+
+        @Override
+        public boolean isOutputOnly() {
+            return outputOnly;
+        }
+
+        @Override
+        public String toString() {
+            return delegate.toString();
+        }
+    }
+
+    /**
+     * @return the type already defined for the builder
+     */
+    public Property.Type getType() {
+        return type;
+    }
+}

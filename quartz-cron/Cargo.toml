@@ -1,0 +1,13 @@
+[package]
+name = "quartz-cron"
+description = "standalone crate: Quartz cron parser/evaluator (property-tested against a legacy-derived corpus)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

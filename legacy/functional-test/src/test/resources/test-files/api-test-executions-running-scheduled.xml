@@ -1,0 +1,21 @@
+<joblist>
+  <job>
+    <defaultTab>nodes</defaultTab>
+    <description>xml-job-description-name</description>
+    <executionEnabled>true</executionEnabled>
+    <id>d9500676-1cba-4e67-adec-1c28ad935048</id>
+    <loglevel>INFO</loglevel>
+    <name>xml-job-name</name>
+    <nodeFilterEditable>false</nodeFilterEditable>
+    <plugins />
+    <schedule crontab="xml-schedule-crontab"/>
+    <scheduleEnabled>xml-schedule-enabled</scheduleEnabled>
+    <multipleExecutions>true</multipleExecutions>
+    <sequence keepgoing='false'>
+      <command>
+        <exec>xml-args</exec>
+      </command>
+    </sequence>
+    <uuid>xml-uuid</uuid>
+  </job>
+</joblist>

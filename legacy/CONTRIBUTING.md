@@ -1,0 +1,42 @@
+# How to Contribute to Rundeck
+
+If you have a patch or pull request for us, thank you!  
+
+The more of these guidelines you can follow, the easier (and faster) it is for us to evaluate your code and incorporate it into the development branch.
+
+(Borrowing from [ThinkUp's Pull Request Checklist](https://github.com/ginatrapani/thinkup/wiki/Developer-Guide:-Pull-Request-Checklist)):
+
+2. Make sure you can perform a full build and that the tests all pass. (See [Building and Testing])
+3. Please add unit tests to demonstrate that your submission fixes an existing bug, or performs as intended.
+1. Rebase your branch on the current state of the `main` branch. Use `git rebase main`.
+   This means you might have to deal with conflicts.
+2. Be descriptive in your commit messages: explain the purpose of all changes.
+   You can modify commit messages by doing `git commit --amend` (for the previous change),
+   or `git rebase -i` for earlier changes.
+
+Once your branch is cleaned up, please submit the Pull request against the `main` branch.
+
+Thanks for your help!
+
+A typical workflow:
+
+~~~ {.sh}
+# get up to date with origin/main and create a branch
+git checkout main
+git pull
+git checkout -b newbranch
+# now make your commits.  
+$EDITOR somefile
+git commit -m "my change"
+# If you are now out of date with main, update your main branch:
+git checkout main && git pull
+# now go back to your branch and rebase on top of main
+git checkout - # "-" will checkout previous branch
+git rebase main
+# resolve any conflicts, and possibly do `git rebase --continue` to finish rebasing
+# now push your branch to your fork, and submit a pull request
+git push myfork newbranch
+~~~
+
+
+[Building and Testing]: https://github.com/rundeck/rundeck/wiki/Building-and-Testing

@@ -1,0 +1,407 @@
+package org.rundeck.tests.functional.selenium.jobs
+
+import org.openqa.selenium.By
+import org.rundeck.util.annotations.ExcludePro
+import org.rundeck.util.gui.pages.jobs.JobCreatePage
+import org.rundeck.util.gui.pages.jobs.JobListPage
+import org.rundeck.util.gui.pages.jobs.UiMode
+import org.rundeck.util.gui.pages.home.HomePage
+import org.rundeck.util.gui.pages.jobs.JobShowPage
+import org.rundeck.util.gui.pages.jobs.JobTab
+import org.rundeck.util.gui.pages.jobs.NotificationEvent
+import org.rundeck.util.gui.pages.jobs.NotificationType
+import org.rundeck.util.gui.pages.login.LoginPage
+import org.rundeck.util.annotations.SeleniumCoreTest
+import org.rundeck.util.annotations.UiModeFlag
+import org.rundeck.util.annotations.UiModeStatus
+import org.rundeck.util.container.SeleniumBase
+import org.rundeck.util.gui.UiModes
+import spock.lang.Stepwise
+
+@SeleniumCoreTest
+@ExcludePro
+@Stepwise
+@UiModeFlag(
+    featureName = "basic-jobs",
+    status      = UiModeStatus.PROMOTED,
+    description = "@Stepwise spec; class-level captures the dominant legacyUi sweep (PROMOTED). Methods that exercise nextUi-only or 4-arg legacy/next swaps are annotated individually with NEXT_UI status."
+)
+class BasicJobsSpec extends SeleniumBase {
+
+    static final UI_MODES = UiModes.defaultAndLegacy()
+
+    def setupSpec() {
+        setupProjectArchiveDirectoryResource(SELENIUM_BASIC_PROJECT, "/projects-import/${SELENIUM_BASIC_PROJECT}")
+    }
+
+    def setup() {
+        def loginPage = go LoginPage
+        loginPage.login(TEST_USER, TEST_PASS)
+    }
+
+    def "create job has basic fields"() {
+        when:
+            def jobCreatePage = go JobCreatePage, SELENIUM_BASIC_PROJECT
+        then:
+            jobCreatePage.validatePage()
+            jobCreatePage.jobNameInput
+            jobCreatePage.groupPathInput
+            jobCreatePage.descriptionTextarea
+    }
+
+    def "create job invalid empty name"() {
+        when:
+            def jobCreatePage = go JobCreatePage, SELENIUM_BASIC_PROJECT
+        then:
+            jobCreatePage.validatePage()
+            jobCreatePage.jobNameInput.clear()
+            jobCreatePage.createJobButton.click()
+            jobCreatePage.errorAlert.getText().contains('Error saving Job')
+            def validationMsg = jobCreatePage.formValidationAlert.getText()
+            validationMsg.contains('"Job Name" parameter cannot be blank')
+            validationMsg.contains('Workflow must have at least one step')
+    }
+
+    def "create job invalid empty workflow"() {
+        when:
+            def jobCreatePage = go JobCreatePage, SELENIUM_BASIC_PROJECT
+        then:
+            jobCreatePage.validatePage()
+            jobCreatePage.jobNameInput.sendKeys('a job with empty workflow')
+            jobCreatePage.createJobButton.click()
+        expect:
+            jobCreatePage.errorAlert.getText().contains('Error saving Job')
+            def validationMsg = jobCreatePage.formValidationAlert.getText()
+            !validationMsg.contains('"Job Name" parameter cannot be blank')
+            validationMsg.contains('Workflow must have at least one step')
+    }
+
+    def "create valid job basic workflow"() {
+        when:
+            def jobCreatePage = go JobCreatePage, SELENIUM_BASIC_PROJECT
+            def jobShowPage = page JobShowPage
+        then:
+            jobCreatePage.fillBasicJob 'a valid job with basic workflow'
+            jobCreatePage.createJobButton.click()
+        expect:
+            jobShowPage.validatePage()
+            jobShowPage.jobLinkTitleLabel.getText() == 'a valid job with basic workflow'
+    }
+
+    def "create valid job basic options"() {
+        when:
+            def jobCreatePage = go(JobCreatePage, SELENIUM_BASIC_PROJECT, [legacyUi: legacyUi])
+            def jobShowPage = page JobShowPage
+            def optionName = 'seleniumOption1'
+        then:
+            jobCreatePage.fillBasicJob specificationContext.currentIteration.name+" ${legacyUi ? "legacy ui" : "vue ui"}"
+            jobCreatePage.optionButton.click()
+            jobCreatePage.optionNameNew() sendKeys optionName
+            jobCreatePage.executeScript "arguments[0].scrollIntoView(true);", jobCreatePage.saveOptionButton
+            jobCreatePage.saveOptionButton.click()
+            jobCreatePage.waitFotOptLi 0
+            jobCreatePage.createJobButton.click()
+        then:
+            jobCreatePage.waitForUrlToContain('/job/show')
+            jobShowPage.jobLinkTitleLabel.getText().contains('create valid job basic options')
+            jobShowPage.optionInputText(optionName) != null
+        where:
+            [legacyUi] << UI_MODES
+    }
+
+    @UiModeFlag(featureName = "edit-job-description-nextui", status = UiModeStatus.NEXT_UI)
+    def "edit job set description"() {
+        when:
+            def jobCreatePage = go(JobCreatePage, SELENIUM_BASIC_PROJECT, [nextUi: nextUi])
+            def jobShowPage = page JobShowPage
+            jobShowPage.nextUi = nextUi
+        then:
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de", nextUi ? UiMode.NEXT_UI : UiMode.DEFAULT
+            jobCreatePage.go()
+            jobCreatePage.descriptionTextarea.sendKeys 'a new job description'
+            jobCreatePage.updateJobButton.click()
+            jobCreatePage.waitForUrlToContain('/job/show')
+            jobShowPage.waitForElementVisible(jobShowPage.descriptionTextLabel)
+        expect:
+            jobShowPage.descriptionTextLabel.getText().trim().replaceAll(/\s+/, ' ').contains('a new job description')
+        where:
+            // Details tab edit GSP supports both Vue (nextUi=true) and KO (default)
+            // branches, but `JobShowPage.getDescriptionTextLabel()` keys off `nextUi`
+            // and the JOB SHOW page no longer honors that URL flag (renders Vue
+            // unconditionally), so the legacy branch times out. Restoring full
+            // [false,true] coverage requires teaching JobShowPage to branch on
+            // `legacyUi` (mirroring the JobCreatePage post-promotion fix).
+            nextUi<<[true]
+    }
+
+    @UiModeFlag(featureName = "edit-job-groups-nextui", status = UiModeStatus.NEXT_UI)
+    def "edit job set groups"() {
+        when:
+            def jobCreatePage = go(JobCreatePage, SELENIUM_BASIC_PROJECT, [nextUi: nextUi])
+        then:
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de", nextUi ? UiMode.NEXT_UI : UiMode.DEFAULT
+            jobCreatePage.go()
+            jobCreatePage.jobGroupField.clear()
+            jobCreatePage.jobGroupField.sendKeys 'testGroup'
+        where:
+            nextUi<<[false,true]
+    }
+
+    @UiModeFlag(featureName = "edit-job-group-modal-nextui", status = UiModeStatus.NEXT_UI)
+    def "edit job set group via modal"() {
+        when:
+            def jobCreatePage = go(JobCreatePage, SELENIUM_BASIC_PROJECT, [nextUi: nextUi])
+        then:
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de", nextUi ? UiMode.NEXT_UI : UiMode.DEFAULT
+            jobCreatePage.go()
+            jobCreatePage.groupChooseButton.click()
+            jobCreatePage.waitForElementToBeClickable jobCreatePage.groupNameOption
+            jobCreatePage.groupNameOption.click()
+        expect:
+            'test' == jobCreatePage.jobGroupField.getAttribute("value")
+        where:
+            nextUi<<[false, true]
+    }
+
+    def "edit job and set schedules tab"() {
+        when:
+            def jobCreatePage = page JobCreatePage, SELENIUM_BASIC_PROJECT
+        then:
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de"
+            jobCreatePage.go()
+            jobCreatePage.tab JobTab.SCHEDULE click()
+            jobCreatePage.scheduleRunYesField.click()
+            if (!jobCreatePage.scheduleEveryDayCheckboxField.isSelected()) {
+                jobCreatePage.scheduleEveryDayCheckboxField.click()
+            }
+            jobCreatePage.scheduleDaysCheckboxDivField.isDisplayed()
+            jobCreatePage.updateJobButton.click()
+            // Wait for page transition after clicking update button
+            jobCreatePage.waitForUrlToContain('/job/show')
+    }
+
+    @UiModeFlag(
+        featureName = "edit-job-executions-tab-nextui",
+        status      = UiModeStatus.NEXT_UI,
+        description = "4-arg loadEditPath sweep alternates next-ui vs legacy paths (no plain default)"
+    )
+    def "edit job and set executions tab"() {
+        when:
+            def jobCreatePage = page JobCreatePage, SELENIUM_BASIC_PROJECT
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de", nextUi ? UiMode.NEXT_UI : UiMode.LEGACY
+            jobCreatePage.go()
+            jobCreatePage.tab JobTab.EXECUTION_PLUGINS click()
+            if(jobCreatePage.executionPluginsRows.size() > 1){
+                jobCreatePage.executeScript "arguments[0].scrollIntoView(true);", jobCreatePage.killHandlerPluginPreviousRow
+            }
+            def killHandlerCheckbox = jobCreatePage.killHandlerPluginCheckbox
+            jobCreatePage.executeScript "arguments[0].scrollIntoView(true);", killHandlerCheckbox
+            if (killHandlerCheckbox.isSelected()) {
+                jobCreatePage.executeScript "arguments[0].click();", killHandlerCheckbox
+                jobCreatePage.executeScript "arguments[0].click();", jobCreatePage.killHandlerPluginKillSpawnedCheckbox
+            } else {
+                jobCreatePage.executeScript "arguments[0].click();", killHandlerCheckbox
+                jobCreatePage.killHandlerPluginCheckbox.isSelected()
+                jobCreatePage.executeScript "arguments[0].click();", jobCreatePage.killHandlerPluginKillSpawnedCheckbox
+                jobCreatePage.killHandlerPluginKillSpawnedCheckbox.isSelected()
+            }
+            jobCreatePage.executeScript "arguments[0].scrollIntoView(true);", jobCreatePage.updateJobButton
+            jobCreatePage.updateJobButton.click()
+            // Wait for page transition after clicking update button
+            jobCreatePage.waitForUrlToContain('/job/show')
+        then:
+            noExceptionThrown()
+        where:
+            nextUi<<[false,true]
+    }
+
+    def "edit job and set other tab"() {
+        when:
+            def jobCreatePage = page JobCreatePage, SELENIUM_BASIC_PROJECT
+        then:
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de"
+            jobCreatePage.go()
+            jobCreatePage.tab JobTab.OTHER click()
+            if (jobCreatePage.multiExecFalseField.isSelected()) {
+                jobCreatePage.multiExecTrueField.click()
+                jobCreatePage.multiExecTrueField.isSelected()
+            } else {
+                jobCreatePage.multiExecFalseField.click()
+                jobCreatePage.multiExecFalseField.isSelected()
+            }
+            jobCreatePage.executeScript "arguments[0].scrollIntoView(true);", jobCreatePage.updateJobButton
+            jobCreatePage.updateJobButton.click()
+            // Wait for page transition after clicking update button
+            jobCreatePage.waitForUrlToContain('/job/show')
+    }
+
+    def "edit job and set notifications"() {
+        when:
+            def jobCreatePage = page JobCreatePage, SELENIUM_BASIC_PROJECT
+        then:
+            jobCreatePage.loadEditPath SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de"
+            jobCreatePage.go()
+            jobCreatePage.tab JobTab.NOTIFICATIONS click()
+            jobCreatePage.addNotificationButtonByType NotificationEvent.START click()
+            jobCreatePage.notificationDropDown.click()
+            jobCreatePage.notificationByType NotificationType.MAIL click()
+            jobCreatePage.notificationConfigByPropName "recipients" sendKeys 'test@rundeck.com'
+            jobCreatePage.notificationSaveButton.click()
+            jobCreatePage.waitNotificationModal 0
+            jobCreatePage.updateJobButton.click()
+            // Wait for page transition after clicking update button
+            jobCreatePage.waitForUrlToContain('/job/show')
+    }
+
+    def "showing the edited job"() {
+        setup:
+            def homePage = page HomePage
+            def jobListPage = page JobListPage
+            def jobShowPage = page JobShowPage
+        when:
+            homePage.goProjectHome"SeleniumBasic"
+            jobListPage.loadPathToShowJob SELENIUM_BASIC_PROJECT, "b7b68386-3a52-46dc-a28b-1a4bf6ed87de"
+        then:
+            jobListPage.go()
+            jobShowPage.jobDefinitionModal.click()
+            // Wait for modal to be visible
+            jobShowPage.waitForElementVisible(jobShowPage.jobDefinitionModalContentBy)
+            // Wait for detail table (guaranteed to exist when modal content loads)
+            jobShowPage.waitForElementVisible(jobShowPage.detailTableBy)
+            // Wait for elements guaranteed to exist from previous tests
+            jobShowPage.waitForElementVisible(jobShowPage.multipleExecBy)
+            jobShowPage.waitForElementVisible(jobShowPage.notificationDefinitionBy)
+            // Wait for schedule-specific elements (only if schedule was set)
+            jobShowPage.waitForNumberOfElementsToBe(jobShowPage.cronBy, 2)
+            jobShowPage.waitForElementVisible(jobShowPage.scheduleTimeBy)
+        expect:
+            jobShowPage.cronLabel.size() == 2
+            jobShowPage.scheduleTimeLabel.isDisplayed()
+            jobShowPage.multipleExecField.isDisplayed()
+            jobShowPage.multipleExecYesField.getText() == 'Yes'
+            jobShowPage.notificationDefinition.getText() == 'mail to: test@rundeck.com'
+            jobShowPage.closeJobDefinitionModalButton.click()
+    }
+
+    @ExcludePro
+    def "run job modal should show validation error"() {
+        when:
+            def jobShowPage = go JobShowPage, SELENIUM_BASIC_PROJECT
+        then:
+            jobShowPage.validatePage()
+            jobShowPage.runJobLink '0088e04a-0db3-4b03-adda-02e8a4baf709' click()
+            jobShowPage.waitForElementToBeClickable jobShowPage.runFormButton
+            jobShowPage.runFormButton.click()
+            jobShowPage.waitForElementVisible jobShowPage.optionValidationWarningText
+        expect:
+            jobShowPage.optionValidationWarningText.getText().contains 'Option \'reqOpt1\' is required'
+    }
+
+    def "run job modal should show node filter editable input"(){
+        when:
+            def jobShowPage = go JobShowPage, SELENIUM_BASIC_PROJECT
+        then:
+            jobShowPage.validatePage()
+            jobShowPage.runJobLink '7a0d71b2-e096-4fbd-9efb-21bcbe826c0e' click()
+            // Jobs list: execute loads in #execDiv (URL may stay /jobs). Job show: form in #runjob.
+            jobShowPage.waitForRunJobExecFormReady()
+            jobShowPage.waitForNodeFilterReplaceCheckboxClickable()
+            jobShowPage.clickNodeFilterReplaceCheckbox()
+            jobShowPage.waitAndClickNodeFilterOverride()
+        expect:
+            jobShowPage.schedJobNodeFilter.isDisplayed()
+            jobShowPage.nodeFilterInputValue.getDomProperty("value").trim() == 'name: RunnerBBB'
+    }
+
+    def "job filter by name results"() {
+        when:
+            def jobShowPage = go JobShowPage, SELENIUM_BASIC_PROJECT
+        then:
+            jobShowPage.validatePage()
+            jobShowPage.jobSearchButton.click()
+            jobShowPage.waitForModal 1, jobShowPage.modalInBy
+            jobShowPage.jobSearchNameField.sendKeys 'option'
+            jobShowPage.jobSearchSubmitButton.click()
+            jobShowPage.waitForNumberOfElementsToBe jobShowPage.jobRowBy, expected.size()
+            jobShowPage.jobRowLink.size() == expected.size()
+            jobShowPage.jobRowLink.collect {
+                it.getText()
+            }.containsAll(expected)
+        where:
+            expected = [
+                "selenium-option-test1",
+                "predefined job with options",
+                "create valid job basic options vue ui",
+                "create valid job basic options legacy ui"
+            ]
+    }
+
+    def "job filter by name and group 1 results"() {
+        when:
+            def jobShowPage = go JobShowPage, SELENIUM_BASIC_PROJECT
+        then:
+            jobShowPage.validatePage()
+            jobShowPage.jobSearchButton.click()
+            jobShowPage.waitForModal 1, jobShowPage.modalInBy
+            jobShowPage.jobSearchNameField.sendKeys 'option'
+            jobShowPage.jobSearchGroupField.sendKeys 'test'
+            jobShowPage.jobSearchSubmitButton.click()
+        expect:
+            jobShowPage.waitForNumberOfElementsToBeOne jobShowPage.jobRowBy
+            jobShowPage.jobRowLink.collect { it.getText() } == ["selenium-option-test1"]
+    }
+
+    def "job filter by name and - top group 3 results"() {
+        given:
+            def jobShowPage = go JobShowPage, SELENIUM_BASIC_PROJECT
+        when:
+            jobShowPage.validatePage()
+            jobShowPage.jobSearchButton.click()
+            jobShowPage.waitForModal 1, jobShowPage.modalInBy
+            jobShowPage.jobSearchNameField.sendKeys 'option'
+            jobShowPage.jobSearchGroupField.sendKeys '-'
+            jobShowPage.jobSearchSubmitButton.click()
+        then:
+            jobShowPage.waitForNumberOfElementsToBe jobShowPage.jobRowBy, expected.size()
+            def names = jobShowPage.jobRowLink.collect { it.getText() }
+            names.size() == expected.size()
+            names.containsAll expected
+        where:
+            expected = [
+                "predefined job with options",
+                "create valid job basic options vue ui",
+                "create valid job basic options legacy ui"
+            ]
+    }
+
+    def "view jobs list page"() {
+        when:
+            HomePage homePage = page HomePage
+            homePage.validatePage()
+        then:
+            JobListPage jobsListPage = page JobListPage
+            jobsListPage.loadPathToNextUI SELENIUM_BASIC_PROJECT
+            jobsListPage.go()
+
+            verifyAll {
+                driver.currentUrl.contains('nextUi=true')
+                driver.pageSource.contains('ui-type-next')
+            }
+
+            jobsListPage.bodyNextUI.isDisplayed()
+
+            jobsListPage.createJobLink.isDisplayed()
+
+            def actionsButton = jobsListPage.jobsActionsButton
+            actionsButton.isDisplayed()
+            actionsButton.getText().contains('Job Actions')
+            jobsListPage.jobsHeader.isDisplayed()
+            jobsListPage.activitySectionLink.isDisplayed()
+            jobsListPage.activityHeader.isDisplayed()
+        when:
+            actionsButton.click()
+        then:
+            jobsListPage.getLink('Upload Definition').isDisplayed()
+            jobsListPage.getLink('Bulk Edit').isDisplayed()
+    }
+}

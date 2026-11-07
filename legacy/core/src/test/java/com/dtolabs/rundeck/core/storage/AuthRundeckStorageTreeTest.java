@@ -1,0 +1,441 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.core.storage;
+
+import com.dtolabs.rundeck.core.authorization.*;
+import com.dtolabs.rundeck.core.common.Framework;
+import org.junit.Assert;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
+import org.rundeck.storage.api.PathUtil;
+import org.rundeck.storage.api.Resource;
+import org.rundeck.storage.api.StorageException;
+import org.rundeck.storage.data.MemoryTree;
+
+import javax.security.auth.Subject;
+import java.io.ByteArrayInputStream;
+import java.util.*;
+
+/**
+ * AuthRundeckStorageTreeTest is ...
+ *
+ * @author greg
+ * @since 2014-03-20
+ */
+@RunWith(JUnit4.class)
+public class AuthRundeckStorageTreeTest {
+
+
+    class testAuth implements AuthContext {
+        Iterator<Decision> evaluateSingle;
+        Set<Decision> evaluateMulti;
+        Decision decision;
+        Map<String, String> resource;
+        String action;
+        Set<Attribute> environment;
+
+        Set<Map<String, String>> resources;
+        Set<String> actions;
+        Set<Attribute> environments;
+
+        @Override
+        public AuthContext combineWith(final Authorization authorization) {
+            return null;
+        }
+
+        @Override
+        public Decision evaluate(Map<String, String> resource, String action, Set<Attribute> environment) {
+            this.resource = resource;
+            this.action = action;
+            this.environment = environment;
+            decision = (evaluateSingle.hasNext()) ? evaluateSingle.next() : decision;
+            return decision;
+        }
+
+        @Override
+        public Set<Decision> evaluate(Set<Map<String, String>> resources, Set<String> actions, Set<Attribute>
+                environment) {
+            this.resources = resources;
+            this.actions = actions;
+            this.environments = environment;
+            return evaluateMulti;
+        }
+    }
+
+    class mydecision implements Decision {
+        boolean authorized;
+        Map<String, String> resource;
+        String action;
+        Set<Attribute> environment;
+        Subject subject;
+        Explanation explanation;
+
+        mydecision(boolean authorized) {
+            this.authorized = authorized;
+        }
+
+        @Override
+        public boolean isAuthorized() {
+            return authorized;
+        }
+
+        @Override
+        public Explanation explain() {
+            return explanation;
+        }
+
+        @Override
+        public long evaluationDuration() {
+            return 0;
+        }
+
+        @Override
+        public Map<String, String> getResource() {
+            return resource;
+        }
+
+        @Override
+        public String getAction() {
+            return action;
+        }
+
+        @Override
+        public Set<Attribute> getEnvironment() {
+            return environment;
+        }
+
+        @Override
+        public Subject getSubject() {
+            return subject;
+        }
+    }
+
+    @Test
+    public void testGetPathNoRead_app() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(false);
+        try {
+            Resource<ResourceMeta> test1 = authRundeckStorageTree.getPath(testAuth, PathUtil.asPath("test1"));
+            Assert.fail("expected failure");
+        } catch (StorageException e) {
+
+        }
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertTrue(testAuth.environment.containsAll(AuthorizationUtil.RUNDECK_APP_ENV));
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("test1", testAuth.resource.get("path"));
+        Assert.assertEquals("test1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testGetPathNoRead_project() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(false);
+        try {
+            Resource<ResourceMeta> test1 = authRundeckStorageTree.getPath(testAuth,
+                    PathUtil.asPath("keys/project/milkdud/test1"));
+            Assert.fail("expected failure");
+        } catch (StorageException e) {
+
+        }
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1", testAuth.resource.get("path"));
+        Assert.assertEquals("test1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testGetPathReadDir() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>()
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true);
+
+        Resource<ResourceMeta> test1 = authRundeckStorageTree.getPath(testAuth,
+                PathUtil.asPath("keys/project/milkdud/test1"));
+        Assert.assertNotNull(test1);
+        Assert.assertTrue(test1.isDirectory());
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1", testAuth.resource.get("path"));
+        Assert.assertEquals("test1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testHasPathReadDir() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>()
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true);
+
+        boolean test1 = authRundeckStorageTree.hasPath(testAuth,
+                PathUtil.asPath("keys/project/milkdud/test1"));
+        Assert.assertTrue(test1);
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1", testAuth.resource.get("path"));
+        Assert.assertEquals("test1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testHasResourceReadDir() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>()
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true);
+
+        boolean test1 = authRundeckStorageTree.hasResource(testAuth,
+                PathUtil.asPath("keys/project/milkdud/test1"));
+        Assert.assertFalse(test1);
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1", testAuth.resource.get("path"));
+        Assert.assertEquals("test1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testHasDirectoryReadDir() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>()
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true);
+
+        boolean test1 = authRundeckStorageTree.hasDirectory(testAuth,
+                PathUtil.asPath("keys/project/milkdud/test1"));
+        Assert.assertTrue(test1);
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1", testAuth.resource.get("path"));
+        Assert.assertEquals("test1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testGetPathReadContent_unauthorized() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>() {{
+                            put("test1", "value1");
+                        }}
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(false);
+
+        Resource<ResourceMeta> test1 = null;
+        try {
+            test1 = authRundeckStorageTree.getPath(testAuth, PathUtil.asPath("keys/project/milkdud/test1/file1"));
+            Assert.fail("expected failure");
+        } catch (StorageException e) {
+
+        }
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1/file1", testAuth.resource.get("path"));
+        Assert.assertEquals("file1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testGetPathReadContent_authorized() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>() {{
+                            put("test1", "value1");
+                        }}
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true, true);
+
+        Resource<ResourceMeta> test1 = null;
+        test1 = authRundeckStorageTree.getPath(testAuth, PathUtil.asPath("keys/project/milkdud/test1/file1"));
+
+        Assert.assertNotNull(test1);
+        Assert.assertFalse(test1.isDirectory());
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1/file1", testAuth.resource.get("path"));
+        Assert.assertEquals("file1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testHasPathReadContent_authorized() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>() {{
+                            put("test1", "value1");
+                        }}
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true, true);
+
+        boolean test1 = authRundeckStorageTree.hasPath(testAuth, PathUtil.asPath("keys/project/milkdud/test1/file1"));
+
+        Assert.assertTrue(test1);
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1/file1", testAuth.resource.get("path"));
+        Assert.assertEquals("file1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testHasResourceReadContent_authorized() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>() {{
+                            put("test1", "value1");
+                        }}
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true, true);
+
+        boolean test1 = authRundeckStorageTree.hasResource(testAuth, PathUtil.asPath("keys/project/milkdud/test1/file1"));
+
+        Assert.assertTrue(test1);
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1/file1", testAuth.resource.get("path"));
+        Assert.assertEquals("file1", testAuth.resource.get("name"));
+    }
+    @Test
+    public void testHasDirectoryReadContent_authorized() {
+        StorageTree testTree = StorageUtil.asStorageTree(new MemoryTree<ResourceMeta>());
+        Resource<ResourceMeta> resource = testTree.createResource(PathUtil.asPath("keys/project/milkdud/test1/file1"),
+                StorageUtil.withStream(
+                        new ByteArrayInputStream("asdf".getBytes()),
+                        new HashMap<String, String>() {{
+                            put("test1", "value1");
+                        }}
+                ));
+
+        AuthRundeckStorageTree authRundeckStorageTree = new AuthRundeckStorageTree(testTree);
+        testAuth testAuth = new AuthRundeckStorageTreeTest.testAuth();
+        testAuth.evaluateSingle = decisions(true, true);
+
+        boolean test1 = authRundeckStorageTree.hasDirectory(testAuth, PathUtil.asPath("keys/project/milkdud/test1/file1"));
+
+        Assert.assertFalse(test1);
+
+        Assert.assertEquals("read", testAuth.action);
+        Assert.assertNotNull(testAuth.environment);
+        Assert.assertEquals(1, testAuth.environment.size());
+        Assert.assertEquals(AuthorizationUtil.projectContext("milkdud"), testAuth.environment);
+        Assert.assertNotNull(testAuth.resource);
+        Assert.assertEquals(3, testAuth.resource.size());
+        Assert.assertEquals(AuthRundeckStorageTree.STORAGE_PATH_AUTH_RES_TYPE, testAuth.resource.get("type"));
+        Assert.assertEquals("keys/project/milkdud/test1/file1", testAuth.resource.get("path"));
+        Assert.assertEquals("file1", testAuth.resource.get("name"));
+    }
+
+    private Iterator<Decision> decisions(boolean... decisions) {
+        ArrayList<Decision> d1 = new ArrayList<Decision>();
+        for (boolean decision : decisions) {
+            d1.add(new mydecision(decision));
+        }
+        return d1.iterator();
+    }
+}

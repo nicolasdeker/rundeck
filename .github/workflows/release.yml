@@ -1,0 +1,170 @@
+# release.yml — release artifacts (MISSION §3.10 packaging, §4 Security "SBOMs per release, provenance attestations",
+# §6 Phase 6 exit "v0.1.0 release workflow produces binaries, images, deb/rpm, SBOM, signatures").
+# Trigger: a tag v* (created through the REST API at a phase gate, MISSION §7 step 6 — git tag pushes are refused by the
+# cloud proxy) or a manual dispatch. Cannot be exercised before Phase 1 produces the `rdx` binary; kept syntactically
+# valid and reviewed by actionlint. The UI is built first and placed at ui/dist, where the rdx crate embeds it at compile
+# time (ADR on embedding — the path contract is ui/dist).
+# Phase 6 TODOs (MISSION §3.10, not wired yet):
+#   TODO(phase-6): deb/rpm packages (cargo-deb / cargo-generate-rpm) with the systemd unit and /etc/rundeck defaults.
+#   TODO(phase-6): container image (distroless, multi-arch manifest) pushed to GHCR with cosign signature + SLSA provenance.
+#   TODO(phase-6): Helm chart under deploy/helm, published as an OCI artifact.
+#   TODO(phase-6): `rdx migrate` smoke test against a legacy 6.3.0 Postgres dump before the release is un-drafted (§9).
+# Action pinning: full version tags; SHAs cannot be resolved from this scoped session (see ci.yml).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build a draft release for (e.g. v0.1.0)'
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # gh release create / upload
+  id-token: write   # cosign keyless (Sigstore OIDC)
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: never
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  ui:
+    name: build ui
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: make ui-install
+      - run: make ui-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: build rdx (${{ matrix.target }})
+    needs: ui
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - name: Read rust-toolchain.toml
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          [ -n "$channel" ] || { echo "rust-toolchain.toml has no channel"; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install cargo-cyclonedx (SBOM)
+        run: cargo binstall --no-confirm --locked cargo-cyclonedx
+      - name: Build the release binary
+        run: cargo build --release --locked -p rdx --bin rdx --target "${{ matrix.target }}"
+      - name: SBOM (CycloneDX)
+        run: |
+          # cargo-cyclonedx writes <override-filename>.cdx.json next to each Cargo.toml it describes.
+          cargo cyclonedx --format json --target "${{ matrix.target }}" --override-filename "rdx-${RELEASE_TAG}-${{ matrix.target }}.sbom"
+          sbom=$(find crates/rdx . -maxdepth 2 -name "rdx-${RELEASE_TAG}-${{ matrix.target }}.sbom*.json" -not -path './target/*' | head -1)
+          [ -n "$sbom" ] || { echo "cargo cyclonedx produced no SBOM file"; find . -name '*.cdx.json' -not -path './target/*'; exit 1; }
+          mv "$sbom" dist-sbom.json
+          test -s dist-sbom.json
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="rdx-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/rdx" "dist/$name/rdx"
+          cp LICENSE "dist/$name/" 2>/dev/null || true
+          cp README.md "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          mv dist-sbom.json "dist/$name.sbom.cdx.json"
+          rm -rf "dist/$name"
+          (cd dist && sha256sum ./*.tar.gz ./*.sbom.cdx.json > "SHA256SUMS-${{ matrix.target }}")
+          ls -l dist
+          # MISSION §4: binary < 60 MB including the UI — measured, not asserted here (docs/BENCHMARKS.md, run.sh binary-size)
+          stat -c 'binary size: %s bytes' "target/${{ matrix.target }}/release/rdx"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdx-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: sign and draft the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rdx-*
+          path: dist
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Checksums and keyless signatures
+        run: |
+          set -euo pipefail
+          cd dist
+          cat SHA256SUMS-* > SHA256SUMS && rm -f SHA256SUMS-*
+          sha256sum -c SHA256SUMS
+          for f in ./*.tar.gz ./*.sbom.cdx.json SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+          ls -l
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" dist/* --draft --generate-notes --title "rdx $RELEASE_TAG" \
+              --notes "Draft built by release.yml from $GITHUB_SHA. Verify: cosign verify-blob --bundle <file>.sigstore.json --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/' --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>" \
+              --repo "$GITHUB_REPOSITORY"
+          fi

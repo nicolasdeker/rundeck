@@ -1,0 +1,239 @@
+# parity.yml — the oracle suite (MISSION §7 "Heavy verification", §6 Phase 0 "Prove the oracle").
+#
+# Runs legacy/functional-test (upstream Spock + testcontainers, JDK 17, Gradle 8.14.5) through scripts/parity.sh:
+#   - baseline: --target legacy on rundeck/rundeck:6.3.0 — the pass list PARITY.md is gated against. Failures here are
+#     facts about the upstream image, recorded in the report, never a red job (parity.sh exits 0 for legacy; a leg goes
+#     red only when no test result is produced at all = infrastructure failure).
+#   - rdx: --target rdx — the Rust server. Gated on the repository variable PARITY_RDX_ENABLED == 'true' so that it
+#     shows as *skipped* (not green) until Phase 1 provides the server. Phase 1 flips it through REST:
+#       gh api -X POST repos/nicolasdeker/rundeck/actions/variables -f name=PARITY_RDX_ENABLED -f value=true
+#       (later: gh api -X PATCH repos/nicolasdeker/rundeck/actions/variables/PARITY_RDX_ENABLED -f value=true)
+#     and sets PARITY_RDX_URL the same way once the job starts a server (scripts/parity.sh --help, "rdx target").
+# When it runs (decided by the `plan` job, no checkout needed):
+#   - workflow_dispatch: the chosen target (+ optional filter).
+#   - schedule (Sunday 01:00 UTC): the legacy baseline.
+#   - push to main (MISSION §7: "runs the full oracle suite on every push to main"): the rdx suite when
+#     PARITY_RDX_ENABLED is true; the legacy baseline only when the push touched the oracle/parity files
+#     (scripts/parity.sh, scripts/parity-report.py, scripts/oracle.sh, scripts/oracle/**, scripts/gradle-init.d/**,
+#     tests/parity-skips.toml, legacy/functional-test/**, this file) — compared through the REST compare API so a
+#     push that changes neither costs one 10-second job and every leg shows as skipped.
+# Matrix: one leg per API spec package so a 60-minute runner budget holds; every leg starts its own compose fixture
+# (mysql 8.4, gitea, ssh-node, nginx) through testcontainers, exactly like upstream CI. Excluded packages (own compose
+# files and Gradle tasks, Phase 4 items): jdbc (task jdbcTest, docker/jdbc/docker-compose.yml), ldap (task ldapTest,
+# docker/ldap/docker-compose.yml). apiTestNodeExecutorSecureInput is a Phase 3 item (separate task + feature flag).
+# The `report` job merges the legs into one parity-report.json uploaded as the artifact `parity-report`
+# (`gh run download -n parity-report`, MISSION §7 session ritual step 2) and writes the Markdown summary to the run.
+# Action pinning: full version tags; SHAs cannot be resolved from this scoped session (see ci.yml).
+name: parity
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Server under test'
+        type: choice
+        options: [legacy, rdx]
+        default: legacy
+      filter:
+        description: 'Only this API package / spec class (empty = full matrix)'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 1 * * 0'   # weekly legacy baseline, Sunday 01:00 UTC
+  push:
+    branches: [main]
+
+concurrency:
+  group: parity-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The API spec packages of legacy/functional-test/src/test/groovy/org/rundeck/tests/functional/api/ minus jdbc, ldap.
+  PARITY_PACKAGES: >-
+    ["acl","authorizations","basic","execution","executor","export_import","filecopy","job","nodes","plugin",
+     "project","resourceModel","schedule","scm","storage","system","workflow","workflowSteps"]
+  # Paths whose change re-runs the legacy baseline on push (regular expression, anchored at the start).
+  BASELINE_PATHS: '^(scripts/parity\.sh|scripts/parity-report\.py|scripts/oracle\.sh|scripts/oracle/|scripts/gradle-init\.d/|tests/parity-skips\.toml|legacy/functional-test/|\.github/workflows/parity\.yml)'
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      legacy: ${{ steps.plan.outputs.legacy }}
+      rdx: ${{ steps.plan.outputs.rdx }}
+      packages: ${{ steps.plan.outputs.packages }}
+      primary: ${{ steps.plan.outputs.primary }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_FILTER: ${{ inputs.filter }}
+          INPUT_TARGET: ${{ inputs.target }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          RDX_ENABLED: ${{ vars.PARITY_RDX_ENABLED }}
+        run: |
+          legacy=false; rdx=false
+          case "$EVENT" in
+            workflow_dispatch)
+              if [ "${INPUT_TARGET:-legacy}" = "rdx" ]; then rdx=true; else legacy=true; fi ;;
+            schedule)
+              legacy=true ;;
+            push)
+              if [ "$RDX_ENABLED" = "true" ]; then rdx=true; fi
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                echo "no base commit for the compare (first push or force-push): running the baseline"
+                legacy=true
+              else
+                files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$AFTER" --paginate --jq '.files[].filename' || echo "compare-failed")
+                if [ "$files" = "compare-failed" ]; then echo "compare API failed: running the baseline"; legacy=true
+                elif printf '%s\n' "$files" | grep -Eq "$BASELINE_PATHS"; then echo "oracle/parity files changed: running the baseline"; legacy=true
+                else echo "no oracle/parity file changed: baseline skipped"; fi
+              fi ;;
+          esac
+          if [ -n "$INPUT_FILTER" ]; then packages=$(jq -cn --arg f "$INPUT_FILTER" '[$f]'); else packages=$(jq -cn --argjson p "$PARITY_PACKAGES" '$p'); fi
+          primary=none
+          if [ "$rdx" = true ]; then primary=rdx; elif [ "$legacy" = true ]; then primary=legacy; fi
+          { echo "legacy=$legacy"; echo "rdx=$rdx"; echo "packages=$packages"; echo "primary=$primary"; } >> "$GITHUB_OUTPUT"
+          echo "legacy=$legacy rdx=$rdx primary=$primary packages=$packages"
+          if [ "$primary" = none ]; then echo "nothing to run for this event (rdx disabled, no oracle file changed)"; fi
+
+  baseline:
+    name: legacy ${{ matrix.package }}
+    needs: plan
+    if: needs.plan.outputs.legacy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+          cache-dependency-path: |
+            legacy/gradle/wrapper/gradle-wrapper.properties
+            legacy/gradle.properties
+            legacy/functional-test/build.gradle
+      - name: Pull the oracle image once (no 429 retries inside the test JVM)
+        run: docker pull rundeck/rundeck:6.3.0
+      - name: Run the upstream suite against the legacy image
+        env:
+          PARITY_GRADLE_MIRROR: "0"
+        run: scripts/parity.sh --target legacy --filter "${{ matrix.package }}" --out "parity-${{ matrix.package }}.json"
+      - name: Upload leg report and JUnit XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-legacy-${{ matrix.package }}
+          path: |
+            parity-${{ matrix.package }}.json
+            parity-${{ matrix.package }}.md
+            legacy/functional-test/build/test-results/apiTest/*.xml
+          if-no-files-found: error
+          retention-days: 30
+
+  rdx:
+    name: rdx ${{ matrix.package }}
+    needs: plan
+    # Skipped (grey, not green) until Phase 1 creates the repository variable; see the header comment.
+    if: needs.plan.outputs.rdx == 'true' && vars.PARITY_RDX_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+          cache-dependency-path: |
+            legacy/gradle/wrapper/gradle-wrapper.properties
+            legacy/gradle.properties
+            legacy/functional-test/build.gradle
+      # Phase 1: build or download the rdx binary/image here and export RDX_URL (scripts/parity.sh --help, "rdx target").
+      - name: Run the upstream suite against rdx
+        env:
+          PARITY_GRADLE_MIRROR: "0"
+          RDX_URL: ${{ vars.PARITY_RDX_URL }}
+        run: scripts/parity.sh --target rdx --filter "${{ matrix.package }}" --out "parity-${{ matrix.package }}.json"
+      - name: Upload leg report and JUnit XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-rdx-${{ matrix.package }}
+          path: |
+            parity-${{ matrix.package }}.json
+            parity-${{ matrix.package }}.md
+            legacy/functional-test/build/test-results/apiTest/*.xml
+          if-no-files-found: error
+          retention-days: 30
+
+  report:
+    name: merge parity-report
+    needs: [plan, baseline, rdx]
+    # Runs after the legs even when some failed; fails loudly when a planned target produced no report (nothing is faked).
+    if: ${{ !cancelled() && needs.plan.outputs.primary != 'none' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        # No matching artifact (legs failed before producing results) is handled by the next step.
+        continue-on-error: true
+        with:
+          pattern: parity-*
+          path: legs
+      - name: Merge the legs per target
+        env:
+          RUN_LEGACY: ${{ needs.plan.outputs.legacy }}
+          RUN_RDX: ${{ needs.plan.outputs.rdx }}
+          PRIMARY: ${{ needs.plan.outputs.primary }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p out
+          status=0
+          for target in legacy rdx; do
+            run_var="RUN_$(echo "$target" | tr '[:lower:]' '[:upper:]')"
+            [ "${!run_var}" = "true" ] || continue
+            reports=(legs/parity-"$target"-*/parity-*.json)
+            if [ ${#reports[@]} -eq 0 ]; then
+              echo "::error::target $target was planned but no leg produced a report"
+              echo "## Parity report — target $target: no results (every leg failed before producing a report)" >> "$GITHUB_STEP_SUMMARY"
+              status=1
+              continue
+            fi
+            python3 -I scripts/parity-report.py --merge --out "out/parity-report-$target.json" --markdown "${reports[@]}" | tee "out/parity-report-$target.md"
+            cat "out/parity-report-$target.md" >> "$GITHUB_STEP_SUMMARY"
+          done
+          # parity-report.json = the primary target of this run (rdx when it ran, else legacy), MISSION §7 step 2.
+          if [ -f "out/parity-report-$PRIMARY.json" ]; then
+            cp "out/parity-report-$PRIMARY.json" out/parity-report.json
+            cp "out/parity-report-$PRIMARY.md" out/parity-report.md
+          fi
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-report
+          path: out/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Gate (rdx only — the legacy baseline records, it does not gate)
+        if: needs.plan.outputs.rdx == 'true'
+        run: python3 -I scripts/parity-report.py --merge --gate --markdown out/parity-report-rdx.json > /dev/null

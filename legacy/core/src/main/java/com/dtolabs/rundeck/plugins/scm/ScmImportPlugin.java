@@ -1,0 +1,250 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.plugins.scm;
+
+import com.dtolabs.rundeck.core.jobs.JobReference;
+import com.dtolabs.rundeck.core.plugins.views.Action;
+import com.dtolabs.rundeck.core.plugins.views.BasicInputView;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Plugin for importing job definitions from a Source control repository
+ */
+public interface ScmImportPlugin {
+
+    /**
+     * Perform import with the input
+     *
+     * @param context       scm operation context
+     * @param actionId      action ID
+     * @param importer      can import files as jobs
+     * @param selectedPaths selected scm paths to import
+     * @param input         result of GUI input
+     */
+    ScmExportResult scmImport(
+        ScmOperationContext context,
+        String actionId,
+        JobImporter importer,
+        List<String> selectedPaths,
+        Map<String, String> input
+    ) throws ScmPluginException;
+
+    /**
+     * Perform import with the input
+     *
+     * @param context       scm operation context
+     * @param actionId      action ID
+     * @param importer      can import files as jobs
+     * @param selectedPaths selected scm paths to import
+     * @param deletedJobs   selected Job IDS to delete
+     * @param input         result of GUI input
+     */
+    default ScmExportResult scmImport(
+        ScmOperationContext context,
+        String actionId,
+        JobImporter importer,
+        List<String> selectedPaths,
+        List<String> deletedJobs,
+        Map<String, String> input
+    ) throws ScmPluginException {
+        return scmImport(context, actionId, importer, selectedPaths, input);
+    }
+
+    /**
+     * @return overall status
+     */
+    ScmImportSynchState getStatus(ScmOperationContext context) throws ScmPluginException;
+
+    /**
+     * Return the state of the given job
+     *
+     * @param job job
+     *
+     * @return state
+     */
+    JobImportState getJobStatus(JobScmReference job);
+
+
+    /**
+     * Return the state of the given job, with optional original repo path
+     *
+     * @param job          job
+     * @param originalPath path of original job, e.g. if the file was renamed
+     *
+     * @return state
+     */
+    JobImportState getJobStatus(JobScmReference job, String originalPath);
+
+    /**
+     * Set default job status
+     *
+     * @param jobs
+     */
+    default void initJobsStatus(List<JobScmReference> jobs) {
+
+    }
+
+    /**
+     * Return the state of the given job
+     *
+     * @param event     change event
+     * @param reference job
+     *
+     * @return state
+     */
+    JobImportState jobChanged(JobChangeEvent event, JobScmReference reference);
+
+
+    /**
+     * perform any cleanup/teardown needed after disabling
+     */
+    void cleanup();
+
+    /**
+     * perform a total clean
+     */
+    default void totalClean(){}
+
+    /**
+     * Provide the input view for an action.
+     *
+     * @param actionId action ID
+     *
+     * @return input view for the specified action
+     */
+    BasicInputView getInputViewForAction(final ScmOperationContext context, String actionId);
+
+    /**
+     * Return any action that is needed for post-create setup.  If not null,
+     * then the user will be forwarded to this action after plugin is configured, this should
+     * always return the setup action even if setup has already been performed, as
+     * the user may disable/reconfigure the plugin.
+     *
+     * @param context context map
+     *
+     * @return action used for post-create setup, if necessary
+     */
+    Action getSetupAction(ScmOperationContext context);
+
+    /**
+     * @param context context map
+     *
+     * @return list of actions available for the context
+     */
+    List<Action> actionsAvailableForContext(ScmOperationContext context);
+
+    /**
+     * @param context context map
+     *
+     * @return list of actions available for the context
+     */
+    default List<Action> actionsAvailableForContext(ScmOperationContext context, ScmImportSynchState status){
+        return actionsAvailableForContext(context);
+    }
+
+    /**
+     * list any known items that can be tracked, such as: all files found in the
+     * selected source repository branch, can be an empty list (no items found
+     * to track) or null (item tracking is not used)
+     */
+    List<ScmImportTrackedItem> getTrackedItemsForAction(String actionId);
+
+    /**
+     * Return the relative path for the job in the repo
+     *
+     * @param job job
+     *
+     * @return state
+     */
+    String getRelativePathForJob(JobReference job);
+
+    /**
+     * Get diff for the given job
+     *
+     * @param job job
+     */
+    ScmImportDiffResult getFileDiff(JobScmReference job);
+
+    /**
+     * Get diff for the given job against another path, e.g. the original
+     * path before a rename
+     *
+     * @param job          job
+     * @param originalPath original path
+     */
+    ScmImportDiffResult getFileDiff(JobScmReference job, String originalPath);
+
+
+    /**
+     * Function to fix status of the jobs on cluster environment.
+     * To automatically match the job status on every node.
+     *
+     * @param jobs rundeck jobs
+     * @return map with information on the process
+     */
+    default Map clusterFixJobs(ScmOperationContext context, List<JobScmReference> jobs){
+        return clusterFixJobs(context, jobs, null);
+    }
+
+    /**
+     * Function to fix status of the jobs on cluster environment.
+     * To automatically match the job status on every node.
+     *
+     * @param jobs rundeck jobs
+     * @param originalPaths map of job ID to original path if the job has been renamed
+     * @return map with information on the process
+     */
+    default Map clusterFixJobs(ScmOperationContext context, List<JobScmReference> jobs, Map<String,String> originalPaths){
+        return null;
+    }
+
+    /**
+     * Reconcile node-local plugin state against the authoritative set of current
+     * Rundeck job IDs. Implementations should not perform remote SCM operations.
+     *
+     * <p>Callers must pass the complete, uncached job ID set for the project. IDs absent from
+     * the set are treated as deleted and their node-local state is discarded, so calling this
+     * with a subset of the project jobs evicts the state of the remainder.
+     *
+     * @param currentJobIds current Rundeck job IDs for the project
+     */
+    default void reconcileJobState(Set<String> currentJobIds) {
+    }
+
+    /**
+     * Function to refresh all job status .
+     * will upgrade the jobs cache status .
+     *
+     * @param jobs rundeck jobs
+     * @return map with information on the process
+     */
+    default void refreshJobsStatus(List<JobScmReference> jobs){
+    }
+
+    /**
+     * Returns true or false if the user has access to the key/password or not
+     *
+     * @param ctx: ScmOperationContext object from the controller.
+     * @return true or false
+     */
+    default Boolean userHasAccessToKeyOrPassword(ScmOperationContext ctx){
+      return true;
+    }
+}

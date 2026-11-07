@@ -1,0 +1,691 @@
+{
+  "schema": 1,
+  "target": "legacy",
+  "image": "rundeck/rundeck:6.3.0",
+  "commit": "0e44364ce860d3faa931790863fd4f71e8ce4175",
+  "task": "apiTest",
+  "filter": "acl,authorizations,basic,execution,executor,export_import,filecopy,job,nodes,plugin,project,resourceModel,schedule,scm,storage,system,workflow,workflowSteps",
+  "started": "2026-11-07T17:43:15Z",
+  "finished": "2026-11-07T17:51:14Z",
+  "run_url": "https://github.com/nicolasdeker/rundeck/actions/runs/42397663285",
+  "gradle_exit": 1,
+  "merged_from": 18,
+  "specs": [
+    {
+      "class": "org.rundeck.tests.functional.api.acl.SystemAclCreateSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 4.432,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.authorizations.AuthorizationsSpec",
+      "tests": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.431,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.basic.BadVersionSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 2.15,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.basic.BasicSpec",
+      "tests": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 5.115,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.basic.UnauthorizedSpec",
+      "tests": 3,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.066,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.AbortSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 11.162,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.ExecExportSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 4.057,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.ExecutionModeSpec",
+      "tests": 6,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.37,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.ExecutionOutputSpec",
+      "tests": 7,
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 29.973,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.ExecutionSpec",
+      "tests": 15,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 130.334,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.ExecutionsQueryViewAuthSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.064,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.execution.ExecutionsQueryViewHistoryAuthSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.06,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.executor.JschNodeExecutorSpec",
+      "tests": 23,
+      "passed": 23,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 51.312,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.executor.OpenSshNodeExecutorSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 3.187,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.executor.SshjNodeExecutorSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 4.213,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.export_import.JobsExportSpec",
+      "tests": 15,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 1.841,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.export_import.JobsImportSpec",
+      "tests": 15,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 2.183,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.filecopy.CopyFileSpec",
+      "tests": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 17.84,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.HistorySpec",
+      "tests": 5,
+      "passed": 0,
+      "failed": 5,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 1.712,
+      "failures": [
+        {
+          "test": "output from /api/project/NAME/history should be valid",
+          "message": "org.gradle.internal.exceptions.DefaultMultiCauseException: Multiple Failures (2 failures)\n\torg.spockframework.runtime.ConditionNotSatisfiedError: Condition not satisfied:\n\nhistory.successful\n|       |\n|       false\nResponse{protocol=http/1.1, code=404, message=Not Found, url=http://localhost:32769/api/60/project/test/history}\n\n\torg.spockframework.runtime.SpockComparisonFailure: Condition not satisfied:\n\nhistory.code() == 200\n|       |      |\n|       404    false\nResponse{protocol=http/1.1, code=",
+          "kind": "failure",
+          "excused": false
+        },
+        {
+          "test": "/api/history using bad \"end\" date format parameter",
+          "message": "org.gradle.internal.exceptions.DefaultMultiCauseException: Multiple Failures (2 failures)\n\torg.spockframework.runtime.SpockComparisonFailure: Condition not satisfied:\n\nhistory.code() == 400\n|       |      |\n|       404    false\nResponse{protocol=http/1.1, code=404, message=Not Found, url=http://localhost:32769/api/60/project/test/history?end=invalidDate}\n\n\torg.spockframework.runtime.SpockComparisonFailure: Condition not satisfied:\n\njson.message == \"The parameter \\\"end\\\" did not have a valid time",
+          "kind": "failure",
+          "excused": false
+        },
+        {
+          "test": "/api/history using bad \"begin\" date format parameter",
+          "message": "org.gradle.internal.exceptions.DefaultMultiCauseException: Multiple Failures (2 failures)\n\torg.spockframework.runtime.SpockComparisonFailure: Condition not satisfied:\n\nhistory.code() == 400\n|       |      |\n|       404    false\nResponse{protocol=http/1.1, code=404, message=Not Found, url=http://localhost:32769/api/60/project/test/history?begin=invalidDate}\n\n\torg.spockframework.runtime.SpockComparisonFailure: Condition not satisfied:\n\njson.message == \"The parameter \\\"begin\\\" did not have a valid ",
+          "kind": "failure",
+          "excused": false
+        },
+        {
+          "test": "/api/history using valid \"end\" date format parameter",
+          "message": "java.lang.Exception: GET request failed: 404 {\"error\":true,\"apiversion\":60,\"errorCode\":\"api.error.project.missing\",\"message\":\"Project does not exist: test\",\"args\":[\"test\"]}",
+          "kind": "failure",
+          "excused": false
+        },
+        {
+          "test": "/api/history using valid \"begin\" date format parameter",
+          "message": "java.lang.Exception: GET request failed: 404 {\"error\":true,\"apiversion\":60,\"errorCode\":\"api.error.project.missing\",\"message\":\"Project does not exist: test\",\"args\":[\"test\"]}",
+          "kind": "failure",
+          "excused": false
+        }
+      ]
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobDeleteSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 2.877,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobErrorHandler",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 4.288,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobExecSudoSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 12.599,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobExecutionOnMultipleNodesSpec",
+      "tests": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 11.801,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobExecutionSpec",
+      "tests": 25,
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 114.651,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobExecutionStatusSpec",
+      "tests": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 13.633,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobImportSpec",
+      "tests": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.128,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobOptionValidationSpec",
+      "tests": 21,
+      "passed": 21,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.735,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobOptionValuesUrlGlobalsSpec",
+      "tests": 6,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.72,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobScheduledSpec",
+      "tests": 6,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 17.367,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobServerUrlContextSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 1.154,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobSpec",
+      "tests": 7,
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 4.569,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.JobsSpec",
+      "tests": 17,
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.437,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.job.input.OptionInputValidationSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 1.199,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.nodes.NodesSpec",
+      "tests": 13,
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 1.891,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.plugin.PluginSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 7.129,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.ConfigSpec",
+      "tests": 20,
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 10.48,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.ExecuteScriptSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 9.681,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.ExportSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.148,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.ImportSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 2.514,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.ProjectSpec",
+      "tests": 3,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.198,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.ProjectsSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.096,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.RunCommandSpec",
+      "tests": 3,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 3.307,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.project.RunUrlSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 1.227,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.resourceModel.AnsibleResourceModelSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.586,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.schedule.ScheduleSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 8.887,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginActionsSpec",
+      "tests": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 17.406,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginImportScheduledJobSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 23.273,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginInputsSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.229,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginJobActionInputSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.857,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginJobActionsPerformSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.424,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginJobDiffSpec",
+      "tests": 1,
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.001,
+      "failures": [
+        {
+          "test": "initializationError",
+          "message": "java.lang.IllegalStateException: Failed to create repository: repoExample4",
+          "kind": "failure",
+          "excused": false
+        }
+      ]
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginJobStatusSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.378,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginSetupSpec",
+      "tests": 1,
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.0,
+      "failures": [
+        {
+          "test": "initializationError",
+          "message": "java.lang.IllegalStateException: Failed to create repository: repoExample",
+          "kind": "failure",
+          "excused": false
+        }
+      ]
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.scm.ScmPluginStatusSpec",
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.181,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.storage.EncryptionBackwardCompatSpec",
+      "tests": 9,
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 4.359,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.storage.PrivateKeySpec",
+      "tests": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.195,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.storage.PublicKeySpec",
+      "tests": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.128,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.system.MetricsSpec",
+      "tests": 10,
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 5.028,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.system.SysInformationSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 0.537,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.workflow.ConditionalWorkflowSpec",
+      "tests": 3,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 3.812,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.workflowSteps.FileUrlScriptStepSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 7.454,
+      "failures": []
+    },
+    {
+      "class": "org.rundeck.tests.functional.api.workflowSteps.StepExecutionContextSpec",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "duration_s": 2.338,
+      "failures": []
+    }
+  ],
+  "totals": {
+    "specs": 62,
+    "tests": 321,
+    "passed": 314,
+    "failed": 7,
+    "errors": 0,
+    "skipped": 0,
+    "duration_s": 569.404,
+    "unexcused_failures": 7
+  },
+  "known_skips_applied": []
+}

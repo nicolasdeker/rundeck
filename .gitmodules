@@ -1,0 +1,4 @@
+[submodule "legacy/packaging/packaging"]
+	path = legacy/packaging/packaging
+	url = https://github.com/rundeck/packaging.git
+	branch = main

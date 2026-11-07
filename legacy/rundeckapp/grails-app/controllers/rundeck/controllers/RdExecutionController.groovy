@@ -1,0 +1,74 @@
+package rundeck.controllers
+
+import com.dtolabs.rundeck.app.api.FormattedDate
+import com.dtolabs.rundeck.core.authorization.AuthContext
+import com.fasterxml.jackson.annotation.JsonInclude
+import com.fasterxml.jackson.databind.ObjectMapper
+import org.rundeck.app.authorization.AppAuthContextProcessor
+
+import java.text.SimpleDateFormat
+import org.rundeck.core.auth.AuthConstants
+import org.rundeck.core.auth.access.UnauthorizedAccess
+import org.rundeck.core.auth.app.RundeckAccess
+import org.rundeck.core.auth.web.RdAuthorizeExecution
+import org.rundeck.core.auth.web.RdAuthorizeJob
+import org.springframework.context.MessageSource
+import rundeck.data.paging.RdPageable
+import rundeck.services.RdExecutionService
+
+class RdExecutionController extends ControllerBase {
+
+    static ObjectMapper mapper = new ObjectMapper()
+    static {
+        mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL)
+        mapper.disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+        // RUN-4550: serialize dates as second-precision W3C/ISO-8601 in UTC (e.g. 2026-03-25T21:16:50Z),
+        // matching the Grails API converters instead of Jackson's default epoch-millis timestamps.
+        SimpleDateFormat df = new SimpleDateFormat(FormattedDate.DEFAULT_DATE_FORMAT)
+        df.setTimeZone(TimeZone.getTimeZone("GMT"))
+        mapper.setDateFormat(df)
+    }
+
+    AppAuthContextProcessor rundeckAuthContextProcessor
+    RdExecutionService rdExecutionService
+    MessageSource messageSource
+
+    @RdAuthorizeExecution(RundeckAccess.Execution.AUTH_APP_READ_OR_VIEW)
+    def get() {
+        response.contentType = "application/json;utf-8"
+        def job = rdExecutionService.getExecutionByUuid(params.id)
+        if(job) {
+            render mapper.writeValueAsString(job)
+        } else {
+            response.status = 404
+        }
+    }
+
+    def delete() {
+        response.contentType = "application/json;utf-8"
+        def e = rdExecutionService.getExecutionByUuid(params.id)
+        if(!e) {
+            response.status = 404
+            return
+        }
+        AuthContext authContext = rundeckAuthContextProcessor.getAuthContextForSubject(session.subject)
+        if (!rundeckAuthContextProcessor.authorizeApplicationResourceAny(
+                authContext,
+                rundeckAuthContextProcessor.authResourceForProject(e.project),
+                [AuthConstants.ACTION_DELETE_EXECUTION, AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]
+        )) {
+            throw new UnauthorizedAccess(AuthConstants.ACTION_DELETE_EXECUTION, AuthConstants.TYPE_EXECUTION, e.uuid)
+        }
+        render mapper.writeValueAsString(rdExecutionService.delete(params.id))
+    }
+
+    @RdAuthorizeJob(RundeckAccess.Job.AUTH_APP_READ_OR_VIEW)
+    def listForJob() {
+        response.contentType = "application/json;utf-8"
+        RdPageable pageable = new RdPageable()
+        if(params.max) pageable.max = params.max.toInteger()
+        if(params.offset) pageable.offset = params.offset.toInteger()
+        render mapper.writeValueAsString(rdExecutionService.listExecutionsForJob(params.id, pageable))
+    }
+
+}

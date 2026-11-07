@@ -1,0 +1,102 @@
+# Define top-level entry:
+#dn: {{ LDAP_BASE_DN }}
+#objectClass: dcObject
+#objectClass: organization
+#o: Example, Inc.
+#dc: example
+
+# Define an entry to contain users:
+dn: ou=users,{{ LDAP_BASE_DN }}
+objectClass: organizationalUnit
+ou: users
+
+# Define some users:
+dn: cn=admin, ou=users,{{ LDAP_BASE_DN }}
+uid: admin
+userPassword: admin
+objectClass: person
+objectClass: top
+objectClass: inetOrgPerson
+sn: The admin account for the Example client to use
+cn: admin
+
+dn: cn=build, ou=users,{{ LDAP_BASE_DN }}
+uid: build
+userPassword: {MD5}sNonVSCRjiPdYV4qdHUo8Q==
+#####
+# MD5 creds, Base64 encoded
+#userPassword: build
+objectClass: person
+objectClass: top
+objectClass: inetOrgPerson
+sn: The account to use to demonstrate managing builds only
+cn: build
+
+dn: cn=deploy, ou=users,{{ LDAP_BASE_DN }}
+uid: deploy
+userPassword: deploy
+#####
+# Grails 7: Changed from {CRYPT}de01JmlU8XXTQ to plain text
+# CRYPT scheme (DES-based) is deprecated and not reliably supported in modern OpenLDAP
+# TODO: Post-Grails 7 - Upgrade to modern LDAP image and use secure password schemes
+#userPassword: {CRYPT}de01JmlU8XXTQ
+objectClass: person
+objectClass: top
+objectClass: inetOrgPerson
+sn: The account to use to demonstrate managing deployment only
+cn: deploy
+
+dn: cn=test, ou=users,{{ LDAP_BASE_DN }}
+uid: test
+userPassword: test
+objectClass: person
+objectClass: top
+objectClass: inetOrgPerson
+sn: Has no role access
+cn: test
+
+dn: cn=syncer, ou=users,{{ LDAP_BASE_DN }}
+uid: syncer
+userPassword: syncer
+objectClass: person
+objectClass: top
+objectClass: inetOrgPerson
+sn: Swim
+givenName: Syncer
+mail: syncer@swim.com
+cn: syncer
+
+# Define an entry to contain roles:
+dn: ou=roles, {{ LDAP_BASE_DN }}
+objectClass: organizationalUnit
+ou: roles
+
+# Define some roles and their membership:
+dn: cn=architect, ou=roles,{{ LDAP_BASE_DN }}
+objectClass: groupOfUniqueNames
+uniqueMember: cn=admin,ou=users,{{ LDAP_BASE_DN }}
+cn: architect
+
+dn: cn=admin, ou=roles,{{ LDAP_BASE_DN }}
+objectClass: groupOfUniqueNames
+uniqueMember: cn=admin,ou=users,{{ LDAP_BASE_DN }}
+cn: admin
+
+dn: cn=user, ou=roles,{{ LDAP_BASE_DN }}
+objectClass: groupOfUniqueNames
+uniqueMember: cn=admin,ou=users,{{ LDAP_BASE_DN }}
+uniqueMember: cn=deploy,ou=users,{{ LDAP_BASE_DN }}
+uniqueMember: cn=build,ou=users,{{ LDAP_BASE_DN }}
+cn: user
+
+dn: cn=build, ou=roles,{{ LDAP_BASE_DN }}
+objectClass: groupOfUniqueNames
+uniqueMember: cn=admin,ou=users,{{ LDAP_BASE_DN }}
+uniqueMember: cn=build,ou=users,{{ LDAP_BASE_DN }}
+cn: build
+
+dn: cn=deploy, ou=roles,{{ LDAP_BASE_DN }}
+objectClass: groupOfUniqueNames
+uniqueMember: cn=admin,ou=users,{{ LDAP_BASE_DN }}
+uniqueMember: cn=deploy,ou=users,{{ LDAP_BASE_DN }}
+cn: deploy

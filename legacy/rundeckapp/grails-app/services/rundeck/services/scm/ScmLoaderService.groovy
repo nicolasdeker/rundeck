@@ -1,0 +1,598 @@
+package rundeck.services.scm
+
+import com.dtolabs.rundeck.core.jobs.JobRevReference
+import com.dtolabs.rundeck.plugins.scm.JobChangeEvent
+import com.dtolabs.rundeck.plugins.scm.JobExportReference
+import com.dtolabs.rundeck.plugins.scm.JobScmReference
+import com.dtolabs.rundeck.plugins.scm.ScmOperationContext
+import grails.events.annotation.Subscriber
+import grails.events.bus.EventBusAware
+import grails.gorm.transactions.Transactional
+import groovy.transform.CompileDynamic
+import groovy.transform.CompileStatic
+import org.rundeck.app.config.ConfigService
+import rundeck.ScheduledExecution
+import rundeck.data.job.reference.JobRevReferenceImpl
+import rundeck.services.FrameworkService
+
+import rundeck.services.ScheduledExecutionService
+import rundeck.services.ScmService
+import rundeck.services.StoredJobChangeEvent
+
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.function.Consumer
+
+@CompileStatic
+class ScmLoaderService implements EventBusAware {
+
+    FrameworkService frameworkService
+    ScmService scmService
+    ScheduledExecutionService scheduledExecutionService
+    ConfigService configurationService
+    public static final long DEFAULT_LOADER_DELAY = 0
+    public static final long DEFAULT_LOADER_INTERVAL_SEC = 20
+    public static final long INIT_RETRY_TIMES = 5
+    public static final long INIT_RETRY_TIMES_DELAY = 1000
+    public static final long DEFAULT_SLOWPOLL_INTERVAL = 60_000
+
+    /**
+     * scheduledExecutor to load job SCM cache
+     */
+    ScheduledExecutorService scheduledExecutor = Executors.newScheduledThreadPool(2)
+    final Map<String, ScheduledFuture> scmProjectLoaderProcess = Collections.synchronizedMap([:])
+    final Map<String, Boolean> scmProjectInitLoaded = Collections.synchronizedMap([:])
+    final Map<String, ScmPluginConfigData> scmPluginMeta = Collections.synchronizedMap([:])
+
+    /**
+     * Bootstrap poller: every loader interval, start a project loader for each project/integration with SCM
+     * enabled and cancel loaders whose SCM was disabled or removed. Scheduled with a fixed delay so a slow
+     * pass never queues back-to-back runs.
+     */
+    @Subscriber("rundeck.bootstrap")
+    @CompileDynamic
+    void beginScmLoader(){
+        if(!frameworkService) {
+            return
+        }
+        //check if each project has set the SCM Loader process (if needed)
+        scheduledExecutor.scheduleWithFixedDelay(
+                {
+                        for (String project : frameworkService.projectNames()) {
+                                for (String integration : scmService.INTEGRATIONS) {
+                                    try {
+                                        String projectIntegration = getProjectIntegration(project, integration)
+                                        ScmPluginConfigData pluginConfigData = scmService.loadScmConfig(project, integration)
+                                        if(projectIntegrationEnabled(project, integration, pluginConfigData)){
+                                            if(pluginConfigData && pluginConfigData.enabled) {
+                                                scmProjectLoaderProcess.put(projectIntegration, startScmLoader(project, integration))
+                                            }
+                                        }else{
+                                            //cleanup: if scm was disabled or the project was deleted
+                                            if(pluginConfigData && !pluginConfigData.enabled || !pluginConfigData) {
+                                                if(scmProjectLoaderProcess.get(projectIntegration)){
+                                                    ScheduledFuture scheduler = scmProjectLoaderProcess.get(projectIntegration)
+                                                    scheduler.cancel(true)
+                                                    scmProjectLoaderProcess.remove(projectIntegration)
+                                                    cleanUpScmPlugin(project, integration)
+                                                }
+                                            }
+                                        }
+                                    } catch (Throwable throwable) {
+                                        log.error("Error initializing SCM project loader for ${project}/${integration}: ${throwable.message}", throwable)
+                                    }
+                                }
+                        }
+                },
+                scmLoaderInitialDelaySeconds,
+                scmLoaderIntervalSeconds,
+                TimeUnit.SECONDS
+        )
+    }
+
+    String getProjectIntegration(String project, String integration){
+        project + "-" + integration
+    }
+
+    boolean projectIntegrationEnabled(String project, String integration,  ScmPluginConfigData pluginConfigData){
+        String projectIntegration = getProjectIntegration(project, integration)
+        if(!scmProjectLoaderProcess.get(projectIntegration)){
+            if(pluginConfigData && pluginConfigData.enabled) {
+                return true
+            }
+        }
+
+        return false
+    }
+    /**
+     * Project SCM Loader
+     * This class is responsible for loading the SCM configuration and processing the import/export operations.
+     */
+    static class ProjectScmLoader implements Runnable{
+        String project
+        String integration
+        ScmLoaderService service
+
+        ScmLoaderState state = new ScmLoaderStateImpl()
+        private long retryTimes
+        private long retryDelay
+
+        ProjectScmLoader(String project, String integration, ScmLoaderService service, long delay, long retryCount) {
+            this.project = project
+            this.integration = integration
+            this.service = service
+            retryDelay = delay
+            retryTimes = retryCount
+        }
+
+        @Override
+        void run() {
+            String projectIntegration = service.getProjectIntegration(project, integration)
+            ScmPluginConfigData pluginConfigData = service.scmService.loadScmConfig(project, integration)
+            if(!service.scmPluginMeta.get(projectIntegration)){
+                service.scmPluginMeta.put(projectIntegration, pluginConfigData)
+            }
+            if(pluginConfigData && pluginConfigData.enabled){
+                // Currently in slow-poll cooldown after exhausting fast retries: this scheduled
+                // invocation is a cheap no-op until nextRetryAt elapses, avoiding a repeated
+                // connectivity attempt on every fixed-rate firing (RUN-4525).
+                if (service.scmService.isInRetryCooldown(project, integration)) {
+                    return
+                }
+
+                if (pluginConfigData.properties.get("flagToReturnProcess")) {
+                    pluginConfigData.properties.remove("flagToReturnProcess")
+                    service.scmService.storeConfig(pluginConfigData, project, integration)
+                }
+
+                if (service.scmService.hasRetryState(project, integration)) {
+                    // Already in slow-poll mode and the cooldown has just elapsed: make exactly ONE
+                    // real connectivity attempt, not another full fast-retry burst — the fast-retry
+                    // phase only ever runs once, on the first failure (RUN-4525).
+                    attemptOnce(pluginConfigData)
+                } else {
+                    fastRetryThenEnterSlowPoll(pluginConfigData)
+                }
+
+            }else{
+                service.removingLoaderProcess(project, integration, "SCM disabled or project removed")
+            }
+        }
+
+        /**
+         * Make a single connectivity attempt for a project/integration that is already in slow-poll
+         * mode (i.e. has previously failed and has retry state recorded). On success, clears the
+         * retry state; on failure, records a new cooldown window via {@link ScmService#markRetryFailure}
+         * (RUN-4525).
+         */
+        private void attemptOnce(ScmPluginConfigData pluginConfigData) {
+            try {
+                runLoader(pluginConfigData)
+                service.scmService.clearRetryState(project, integration)
+            } catch (Throwable t) {
+                long nextRetryAt = System.currentTimeMillis() + service.getScmLoaderSlowPollInterval()
+                service.scmService.markRetryFailure(project, integration, nextRetryAt)
+                log.warn(
+                    "SCM ${integration} for ${project} slow-poll attempt failed: ${t.message}. " +
+                    "Next attempt in ${service.getScmLoaderSlowPollInterval()}ms. Plugin remains enabled in configuration."
+                )
+            }
+        }
+
+        /**
+         * First-ever (or post-config-change) load attempt for a project/integration: retries up to
+         * {@code retryTimes} times, {@code retryDelay}ms apart. On success, clears any retry state;
+         * once retries are exhausted, enters slow-poll mode by recording a cooldown via
+         * {@link ScmService#markRetryFailure} instead of disabling the plugin (RUN-4525).
+         */
+        private void fastRetryThenEnterSlowPoll(ScmPluginConfigData pluginConfigData) {
+            boolean process = false
+            int retryCount = 0
+            while (!process){
+                try {
+                    runLoader(pluginConfigData)
+                    process = true
+                    service.scmService.clearRetryState(project, integration)
+
+                } catch (Throwable t) {
+                    if(retryCount>= retryTimes){
+                        process = true
+                        // Do not persist enabled=false — the failure may be a transient
+                        // connectivity issue. Instead, enter slow-poll mode: record when the
+                        // next single connectivity attempt is allowed, so the outer scheduled
+                        // task (already re-invoking run() every scmLoaderIntervalSeconds) keeps
+                        // retrying indefinitely without hammering the git server, and without
+                        // requiring manual re-activation (RUN-4525).
+                        long nextRetryAt = System.currentTimeMillis() + service.getScmLoaderSlowPollInterval()
+                        service.scmService.markRetryFailure(project, integration, nextRetryAt)
+                        log.warn(
+                            "SCM ${integration} for ${project} failed to initialize after ${retryTimes} retries: ${t.message}. " +
+                            "Entering slow-poll mode (retry interval=${service.getScmLoaderSlowPollInterval()}ms). " +
+                            "Plugin remains enabled in configuration."
+                        )
+                    }else{
+                        retryCount++
+                        log.error("Error initializing SCM for: $project/$integration: ${t.message}. Retrying ${retryCount}/${retryTimes}")
+                        Thread.sleep(this.retryDelay)
+                    }
+                }
+            }
+        }
+
+        /**
+         * Delegates to the export or import loader implementation for this project, based on
+         * {@link #integration}.
+         */
+        private void runLoader(ScmPluginConfigData pluginConfigData) {
+            if (integration == service.scmService.EXPORT) {
+                service.processScmExportLoader(project, pluginConfigData, state)
+            }else{
+                service.processScmImportLoader(project, pluginConfigData, state)
+            }
+        }
+    }
+
+    /**
+     * Schedule the per-project SCM loader. Uses a fixed delay between runs, so when a cycle exceeds the
+     * configured interval the next one starts a full interval after it finishes instead of running
+     * back-to-back to catch up.
+     *
+     * @param project project name
+     * @param integration scm integration (import or export)
+     * @return the scheduled future for the loader task
+     */
+    def startScmLoader(String project, String integration){
+
+        def loader = createProjectLoader(project, integration)
+        //enable project integration cache loader
+        def scheduler = scheduledExecutor.scheduleWithFixedDelay(
+            {
+                    try {
+                        loader.run()
+                    } catch (CancelTaskException throwable) {
+                        log.warn("Stopping loader process for ${project}/${integration}: ${throwable.message}", throwable)
+                        throw throwable
+                    } catch (Throwable throwable) {
+                        log.error(
+                            "Error initializing SCM project loader for ${project}/${integration}: ${throwable.message}",
+                            throwable
+                        )
+                    }
+                },
+                scmLoaderInitialDelaySeconds,
+                scmLoaderIntervalSeconds,
+                TimeUnit.SECONDS
+        )
+        scheduler
+    }
+
+    ProjectScmLoader createProjectLoader(String project, String integration) {
+        new ProjectScmLoader(project, integration, this, this.getScmLoaderInitialRetryDelay(), this.getScmLoaderInitialRetryTimes())
+    }
+
+    static class CancelTaskException extends Exception {
+        CancelTaskException(String message) {
+            super(message)
+        }
+    }
+
+    def removingLoaderProcess(String project, String integration, String message){
+        String projectIntegration = getProjectIntegration(project, integration)
+
+        //removing task
+        log.debug("removing thread ${projectIntegration}")
+        scmProjectLoaderProcess.remove(projectIntegration)
+        cleanUpScmPlugin(project, integration)
+        throw new CancelTaskException(message);
+    }
+
+    long getScmLoaderInitialDelaySeconds() {
+        configurationService?.getLong('scmLoader.delay', DEFAULT_LOADER_DELAY) ?: DEFAULT_LOADER_DELAY
+    }
+
+
+    long getScmLoaderInitialRetryTimes() {
+        def result = configurationService?.getLong('scmLoader.init.retry', INIT_RETRY_TIMES)
+        result != null ? result : INIT_RETRY_TIMES
+    }
+
+    long getScmLoaderInitialRetryDelay() {
+        def result = configurationService?.getLong('scmLoader.init.delay', INIT_RETRY_TIMES_DELAY)
+        result != null ? result : INIT_RETRY_TIMES_DELAY
+    }
+
+    long getScmLoaderIntervalSeconds() {
+        configurationService?.getLong(
+                'scmLoader.interval',
+                DEFAULT_LOADER_INTERVAL_SEC
+        ) ?:
+                DEFAULT_LOADER_INTERVAL_SEC
+    }
+
+    /**
+     * Interval, in milliseconds, between single connectivity retry attempts once a project/integration
+     * has exhausted its fast retries and entered slow-poll mode. Enforces a hard floor of
+     * {@link #DEFAULT_SLOWPOLL_INTERVAL} (60s) regardless of configured value, to prevent an overly
+     * aggressive interval from re-introducing the repeated-network-call problem this replaces (RUN-4525).
+     */
+    long getScmLoaderSlowPollInterval() {
+        def configured = configurationService?.getLong('scmLoader.slowPoll.interval', DEFAULT_SLOWPOLL_INTERVAL)
+        Math.max(configured != null ? configured : DEFAULT_SLOWPOLL_INTERVAL, DEFAULT_SLOWPOLL_INTERVAL)
+    }
+
+    @CompileDynamic
+    List<ScheduledExecution> getJobs(String project){
+        scheduledExecutionService.listJobsForProjectUncached(project)
+    }
+
+    /**
+     * state container interface for export loader
+     */
+    @CompileStatic
+    static interface ScmLoaderState {
+        boolean getInited()
+
+        void setInited(boolean val)
+
+        void addJobs(List<ScheduledExecution> jobs)
+
+        Map<String, JobRevReference> getScannedJobs()
+
+        /**
+         * Detects jobs that were deleted
+         * @param jobs current job list
+         * @param knownDeletedIds known deleted job Ids
+         * @param handleDeletedIds consume list of deleted job references
+         */
+        void detectDeletedJobs(
+            List<ScheduledExecution> jobs,
+            List<String> knownDeletedIds,
+            Consumer<List<JobRevReference>> handleDeletedIds
+        )
+    }
+
+    /**
+     * state implementation for export loader
+     */
+    @CompileStatic
+    static class ScmLoaderStateImpl implements ScmLoaderState {
+        boolean inited
+        Map<String, JobRevReference> scannedJobs = new HashMap<>()
+
+        void addJobs(List<ScheduledExecution> jobs) {
+            jobs.each {
+                scannedJobs.
+                    put(
+                        it.extid,
+                        new JobRevReferenceImpl(
+                            project: it.project,
+                            id: it.extid,
+                            jobName: it.jobName,
+                            groupPath: it.groupPath,
+                            version: it.version
+                        )
+                    )
+            }
+        }
+
+        @Override
+        void detectDeletedJobs(
+            final List<ScheduledExecution> jobs,
+            List<String> knownDeletedIds,
+            Consumer<List<JobRevReference>> handleDeletedIds
+        ) {
+            List<String> jobids = jobs*.extid
+            List<JobRevReference> deletedRefs=[]
+            if (!jobids.containsAll(scannedJobs.keySet())) {
+                List<String> deleted = []
+                deleted.addAll((Collection<String>) scannedJobs.keySet())
+                deleted.removeAll(jobids)
+                deleted.removeAll(knownDeletedIds)
+                //remove known deleted jobs
+                deletedRefs = deleted.collect{scannedJobs.remove(it)}
+            }
+            scannedJobs.clear()
+            addJobs(jobids.collect { id -> jobs.find { it.extid == id } })
+            handleDeletedIds.accept(deletedRefs)
+        }
+    }
+
+    /**
+     *
+     * @param project project
+     * @param pluginConfig plugin config
+     * @param state state holder object
+     * @return
+     */
+    @Transactional
+    def processScmExportLoader(String project, ScmPluginConfigData pluginConfig, ScmLoaderState state) {
+
+        def username = pluginConfig.getSetting("username")
+        def roles = pluginConfig.getSettingList("roles")
+        ScmOperationContext context = scmService.scmOperationContext(username, roles, project)
+        def loaded = scmService.loadPluginWithConfig(scmService.EXPORT, context, pluginConfig.type, pluginConfig.config)
+
+        if(!loaded){
+            return
+        }
+
+        if (!scmService.projectHasConfiguredExportPlugin(project)) {
+            return
+        }
+
+        //if plugin property changed, the plugin must be re-enabled
+        if(reloadPlugin(project, ScmService.EXPORT, pluginConfig)){
+            log.info("SCM Export has change for project ${project}")
+        }
+
+        log.debug("processing SCM export Loader ${project} / ${pluginConfig.type}")
+
+        def plugin = scmService.getLoadedExportPluginFor(project)
+
+        if (plugin) {
+            log.debug("export plugin found")
+
+            List<ScheduledExecution> jobs = getJobs(project)
+            log.debug("processing ${jobs.size()} jobs")
+            if (!state.inited) {
+                state.inited = true
+                state.addJobs(jobs)
+            } else {
+                //detect deleted jobs
+                def deletedfiles = scmService.deletedExportFilesForProject(project)
+                List<String> knownDeletedIds = []
+                knownDeletedIds.addAll(deletedfiles.values()*.id.collect{it.toString()})
+                state.detectDeletedJobs(jobs, knownDeletedIds) { List<JobRevReference> newDeletedRefs ->
+                    if (newDeletedRefs) {
+                        //emit fake job change event
+                        eventBus.notify(
+                            'multiJobChanged',
+                            newDeletedRefs.collect { cacheItem ->
+                                new StoredJobChangeEvent(
+                                    eventType: JobChangeEvent.JobChangeEventType.DELETE,
+                                    jobReference: cacheItem,
+                                    originalJobReference: cacheItem
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+
+            Map<String, Map> jobPluginMeta = scmService.getJobsPluginMeta(project, true)
+            List<JobExportReference> joblist = scmService.exportjobRefsForJobs(jobs, jobPluginMeta)
+
+            def key = project+"-export"
+            if(!scmProjectInitLoaded.containsKey(key)){
+                plugin.initJobsStatus(joblist)
+                //loading first time job status
+                log.debug("refresh jobs status")
+                plugin.refreshJobsStatus(joblist)
+                scmProjectInitLoaded.put(key, true)
+            }
+
+            //refresh job plugin meta
+            scmService.refreshExportPluginMetadata(project, plugin,jobs,jobPluginMeta)
+
+            log.debug("processing cluster fix")
+            if(frameworkService.isClusterModeEnabled()){
+
+                Map<String,String> originalPaths = joblist.collectEntries{[it.id,scmService.getRenamedPathForJobId(it.project, it.id)]}
+
+                //run cluster fix
+                plugin.clusterFixJobs(context, joblist, originalPaths)
+            }
+        }
+
+    }
+
+    @Transactional
+    def processScmImportLoader(String project, ScmPluginConfigData pluginConfig, ScmLoaderState state){
+        log.debug("processing SCM import Loader ${project} / ${pluginConfig.type}")
+        def username = pluginConfig.getSetting("username")
+        def roles = pluginConfig.getSettingList("roles")
+        ScmOperationContext context = scmService.scmOperationContext(username, roles, project)
+
+        def loaded = scmService.loadPluginWithConfig(scmService.IMPORT, context, pluginConfig.type, pluginConfig.config)
+
+        if(!loaded){
+            return
+        }
+
+        if (!scmService.projectHasConfiguredImportPlugin(project)) {
+            return
+        }
+
+        if(reloadPlugin(project, ScmService.IMPORT, pluginConfig)){
+            log.info("SCM Import has change for project ${project}")
+        }
+
+        def plugin = scmService.getLoadedImportPluginFor(project)
+
+        if(plugin){
+            log.debug("import plugin found")
+
+            List<ScheduledExecution> jobs = getJobs(project)
+            log.debug("processing ${jobs.size()} jobs")
+
+            plugin.reconcileJobState(jobs*.extid.findAll { it } as Set<String>)
+
+            Map<String, Map> jobPluginMeta = scmService.getJobsPluginMeta(project, false)
+            List<JobScmReference> joblist = scmService.scmJobRefsForJobs(jobs, jobPluginMeta)
+
+            def key = project+"-import"
+            if(!scmProjectInitLoaded.containsKey(key)){
+                plugin.initJobsStatus(joblist)
+                //loading first time job status
+                log.debug("refresh jobs status")
+                //loading first time job status
+                plugin.refreshJobsStatus(joblist)
+
+                scmProjectInitLoaded.put(key, true)
+            }
+            if(!state.inited){
+                state.inited=true
+                state.addJobs(jobs)
+            }else{
+                //detect deleted jobs
+                state.detectDeletedJobs(jobs, []) { List<JobRevReference> newDeletedIds ->
+                    if (newDeletedIds) {
+                        //emit fake job change event
+                        eventBus.notify(
+                            'multiJobChanged',
+                            newDeletedIds.collect { cacheItem ->
+                                new StoredJobChangeEvent(
+                                    eventType: JobChangeEvent.JobChangeEventType.DELETE,
+                                    jobReference: cacheItem,
+                                    originalJobReference: cacheItem
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+
+            if(frameworkService.isClusterModeEnabled()){
+                Map<String,String> originalPaths = joblist.collectEntries { [it.id, scmService.getRenamedPathForJobId(it.project, it.id)] }
+
+                //run cluster fix
+                plugin.clusterFixJobs(context, joblist, originalPaths)
+            }
+
+
+        }
+    }
+
+    boolean reloadPlugin(String project, String integration, ScmPluginConfigData pluginConfig){
+        String key = getProjectIntegration(project, integration)
+        try{
+            def pluginConfigCache = scmPluginMeta.get(key)
+            if(pluginConfigCache && pluginConfig.getProperties() != pluginConfigCache.getProperties()){
+                scmService.unregisterPlugin(integration, project)
+                // Config changed — clear any slow-poll cooldown so the fresh initProject() attempt
+                // below isn't short-circuited by a stale retry-state entry (RUN-4525).
+                scmService.clearRetryState(project, integration)
+                scmService.initProject(project, integration)
+                scmPluginMeta.remove(key)
+                return true
+            }
+        }catch(Exception e){
+            return false
+        }
+
+        return false
+    }
+
+
+    def cleanUpScmPlugin(String project, String integration){
+        def key = project + "-" + integration
+        if(scmProjectInitLoaded.containsKey(key)){
+            scmProjectInitLoaded.remove(key)
+        }
+
+        scmService.unregisterPlugin(integration, project)
+    }
+
+}

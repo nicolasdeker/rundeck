@@ -1,0 +1,207 @@
+/*
+ * Copyright 2018 Rundeck, Inc. (http://rundeck.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.core.execution.workflow.engine;
+
+import com.dtolabs.rundeck.core.execution.workflow.BaseWorkflowExecutor;
+import com.dtolabs.rundeck.core.execution.workflow.ControlBehavior;
+import com.dtolabs.rundeck.core.execution.workflow.EngineWorkflowExecutor;
+import com.dtolabs.rundeck.core.execution.workflow.WFSharedContext;
+import com.dtolabs.rundeck.core.execution.workflow.WorkflowStrategyProfile;
+import com.dtolabs.rundeck.core.execution.workflow.steps.StepExecutionResult;
+import com.dtolabs.rundeck.core.rules.*;
+import lombok.Getter;
+
+import java.util.Set;
+
+/**
+ * operation for running a step
+ */
+public class StepOperation implements WorkflowSystem.Operation<WFSharedContext,OperationCompleted> {
+    @Getter private int stepNum;
+    @Getter private String label;
+    @Getter private Set<Condition> startTriggerConditions;
+    @Getter private Set<Condition> skipTriggerConditions;
+    private StepCallable callable;
+    private StateObj startTriggerState;
+    private StateObj skipTriggerState;
+    @Getter private boolean didRun = false;
+    @Getter private final String identity;
+    private final WorkflowStrategyProfile profile;
+
+    public StepOperation(
+            final int stepNum,
+            final String label,
+            final StepCallable callable,
+            final StateObj startTriggerState,
+            final StateObj skipTriggerState,
+            final Set<Condition> startTriggerConditions,
+            final Set<Condition> skipTriggerConditions,
+            final WorkflowStrategyProfile profile
+    )
+    {
+        this.stepNum = stepNum;
+        this.label = label;
+        this.callable = callable;
+        this.identity = String.format("[%d]%s", stepNum, label != null ? label : "");
+        this.startTriggerState = startTriggerState;
+        this.startTriggerConditions = startTriggerConditions;
+        this.skipTriggerConditions = skipTriggerConditions;
+        this.skipTriggerState = skipTriggerState;
+        this.profile = profile;
+    }
+
+    @Override
+    public boolean shouldRun(final StateObj state) {
+        return state.hasState(startTriggerState);
+    }
+
+    @Override
+    public boolean shouldSkip(final StateObj state) {
+        return null != skipTriggerState && state.hasState(skipTriggerState);
+    }
+
+    @Override
+    public OperationCompleted apply(WFSharedContext context)  {
+        didRun = true;
+        BaseWorkflowExecutor.StepResultCapture stepResultCapture = callable.apply(context);
+        StepExecutionResult result = stepResultCapture.getStepResult();
+        ControlBehavior controlBehavior = stepResultCapture.getControlBehavior();
+        String statusString = stepResultCapture.getStatusString();
+
+
+        MutableStateObj stateChanges = States.mutable();
+        boolean success = null != result && result.isSuccess();
+        if (result != null) {
+            EngineWorkflowExecutor.updateStateWithStepResultData(
+                    stateChanges,
+                    stepNum,
+                    result.getFailureData()
+            );
+        }
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_COMPLETED_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_TRUE
+        );
+        String stepResultValue = success
+                                 ? EngineWorkflowExecutor.STEP_STATE_RESULT_SUCCESS
+                                 : EngineWorkflowExecutor.STEP_STATE_RESULT_FAILURE;
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_STATE_KEY, stepNum),
+                stepResultValue
+        );
+        if (success) {
+            stateChanges.updateState(
+                    EngineWorkflowExecutor.STEP_ANY_STATE_SUCCESS_KEY,
+                    EngineWorkflowExecutor.VALUE_TRUE
+            );
+        } else {
+            stateChanges.updateState(
+                    EngineWorkflowExecutor.STEP_ANY_STATE_FAILED_KEY,
+                    EngineWorkflowExecutor.VALUE_TRUE
+            );
+        }
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_BEFORE_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_FALSE
+        );
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_AFTER_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_TRUE
+        );
+
+        if (controlBehavior != null) {
+            stateChanges.updateState(EngineWorkflowExecutor.stepKey(
+                    EngineWorkflowExecutor.STEP_FLOW_CONTROL_KEY,
+                    stepNum
+            ), controlBehavior.toString());
+            if (controlBehavior == ControlBehavior.Halt) {
+                stateChanges.updateState(
+                        EngineWorkflowExecutor.STEP_ANY_FLOW_CONTROL_HALT_KEY,
+                        EngineWorkflowExecutor.VALUE_TRUE
+                );
+            }
+            if (null != statusString) {
+                stateChanges.updateState(EngineWorkflowExecutor.stepKey(
+                        EngineWorkflowExecutor.STEP_FLOW_CONTROL_STATUS_KEY,
+                        stepNum
+                ), statusString);
+            }
+        }
+
+        // After step completes, evaluate conditionals for future steps
+        // Get the updated SharedDataContext from the step result
+        WFSharedContext updatedContext = stepResultCapture.getResultData();
+        if (updatedContext != null && profile != null) {
+            profile.updateConditionalStatesAfterStep(stepNum, updatedContext, stateChanges);
+        }
+
+        return new OperationCompleted(getIdentity(), stepNum, stateChanges, stepResultCapture, success);
+    }
+
+    @Override
+    public StateObj getSkipState(final StateObj state) {
+        MutableStateObj stateChanges = States.mutable();
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_COMPLETED_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_FALSE
+        );
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_STATE_KEY, stepNum),
+                EngineWorkflowExecutor.STEP_STATE_RESULT_SKIPPED
+        );
+        stateChanges.updateState(EngineWorkflowExecutor.STEP_ANY_STATE_SKIPPED_KEY, EngineWorkflowExecutor.VALUE_TRUE);
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_BEFORE_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_FALSE
+        );
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_AFTER_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_TRUE
+        );
+        return stateChanges;
+    }
+
+    @Override
+    public StateObj getFailureState(final Throwable t) {
+        MutableStateObj stateChanges = States.mutable();
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_COMPLETED_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_TRUE
+        );
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_STATE_KEY, stepNum),
+                EngineWorkflowExecutor.STEP_STATE_RESULT_FAILURE
+        );
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_BEFORE_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_FALSE
+        );
+        stateChanges.updateState(
+                EngineWorkflowExecutor.stepKey(EngineWorkflowExecutor.STEP_AFTER_KEY, stepNum),
+                EngineWorkflowExecutor.VALUE_TRUE
+        );
+        return stateChanges;
+    }
+
+    @Override
+    public String toString() {
+        return "Step{" +
+               "stepNum=" + stepNum +
+               ", label='" + label + '\'' +
+               '}';
+    }
+}

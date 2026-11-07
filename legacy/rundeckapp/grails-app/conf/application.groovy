@@ -1,0 +1,196 @@
+
+hibernate {
+    cache.queries = true
+    cache.use_second_level_cache = true
+    cache.use_query_cache = true
+    cache.region.factory_class = "jcache"
+    cache.ehcache.missing_cache_strategy = "create"
+    javax{
+        cache{
+            provider='org.ehcache.jsr107.EhcacheCachingProvider'
+            missing_cache_strategy = "create"
+            uri="jcache.xml"
+        }
+    }
+}
+
+dataSource {
+    pooled = true
+    jmxExport = true
+    driverClassName= "org.h2.Driver"
+    username = "sa"
+    password = ''
+}
+
+grails.controllers.upload.maxFileSize=26214400
+grails.controllers.upload.maxRequestSize=26214400
+
+grails.plugin.databasemigration.changelog = "changelog.groovy"
+
+
+
+environments {
+    development{
+        grails.serverURL="http://localhost:9090/rundeck"
+        application.refreshDelay=5000
+        grails.profiler.disable=false
+        rundeck.execution.logs.fileStorage.generateExecutionXml=true
+        feature.incubator.'*'=true
+
+        rundeck.scm.startup.initDeferred=false
+
+        dataSource {
+            dbCreate = "none" // one of 'create', 'create-drop','update'
+            url = "jdbc:h2:file:./db/devDb"
+        }
+        grails.plugin.databasemigration.updateOnStart=true
+
+        spring.h2.console.enabled=true
+
+        //enable greenmail plugin in build.gradle, and set this value in dev mode
+        //grails.mail.port = com.icegreen.greenmail.util.ServerSetupTest.SMTP.port
+    }
+    test {
+        def rdeckbasedir = File.createTempDir()
+        rdeckbasedir.deleteOnExit()
+        System.setProperty("rdeck.base",rdeckbasedir.absolutePath)
+        grails.profiler.disable=true
+        dataSource {
+            dbCreate = "none"
+            url = "jdbc:h2:file:./db/testDb;NON_KEYWORDS=MONTH,HOUR,MINUTE,YEAR,SECONDS"
+        }
+        grails.plugin.databasemigration.updateOnStart=true
+
+    }
+    production {
+//        grails.serverURL = "http://www.changeme.com"
+
+        grails.profiler.disable=true
+        //disable feature toggling
+        feature.incubator.feature = false
+        //enable takeover schedule feature
+        feature.incubator.jobs = true
+
+        rundeck.execution.logs.fileStorage.generateExecutionXml=true
+
+        grails.plugin.databasemigration.updateOnStart=true
+
+        dataSource {
+            dbCreate = "none"
+            url = "jdbc:h2:file:/rundeck/grailsh2"
+            properties {
+                jmxEnabled= true
+                initialSize= 5
+                maxActive= 50
+                minIdle= 5
+                maxIdle= 25
+                maxWait= 10000
+                maxAge= 600000
+                timeBetweenEvictionRunsMillis= 5000
+                minEvictableIdleTimeMillis= 60000
+                validationInterval= 15000
+                testOnBorrow= true
+                testWhileIdle= true
+                testOnReturn= false
+                jdbcInterceptors= "ConnectionState"
+                defaultTransactionIsolation= java.sql.Connection.TRANSACTION_READ_COMMITTED // Tomcat JDBC pool property (ignored by HikariCP)
+                // The properties above (maxActive, testOnBorrow, jdbcInterceptors, defaultTransactionIsolation, etc.)
+                // use Tomcat JDBC pool naming and are silently ignored by HikariCP (the Grails 7 default pool).
+                // Set the isolation level via HikariCP's own property name so it takes effect.
+                // READ_COMMITTED reduces gap/next-key locking on MySQL/InnoDB, reducing
+                // deadlocks on unique-index INSERTs. No-op on PostgreSQL/Oracle (already their default).
+                transactionIsolation= "TRANSACTION_READ_COMMITTED"
+            }
+        }
+    }
+}
+
+grails.config.locations = [
+        "classpath:QuartzConfig.groovy"
+]
+
+grails.plugin.springsecurity.securityConfigType = "InterceptUrlMap"
+
+// Grails 7: Order matters! More specific patterns must come before catch-all /**
+grails.plugin.springsecurity.interceptUrlMap = [
+        [pattern: '/assets/**',      access: ['permitAll']], // FIRST: Asset pipeline must be before /**
+        [pattern: '/static/**',      access: ['permitAll']],
+        [pattern: '/user-assets/**', access: ['permitAll']],
+        [pattern: '/j_security_check', access: ['permitAll']],
+        [pattern: '/error/**',        access: ['permitAll']],
+        [pattern: '/common/error',   access: ['permitAll']],
+        [pattern: '/404',            access: ['permitAll']],
+        [pattern: '/404.gsp',        access: ['permitAll']],
+        [pattern: '/favicon.ico',    access: ['permitAll']],
+        [pattern: '/user/login',     access: ['permitAll']],
+        [pattern: '/user/reset',     access: ['permitAll']],
+        [pattern: '/login/oauth2/**',access: ['permitAll']],
+        [pattern: '/user/error',     access: ['permitAll']],
+        [pattern: '/user/logout',    access: ['permitAll']],
+        [pattern: '/user/loggedout', access: ['permitAll']],
+        [pattern: '/feed/**',        access: ['permitAll']],
+        [pattern: '/svc/api/**',     access: ['permitAll']],
+        [pattern: '/api/**',         access: ['permitAll']],
+        [pattern: '/metrics/**',     access: ['permitAll']], // Legacy Dropwizard metrics endpoints
+        [pattern: '/health',         access: ['permitAll']],
+        [pattern: '/actuator/**',    access: ['permitAll']],
+        [pattern: '/actuator/health/**',    access: ['permitAll']],
+        [pattern: '/monitoring/**',  access: ['permitAll']], // Spring Boot Actuator endpoints
+        [pattern: '/.well-known/**', access: ['permitAll']],
+        [pattern: '/**',             access: ['IS_AUTHENTICATED_REMEMBERED']] // LAST: Catch-all
+]
+
+grails.plugin.springsecurity.filterChain.chainMap = [
+        [pattern: '/user/login',     filters: 'none'],
+        [pattern: '/user/reset',     filters: 'none'],
+        [pattern: '/j_security_check', filters: 'JOINED_FILTERS,-csrf'], // Form login endpoint - needs auth filters
+        [pattern: '/error/**',       filters: 'JOINED_FILTERS,-csrf'],
+        [pattern: '/user/error',     filters: 'none'],
+        [pattern: '/common/error',   filters: 'none'],
+        [pattern: '/static/**',      filters: 'none'],
+        [pattern: '/user-assets/**', filters: 'none'],
+        [pattern: '/assets/**',      filters: 'none'],
+        [pattern: '/feed/**',        filters: 'none'],
+        [pattern: '/svc/api/**',     filters: 'JOINED_FILTERS,-csrf'],
+        [pattern: '/api/**',         filters: 'JOINED_FILTERS,-csrf'],
+        [pattern: '/metrics/**',     filters: 'none'], // Legacy Dropwizard metrics endpoints
+        [pattern: '/plugin/**',      filters: 'JOINED_FILTERS,-csrf'],
+        [pattern: '/404',            filters: 'none'],
+        [pattern: '/404.gsp',        filters: 'none'],
+        [pattern: '/favicon.ico',    filters: 'none'],
+        [pattern: '/health',         filters: 'none'],
+        [pattern: '/actuator/**',    filters: 'none'],
+        [pattern: '/actuator/health/**',    filters: 'none'],
+        [pattern: '/monitoring/**',  filters: 'JOINED_FILTERS,-csrf'], // Allow filters to run (for config check)
+        [pattern: '/.well-known/**', filters: 'none'],
+        [pattern: '/**',             filters: 'JOINED_FILTERS,-csrf']
+]
+
+// Grails 7/Spring Security 6: Disable Spring Security's CSRF filter
+// Rundeck uses its own HMac-based CSRF protection (rundeck.security.useHMacRequestTokens)
+grails.plugin.springsecurity.csrf.enabled = false
+grails.plugin.springsecurity.printStatusMessages=false
+grails.plugin.springsecurity.useSecurityEventListener=true
+grails.plugin.springsecurity.useHttpSessionEventPublisher=true
+grails.plugin.springsecurity.apf.filterProcessesUrl = "/j_security_check"
+grails.plugin.springsecurity.apf.usernameParameter = "j_username"
+grails.plugin.springsecurity.apf.passwordParameter = "j_password"
+grails.plugin.springsecurity.auth.loginFormUrl = "/user/login"
+grails.plugin.springsecurity.logout.filterProcessesUrl = '/user/logout'
+grails.plugin.springsecurity.logout.afterLogoutUrl = '/user/loggedout'
+grails.plugin.springsecurity.failureHandler.defaultFailureUrl = "/user/error"
+// Grails 7/Spring Security 6: Prevent Chrome DevTools protocol URLs from being used as redirects
+grails.plugin.springsecurity.successHandler.defaultTargetUrl = '/menu/home'
+grails.plugin.springsecurity.successHandler.alwaysUseDefault = false
+grails.plugin.springsecurity.successHandler.useReferer = false
+grails.plugin.springsecurity.ajaxHeader = 'AJAX AUTH DISABLED\u0000'
+grails.plugin.springsecurity.logout.handlerNames = [
+        'rememberMeServices',
+        'securityContextLogoutHandler',
+        'userActionService',
+        'auditEventsService']
+
+
+grails.plugin.springsecurity.providerNames = [
+        'anonymousAuthenticationProvider',
+        'rememberMeAuthenticationProvider']

@@ -1,0 +1,881 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package rundeck.services
+import groovy.xml.XmlSlurper
+import groovy.xml.XmlParser
+
+import com.dtolabs.rundeck.app.api.ApiVersions
+import com.dtolabs.rundeck.core.authorization.UserAndRolesAuthContext
+import com.dtolabs.rundeck.core.authorization.Validation
+import grails.converters.JSON
+import grails.testing.gorm.DataTest
+import grails.testing.services.ServiceUnitTest
+import grails.web.JSONBuilder
+import groovy.xml.MarkupBuilder
+import org.rundeck.app.authorization.AppAuthContextEvaluator
+import org.rundeck.app.data.model.v1.authtoken.AuthTokenType
+import org.rundeck.app.data.providers.GormTokenDataProvider
+import org.rundeck.app.data.providers.GormUserDataProvider
+import org.rundeck.app.web.WebUtilService
+import org.rundeck.core.auth.AuthConstants
+
+import rundeck.AuthToken
+import rundeck.User
+import rundeck.controllers.ApiController
+import rundeck.data.util.AuthenticationTokenUtils
+import rundeck.services.data.AuthTokenDataService
+import spock.lang.Specification
+import spock.lang.Unroll
+
+import jakarta.servlet.http.HttpServletRequest
+import jakarta.servlet.http.HttpServletResponse
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneId
+
+/**
+ * Created by greg on 7/28/15.
+ */
+class ApiServiceSpec extends Specification implements ServiceUnitTest<ApiService>, DataTest {
+
+    ApiService service
+    GormTokenDataProvider provider = new GormTokenDataProvider()
+
+    void setup() {
+        mockDomains(AuthToken, User)
+        mockDataService(AuthTokenDataService)
+
+        provider.authTokenDataService = applicationContext.getBean(AuthTokenDataService)
+
+        provider.userDataProvider = Mock(GormUserDataProvider){
+            findOrCreateUser(_) >> {
+                def user = new User(login: 'auser')
+                user.id = 1L  // Explicitly set id for unit test
+                user.save()
+                return user
+            }
+        }
+        service = new ApiService()
+        service.tokenDataProvider = provider
+    }
+
+    def "renderWrappedFileContents xml"(){
+        given:
+        def sw = new StringWriter()
+        def builder = new MarkupBuilder(sw)
+        when:
+        service.renderWrappedFileContentsXml('x','xml',builder)
+
+        then:
+        sw.toString()=='<contents><![CDATA[x]]></contents>'
+
+    }
+    @Unroll
+    def "extractResponseFormat resolves Accept header '#acceptHeader' to '#expected' when request.format is '#reqFormat'"(){
+        given:
+        // Grails 7 regression context (RUN-4581): request.format is not populated from the
+        // Accept header, so format negotiation must fall back to parsing Accept explicitly.
+        // Without yaml handling here, Accept: application/yaml was wrongly served as JSON
+        // wrapped in a `contents` field by the ACL policy API endpoints.
+        def request = GroovyMock(HttpServletRequest)
+        request.format >> reqFormat
+        request.getHeader('Accept') >> acceptHeader
+        def response = Mock(HttpServletResponse)
+        def allowed = ['yaml', 'xml', 'json', 'text']
+
+        expect:
+        service.extractResponseFormat(request, response, allowed, reqFormat) == expected
+
+        where:
+        acceptHeader                 | reqFormat | expected
+        'application/yaml'           | 'all'     | 'yaml'
+        'text/yaml'                  | 'all'     | 'yaml'
+        'application/yaml;charset=UTF-8' | 'all' | 'yaml'
+        'Application/YAML'           | 'all'     | 'yaml'
+        'APPLICATION/YAML'           | 'all'     | 'yaml'
+        'application/json'           | 'all'     | 'json'
+        'Application/JSON'           | 'all'     | 'json'
+        'application/xml'            | 'all'     | 'xml'
+        'text/plain'                 | 'all'     | 'text'
+        'yaml'                       | 'yaml'    | 'yaml'
+        'application/json'           | 'yaml'    | 'json'
+        'application/json'           | 'xml'     | 'json'
+        // RUN-4790 non-regression: when Accept doesn't resolve to an allowed format,
+        // request.format (the body's own content type) must still decide the response format.
+        '*/*'                        | 'yaml'    | 'yaml'
+        null                         | 'yaml'    | 'yaml'
+        'text/html'                  | 'yaml'    | 'yaml'
+    }
+
+    @Unroll
+    def "extractResponseFormat with a fixed defformat distinct from request.format ('#reqFormat' vs defformat '#defformat')"(){
+        // PR #10537 review follow-up: some callers (e.g. ProjectController#apiProjectConfigGet) pass a
+        // fixed literal defformat rather than request.format itself. This pins down that the
+        // requestFormat-vs-allowed check still matters for that caller shape: when Accept doesn't
+        // resolve, request.format 'xml' (in allowed) must win over the fixed defformat 'json', while a
+        // request.format outside allowed correctly falls through to the fixed defformat.
+        given:
+        def request = GroovyMock(HttpServletRequest)
+        request.format >> reqFormat
+        request.getHeader('Accept') >> null
+        def response = Mock(HttpServletResponse)
+        def allowed = ['json', 'text', 'xml']
+
+        expect:
+        service.extractResponseFormat(request, response, allowed, defformat) == expected
+
+        where:
+        reqFormat | defformat | expected
+        'xml'     | 'json'    | 'xml'
+        'bogus'   | 'json'    | 'json'
+    }
+
+    def "jsonRenderDirlist"(){
+        when:
+        // Grails 7: Service returns Map directly, no need for JSONBuilder
+        def result = service.jsonRenderDirlist(
+                '',
+                {it},
+                {"http://localhost:8080/api/14/project/test/acl/${it}"},
+                ['blah.aclpolicy','adir/']
+        )
+        def parsed = result  // Already a Map
+
+        then:
+        parsed==[
+                resources:[
+                        [
+                                name:'blah.aclpolicy',
+                                path: 'blah.aclpolicy',
+                                type: 'file',
+                                href: 'http://localhost:8080/api/14/project/test/acl/blah.aclpolicy'
+
+                        ],
+                        [
+                                path:'adir/',
+                                type: 'directory',
+                                href: 'http://localhost:8080/api/14/project/test/acl/adir/'
+                        ]
+                ],
+                path:'',
+                type:'directory',
+                href:'http://localhost:8080/api/14/project/test/acl/']
+    }
+    def "xmlRenderDirList"(){
+        given:
+        def sw = new StringWriter()
+        def builder = new MarkupBuilder(sw)
+        when:
+        service.xmlRenderDirList(
+                '',
+                {it},
+                {"http://localhost:8080/api/14/project/test/acl/${it}"},
+                ['blah.aclpolicy','adir/'],
+                builder
+        )
+        def parsed=new XmlSlurper().parse(new StringReader(sw.toString()))
+
+        then:
+        parsed.'@path'.text()==''
+        parsed.'@type'.text()=='directory'
+        parsed.'@href'.text()=='http://localhost:8080/api/14/project/test/acl/'
+        parsed.contents.size()==1
+        parsed.contents.resource.size()==2
+        parsed.contents.resource[0].'@path'.text()=='blah.aclpolicy'
+        parsed.contents.resource[0].'@name'.text()=='blah.aclpolicy'
+        parsed.contents.resource[0].'@type'.text()=='file'
+        parsed.contents.resource[0].'@href'.text()=='http://localhost:8080/api/14/project/test/acl/blah.aclpolicy'
+        parsed.contents.resource[1].'@path'.text()=='adir/'
+        parsed.contents.resource[1].'@type'.text()=='directory'
+        parsed.contents.resource[1].'@href'.text()=='http://localhost:8080/api/14/project/test/acl/adir/'
+    }
+
+    def "renderJsonAclpolicyValidation"(){
+        when:
+        def validation=Stub(Validation){
+            isValid()>>false
+            getErrors()>>['file1[1]':['error1','error2'],'file2[1]':['error3','error4']]
+        }
+        // Grails 7: Service returns Map directly, no need for JSONBuilder
+        def result = service.renderJsonAclpolicyValidation(validation)
+        def parsed = result  // Already a Map
+        then:
+        parsed==[valid:false,
+        policies:[
+                [policy:'file1[1]',errors:['error1','error2']],
+                [policy:'file2[1]',errors:['error3','error4']]
+        ]]
+    }
+    def "renderXmlAclpolicyValidation"(){
+        given:
+        def sw = new StringWriter()
+        def builder = new MarkupBuilder(sw)
+        when:
+        def validation=Stub(Validation){
+            isValid()>>false
+            getErrors()>>['file1[1]':['error1','error2'],'file2[1]':['error3','error4']]
+        }
+        service.renderXmlAclpolicyValidation(
+                validation,
+                builder
+        )
+        def parsed=new XmlSlurper().parse(new StringReader(sw.toString()))
+        then:
+        parsed.name()=='validation'
+        parsed.'@valid'.text()=='false'
+        parsed.'policy'.size()==2
+        parsed.'policy'[0].'@id'.text()=='file1[1]'
+        parsed.'policy'[0].'error'.size()==2
+        parsed.'policy'[0].'error'[0].text()=='error1'
+        parsed.'policy'[0].'error'[1].text()=='error2'
+
+        parsed.'policy'[1].'@id'.text()=='file2[1]'
+        parsed.'policy'[1].'error'.size()==2
+        parsed.'policy'[1].'error'[0].text()=='error3'
+        parsed.'policy'[1].'error'[1].text()=='error4'
+
+    }
+
+    def "generateTokenExpirationDate"() {
+        given:
+        service.systemClock = Clock.fixed(Instant.ofEpochMilli(1000), ZoneId.of("Z"))
+        when:
+        def result = service.generateTokenExpirationDate(duration, max)
+        then:
+        result == expected
+        where:
+        duration | max | expected
+        123      | 200 | [date: new Date(124000), max: false, error: null]
+        123      | 100 | [date: new Date(101000), max: true, error: null]
+        0        | 100 | [date: new Date(101000), max: false, error: null]
+        200      | 0   | [date: new Date(201000), max: false, error: null]
+        0        | 0   | [date: null, max: false, error: null]
+
+    }
+
+    @Unroll
+    def "generateTokenExpirationDate rejects negative duration #duration"() {
+        given:
+        service.systemClock = Clock.fixed(Instant.ofEpochMilli(1000), ZoneId.of("Z"))
+
+        when:
+        def result = service.generateTokenExpirationDate(duration, 2592000L)
+
+        then:
+        result.error != null
+        result.date == null
+
+        where:
+        duration << [-1668537728L, -1L, Long.MIN_VALUE]
+    }
+
+    def "generateTokenExpirationDate handles large duration exceeding max"() {
+        given:
+        service.systemClock = Clock.fixed(Instant.ofEpochMilli(1000), ZoneId.of("Z"))
+        long hugeDuration = 86_399_999_999_222_400L
+
+        when:
+        def result = service.generateTokenExpirationDate(hugeDuration, 2592000L)
+
+        then:
+        result.max == true
+    }
+
+    def "generate user token unauthorized"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1'] as Set
+
+        def tokenTime = 3600
+
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        service.rundeckAuthContextEvaluator.authorizeApplicationResourceType(auth, 'apitoken', _) >> false
+        Exception e = thrown()
+        e.message =~ /Unauthorized/
+    }
+
+    def "check token authorization unauthorized"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1'] as Set
+
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+
+        when:
+        def result = service.checkTokenAuthorization(auth, tokenUser, tokenRoles)
+        then:
+        service.rundeckAuthContextEvaluator.authorizeApplicationResourceType(auth, 'apitoken', _) >> false
+        !result.authorized
+        result.message =~ /Unauthorized/
+    }
+
+    def "generate user token wrong username unauthorized"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenRoles = ['role1'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        service.rundeckAuthContextEvaluator.authorizeApplicationResourceType(auth, 'apitoken', 'generate_user_token') >> true
+        service.userService.findOrCreateUser('auser') >> user
+        Exception e = thrown()
+        e.message =~ /Unauthorized/
+
+        where:
+        tokenUser  | _
+        'notauser' | _
+    }
+
+    def "check token auth wrong username unauthorized"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenRoles = ['role1'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.checkTokenAuthorization(auth, tokenUser, tokenRoles)
+        then:
+        service.rundeckAuthContextEvaluator.authorizeApplicationResourceType(auth, 'apitoken', 'generate_user_token') >> true
+        service.userService.findOrCreateUser('auser') >> user
+        !result.authorized
+        result.message =~ /Unauthorized/
+
+        where:
+        tokenUser  | _
+        'notauser' | _
+    }
+
+    def "generate user token exceed max duration"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1'] as Set
+
+        def tokenTime = 124
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+            service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth,
+                                                                                AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> true
+        service.configurationService.getString("api.tokens.duration.max", null) >> '123'
+        service.userService.findOrCreateUser('auser') >> user
+        Exception e = thrown()
+        e.message =~ /Duration exceeds maximum allowed: /
+    }
+
+    @Unroll
+    def "generate user token own groups any auth"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser').save()
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        result != null
+        result.getOwnerName() == user.login
+        AuthenticationTokenUtils.generateAuthRoles(result.getAuthRolesSet()) == 'role1'
+        result.getAuthRolesSet() == tokenRoles
+        result.expiration != null
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >>
+                (tokenaction == 'admin')
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, AuthConstants.ACTION_GENERATE_SERVICE_TOKEN) >>
+                ((tokenaction == 'generate_service_token'))
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, tokenaction) >> true
+
+        service.userService.findOrCreateUser('auser') >> user
+
+        where:
+        tokenaction              | _
+        'admin'                  | _
+        'generate_user_token'    | _
+        'generate_service_token' | _
+    }
+
+    def "generate webhook token defaults to SECURED mode and hashes the persisted value"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser').save()
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles, false, AuthTokenType.WEBHOOK)
+        then:
+        result != null
+        result.getTokenMode() == org.rundeck.app.data.model.v1.authtoken.AuthTokenMode.SECURED
+        result.getClearToken() != null
+        result.getToken() == AuthenticationTokenUtils.encodeTokenValue(result.getClearToken(), org.rundeck.app.data.model.v1.authtoken.AuthTokenMode.SECURED)
+        result.getToken() != result.getClearToken()
+        AuthToken.findByUuid(result.getUuid()).tokenMode == org.rundeck.app.data.model.v1.authtoken.AuthTokenMode.SECURED
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> true
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(*_) >> true
+
+        service.userService.findOrCreateUser('auser') >> user
+    }
+
+    @Unroll
+    def "generate service token service groups #tokenaction auth"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1', 'svc_roleA'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        result != null
+        result.getOwnerName() == user.login
+        result.authRolesSet == AuthenticationTokenUtils.parseAuthRoles('role1,svc_roleA')
+        result.getAuthRolesSet() == tokenRoles
+        result.expiration != null
+        if (tokenaction == 'admin') {
+            1 * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> true
+            0 * service.rundeckAuthContextEvaluator.authorizeApplicationResource(*_)
+        } else {
+            1 * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, tokenaction) >> true
+            1 * service.rundeckAuthContextEvaluator.authorizeApplicationResource(
+                    auth,
+                    [type: 'apitoken', username: tokenUser, roles: 'svc_roleA'],
+                    'create'
+            ) >> true
+        }
+        service.userService.findOrCreateUser('auser') >> user
+
+        where:
+        tokenaction              | _
+        'admin'                  | _
+        'generate_service_token' | _
+    }
+
+    def "generate service token service username service/admin auth"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenRoles = ['role1', 'svc_roleA'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService) {
+            findOrCreateUser(tokenUser) >> new User(login: tokenUser).save()
+        }
+        provider.userDataProvider = Mock(GormUserDataProvider) {
+            findOrCreateUser(tokenUser) >> new User(login: tokenUser).save()
+        }
+        service.tokenDataProvider = provider
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        result != null
+        result.getOwnerName() == tokenUser
+        result.authRolesSet == AuthenticationTokenUtils.parseAuthRoles('role1,svc_roleA')
+        result.getAuthRolesSet() == tokenRoles
+        result.expiration != null
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >>
+                (tokenaction == 'admin')
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, tokenaction) >> true
+        if (tokenaction == 'admin') {
+            0 * service.rundeckAuthContextEvaluator.authorizeApplicationResource(*_)
+        } else {
+            1 * service.rundeckAuthContextEvaluator.authorizeApplicationResource(
+                    auth,
+                    [type: 'apitoken', username: tokenUser, roles: 'svc_roleA'],
+                    'create'
+            ) >> true
+        }
+
+        where:
+        tokenaction              | tokenUser
+        'admin'                  | 'someuser'
+        'generate_service_token' | 'someuser'
+    }
+
+    def "generate service token service username not allowed username"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenRoles = ['role1', 'svc_roleA'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService) {
+            findOrCreateUser(tokenUser) >> new User(login: tokenUser)
+        }
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, tokenaction) >> true
+        1 * service.rundeckAuthContextEvaluator.authorizeApplicationResource(
+                auth,
+                ['type': 'apitoken', 'username': 'someBuser', 'roles': 'svc_roleA'],
+                AuthConstants.ACTION_CREATE
+        ) >> false
+
+        Exception e = thrown()
+        e.message =~ /Unauthorized: create API token for $tokenUser with roles/
+
+        where:
+        tokenaction              | tokenUser
+        'generate_service_token' | 'someBuser'
+    }
+
+
+    def "generate user token any groups admin auth"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenRoles = ['role1', 'svc_roleA', 'any_role'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: tokenUser).save()
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        result != null
+        result.getOwnerName() == user.login
+        result.getAuthRolesSet() == tokenRoles
+        result.expiration != null
+        service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> true
+        service.userService.findOrCreateUser(tokenUser) >> user
+        provider.userDataProvider.findOrCreateUser(tokenUser) >> user
+
+
+        where:
+         tokenUser | _
+         'auser'   | _
+         'anyuser' | _
+    }
+
+    @Unroll
+    def "generate user token any groups only #tokenaction auth"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = ['role1', 'svc_roleA', 'any_role'] as Set
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, AuthConstants.ACTION_GENERATE_SERVICE_TOKEN) >>
+                (tokenaction == 'generate_service_token')
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, tokenaction) >> true
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, _, AuthConstants.ACTION_CREATE) >> false
+        service.userService.findOrCreateUser('auser') >> user
+        Exception e = thrown()
+        e.message =~ expectMessage
+
+        where:
+        tokenaction              | expectMessage
+        'generate_service_token' | /Unauthorized: create API token for auser with roles/
+        'generate_user_token'    | /Unauthorized: create API token for auser with roles/
+    }
+
+    @Unroll
+    def "generate user token no roles as owner uses auth roles"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'auser'
+        def tokenRoles = null
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, AuthConstants.ACTION_GENERATE_SERVICE_TOKEN) >>
+                (tokeaction == 'generate_service_token')
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, AuthConstants.ACTION_GENERATE_USER_TOKEN) >>
+                (tokeaction == 'generate_user_token')
+
+        service.userService.findOrCreateUser('auser') >> user
+        result.getAuthRolesSet() == (['role1', 'role2'] as Set)
+        where:
+        tokeaction               | _
+        'generate_service_token' | _
+        'generate_user_token'    | _
+
+    }
+
+    @Unroll
+    def "generate service token no roles as other user is error"() {
+        given:
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'auser'
+            getRoles() >> (['role1', 'role2'] as Set)
+        }
+        def tokenUser = 'otheruser'
+        def tokenRoles = null
+
+        def tokenTime = 3600
+
+        service.rundeckAuthContextEvaluator=Mock(AppAuthContextEvaluator)
+        service.configurationService = Mock(ConfigurationService)
+        service.userService = Mock(UserService)
+        def user = new User(login: 'auser')
+
+        when:
+        def result = service.generateUserToken(auth, tokenTime, tokenUser, tokenRoles)
+        then:
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResourceAny(auth, AuthConstants.RESOURCE_TYPE_USER, [AuthConstants.ACTION_ADMIN, AuthConstants.ACTION_APP_ADMIN]) >> false
+        _ * service.rundeckAuthContextEvaluator.authorizeApplicationResource(auth, AuthConstants.RESOURCE_TYPE_APITOKEN, AuthConstants.ACTION_GENERATE_SERVICE_TOKEN) >>
+                true
+
+        Exception e = thrown()
+        e.message =~ /Roles are required/
+
+    }
+
+    def "render success xml response unwrapped"() {
+        given:
+        // Grails 7: Jakarta EE namespace (jakarta.servlet vs javax.servlet)
+        def response = Mock(jakarta.servlet.http.HttpServletResponse)
+        def byteArrayStream = new ByteArrayOutputStream()
+        def servletOutputStream = new jakarta.servlet.ServletOutputStream() {
+            @Override
+            void write(int b) throws IOException {
+                byteArrayStream.write(b)
+            }
+            
+            @Override
+            boolean isReady() { true }
+            
+            @Override
+            void setWriteListener(jakarta.servlet.WriteListener writeListener) {}
+        }
+        
+        when:
+        def closureCalled = false
+        service.renderSuccessXml(response) {
+            closureCalled = true
+            responseData(test:true){
+                value('something')
+            }
+        }
+
+        then:
+        1 * response.outputStream >> servletOutputStream
+        1 * response.setContentType('application/xml')
+        1 * response.setCharacterEncoding('UTF-8')
+        1 * response.setHeader('X-Rundeck-API-Version', _)
+        
+        def slurper = new XmlSlurper()
+        def gpath = slurper.parseText(byteArrayStream.toString())
+        gpath.name() == 'responseData'
+        gpath.'@test'.text() == 'true'
+        gpath.value.text() == 'something'
+        closureCalled
+    }
+
+    private GormTokenDataProvider setupTokenProvider(String userId, List<AuthToken> tokens) {
+        setupTokenProvider(userId, AuthTokenType.USER, tokens)
+    }
+
+    private GormTokenDataProvider setupTokenProvider(String userId = null, AuthTokenType type = null, List<AuthToken> tokens = []) {
+        def mockProvider = Mock(GormTokenDataProvider)
+        if (userId) {
+            mockProvider.findAllByUser(userId) >> tokens
+            mockProvider.findAllByUserAndType(userId, type) >> tokens.findAll { type ? it.type == type : true }
+        }
+        service.tokenDataProvider = mockProvider
+        return mockProvider
+    }
+
+    def "removeAllTokensByUser removes all tokens"() {
+        given:
+        def user = new User(login: 'testuser').save()
+        def userId = user.id.toString()
+        def provider = setupTokenProvider(userId, [
+                new AuthToken(uuid: 'token1', creator: 'admin', authRoles: 'admin', user: userId, type: AuthTokenType.USER),
+                new AuthToken(uuid: 'token2', creator: 'admin', authRoles: 'admin', user: userId, type: AuthTokenType.USER)
+        ])
+
+        when:
+        def result = service.removeAllTokensByUser(userId)
+
+        then:
+        result == 2
+        2 * provider.delete(_)
+    }
+
+    def "removeAllTokensByUser handles empty token list"() {
+        given:
+        def user = new User(login: 'testuser').save()
+        def userId = user.id.toString()
+        def provider = setupTokenProvider(userId, [])
+
+        when:
+        def result = service.removeAllTokensByUser(userId)
+
+        then:
+        result == 0
+        0 * provider.delete(_)
+    }
+
+    def "removeAllTokensByUser should remove only user type tokens"() {
+        given:
+        def user = new User(login: 'testuser').save()
+        def userId = user.id.toString()
+        def provider = setupTokenProvider(userId, [
+                new AuthToken(uuid: 'token1', creator: 'admin', authRoles: 'admin', user: userId, type: AuthTokenType.USER),
+                new AuthToken(uuid: 'token2', creator: 'admin', authRoles: 'admin', user: userId, type: AuthTokenType.WEBHOOK),
+                new AuthToken(uuid: 'token2', creator: 'admin', authRoles: 'admin', user: userId, type: AuthTokenType.RUNNER)
+        ])
+
+        when:
+        def result = service.removeAllTokensByUser(userId)
+
+        then:
+        result == 1
+        1 * provider.delete(_)
+    }
+
+    def "removeAllTokensByUser handles provider error"() {
+        given:
+        def user = new User(login: 'testuser').save()
+        def userId = user.id.toString()
+        def provider = setupTokenProvider()
+        provider.findAllByUser(userId) >> { throw new RuntimeException("test error") }
+
+        when:
+        service.removeAllTokensByUser(userId)
+
+        then:
+        thrown(RuntimeException)
+    }
+}

@@ -1,0 +1,462 @@
+package org.rundeck.tests.functional.selenium.project
+
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
+import org.rundeck.util.annotations.SeleniumCoreTest
+import org.rundeck.util.api.responses.execution.Execution
+import org.rundeck.util.common.WaitingTime
+import org.rundeck.util.common.execution.ExecutionUtils
+import org.rundeck.util.common.jobs.JobUtils
+import org.rundeck.util.container.SeleniumBase
+import org.rundeck.util.gui.common.navigation.NavLinkTypes
+import org.rundeck.util.gui.common.navigation.NavProjectSettings
+import org.rundeck.util.gui.pages.activity.ActivityPage
+import org.rundeck.util.gui.pages.home.HomePage
+import org.rundeck.util.gui.pages.jobs.JobListPage
+import org.rundeck.util.gui.pages.login.LoginPage
+import org.rundeck.util.gui.pages.project.DashboardPage
+import org.rundeck.util.gui.pages.project.ProjectEditPage
+import org.rundeck.util.gui.pages.project.SideBarPage
+import spock.lang.Ignore
+
+@SeleniumCoreTest
+class ExecutionModeSpec extends SeleniumBase{
+
+    /**
+     * It disables executions via edit configuration file, then checks for the job to have the run button disabled
+     * then enables executions and checks for the run job button to be shown
+     */
+    def "disable execution at project level"(){
+        given:
+            def projectName = "disabledExecutionsProject"
+            setupProject(projectName)
+            def projectEditPage = page ProjectEditPage
+            def dashboardPage = page DashboardPage
+            def homePage = page HomePage
+            def loginPage = page LoginPage
+            def jobListPage = page JobListPage
+            def sideBarPage = page SideBarPage
+            def yamlJob = """
+                        -
+                          project: ${projectName}
+                          loglevel: INFO
+                          sequence:
+                            keepgoing: false
+                            strategy: node-first
+                            commands:
+                            - exec: echo hello there
+                          description: ''
+                          name: test-job
+                        """
+            def pathToJob = JobUtils.generateFileToImport(yamlJob, "yaml")
+            def multipartBody = new MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("xmlBatch", new File(pathToJob).name, RequestBody.create(new File(pathToJob), MultipartBody.FORM))
+                    .build()
+            client.postWithMultipart("/project/${projectName}/jobs/import?format=yaml&dupeOption=skip", multipartBody)
+        when:
+            loginPage.go()
+            loginPage.login(TEST_USER, TEST_PASS)
+            projectEditPage.go("/project/${projectName}/configure")
+            projectEditPage.save()
+            dashboardPage.loadDashboardForProject(projectName)
+            projectEditPage.validatePage(dashboardPage.loadPath)
+            projectEditPage.go("/project/${projectName}/configure")
+            projectEditPage.clickEditConfigurationFile()
+            projectEditPage.replaceConfiguration("project.disable.executions=false", "project.disable.executions=true")
+            projectEditPage.save()
+            projectEditPage.validateConfigFileSave()
+            sideBarPage.goTo NavLinkTypes.JOBS
+        then:
+            jobListPage.expectExecutionsDisabled()
+            jobListPage.getCountJobList() == 0
+        when:
+            projectEditPage.go("/project/${projectName}/configure")
+            projectEditPage.clickEditConfigurationFile()
+            projectEditPage.replaceConfiguration("project.disable.executions=true", "project.disable.executions=false")
+            projectEditPage.save()
+            projectEditPage.validateConfigFileSave()
+            sideBarPage.goTo NavLinkTypes.JOBS
+        then:
+            jobListPage.getCountJobList() == 1
+        cleanup:
+        deleteProject(projectName)
+    }
+
+    /**
+     * It disables executions via UI, then checks for the job to have the run button disabled
+     * then enables executions and checks for the run job button to be shown
+     */
+    def "disable execution at project level UI"(){
+        given:
+        def projectName = "disabledExecutionsProjectUI"
+        setupProject(projectName)
+        def projectEditPage = page ProjectEditPage
+        def homePage = page HomePage
+        def loginPage = page LoginPage
+        def jobListPage = page JobListPage
+        def sideBarPage = page SideBarPage
+        def yamlJob = """
+                        -
+                          project: ${projectName}
+                          loglevel: INFO
+                          sequence:
+                            keepgoing: false
+                            strategy: node-first
+                            commands:
+                            - exec: echo hello there
+                          description: ''
+                          name: test-job
+                        """
+        def pathToJob = JobUtils.generateFileToImport(yamlJob, "yaml")
+        def multipartBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("xmlBatch", new File(pathToJob).name, RequestBody.create(new File(pathToJob), MultipartBody.FORM))
+                .build()
+        client.postWithMultipart("/project/${projectName}/jobs/import?format=yaml&dupeOption=skip", multipartBody)
+        when:
+        loginPage.go()
+        loginPage.login(TEST_USER, TEST_PASS)
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickNavLink(NavProjectSettings.EXEC_MODE)
+        projectEditPage.clickExecutionMode()
+        projectEditPage.save()
+        sideBarPage.goTo NavLinkTypes.JOBS
+        then:
+        jobListPage.expectExecutionsDisabled()
+        jobListPage.getCountJobList() == 0
+        when:
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickNavLink(NavProjectSettings.EXEC_MODE)
+        projectEditPage.clickExecutionMode()
+        projectEditPage.save()
+        sideBarPage.goTo NavLinkTypes.JOBS
+        then:
+        jobListPage.getCountJobList() == 1
+        cleanup:
+        deleteProject(projectName)
+    }
+
+    /**
+     * It disables schedules via edit configuration file, then checks for the job to have the run button to be enabled
+     * and pause icon to be shown (indicating that schedules are disabled)
+     * then enables schedules and check the activity page
+     */
+    @Ignore("Flaky: replaced by 'disable schedules at project level v2'")
+    def "disable schedules at project level"(){
+        given:
+        def projectName = "disabledSchedulesProject"
+        setupProject(projectName)
+        def projectEditPage = page ProjectEditPage
+        def dashboardPage = page DashboardPage
+        def homePage = page HomePage
+        def loginPage = page LoginPage
+        def jobListPage = page JobListPage
+        def sideBarPage = page SideBarPage
+        def activityPage = page ActivityPage
+        def jobName = "test-job-schedules"
+        def yamlJob = """
+                        -
+                          project: ${projectName}
+                          loglevel: INFO
+                          sequence:
+                            keepgoing: false
+                            strategy: node-first
+                            commands:
+                            - exec: echo hello there
+                          description: ''
+                          name: ${jobName}
+                          schedule:
+                            month: '*'
+                            time:
+                              hour: '*'
+                              minute: '*'
+                              seconds: '*/2'
+                            weekday:
+                              day: '*'
+                            year: '*'
+                          scheduleEnabled: true
+                        """
+        def pathToJob = JobUtils.generateFileToImport(yamlJob, "yaml")
+        def multipartBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("xmlBatch", new File(pathToJob).name, RequestBody.create(new File(pathToJob), MultipartBody.FORM))
+                .build()
+        client.postWithMultipart("/project/${projectName}/jobs/import?format=yaml&dupeOption=skip", multipartBody)
+        when:
+        loginPage.go()
+        loginPage.login(TEST_USER, TEST_PASS)
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.save()
+        dashboardPage.loadDashboardForProject(projectName)
+        projectEditPage.validatePage(dashboardPage.loadPath)
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickEditConfigurationFile()
+        projectEditPage.replaceConfiguration("project.disable.schedule=false", "project.disable.schedule=true")
+        projectEditPage.save()
+        projectEditPage.validateConfigFileSave()
+        // Wait for all executions to finish before checking schedule status
+        // This ensures the schedule change has propagated and any pending executions are cancelled
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName),
+                verifyForAll(ExecutionUtils.Verifiers.executionFinished()))
+        // Full page navigation (not SPA routing) to force Vue store cache invalidation so
+        // the updated projectSchedulesEnabled value is fetched from the API.
+        jobListPage.go()
+        then:
+        jobListPage.expectScheduleDisabled()
+        when:
+        sideBarPage.goTo NavLinkTypes.ACTIVITY
+        def executions = activityPage.getActivityRowsByJobName(jobName).size()
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickEditConfigurationFile()
+        projectEditPage.replaceConfiguration("project.disable.schedule=true", "project.disable.schedule=false")
+        projectEditPage.save()
+        projectEditPage.validateConfigFileSave()
+        // Wait for at least one execution to start (proves schedule is re-enabled)
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName),
+                { List<Execution> execs ->  execs.any(ExecutionUtils.Verifiers.executionRunning()) },
+                WaitingTime.EXCESSIVE)
+        // Disable schedule via API to stop accumulation; the */2s schedule generates
+        // executions faster than the EXCESSIVE timeout can drain them otherwise.
+        updateConfigurationProject(projectName, ["project.disable.schedule": "true"])
+        // Waits for all executions to finish (finite now that no new ones are created)
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName),
+                verifyForAll(ExecutionUtils.Verifiers.executionFinished()),
+                WaitingTime.EXCESSIVE)
+        sideBarPage.goTo NavLinkTypes.ACTIVITY
+        then:
+        executions < activityPage.getActivityRowsByJobName(jobName).size()
+        cleanup:
+        updateConfigurationProject(projectName, [
+                "project.disable.schedule": "true",
+                "project.later.schedule.enable": "false",
+                "project.disable.executions": "true"
+        ])
+        // Waits for all executions to finish
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName),
+                verifyForAll(ExecutionUtils.Verifiers.executionFinished()))
+        deleteProject(projectName)
+    }
+
+    /**
+     * It disables schedules via UI, then checks for the job to have the run button to be enabled
+     * and pause icon to be shown (indicating that schedules are disabled)
+     * then enables schedules and check the activity page
+     */
+    def "disable schedules at project level UI"(){
+        given:
+        def projectName = "disabledSchedulesProjectUI"
+        setupProject(projectName)
+        def projectEditPage = page ProjectEditPage
+        def homePage = page HomePage
+        def loginPage = page LoginPage
+        def jobListPage = page JobListPage
+        def sideBarPage = page SideBarPage
+        def activityPage = page ActivityPage
+        def jobName = "test-job-schedules"
+        def yamlJob = """
+                        -
+                          project: ${projectName}
+                          loglevel: INFO
+                          sequence:
+                            keepgoing: false
+                            strategy: node-first
+                            commands:
+                            - exec: echo hello there
+                          description: ''
+                          name: ${jobName}
+                          schedule:
+                            month: '*'
+                            time:
+                              hour: '*'
+                              minute: '*'
+                              seconds: '*/2'
+                            weekday:
+                              day: '*'
+                            year: '*'
+                          scheduleEnabled: true
+                        """
+        def pathToJob = JobUtils.generateFileToImport(yamlJob, "yaml")
+        def multipartBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("xmlBatch", new File(pathToJob).name, RequestBody.create(new File(pathToJob), MultipartBody.FORM))
+                .build()
+        client.postWithMultipart("/project/${projectName}/jobs/import?format=yaml&dupeOption=skip", multipartBody)
+        when:
+        loginPage.go()
+        loginPage.login(TEST_USER, TEST_PASS)
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickNavLink(NavProjectSettings.EXEC_MODE)
+        projectEditPage.clickScheduleMode()
+        projectEditPage.save()
+        // The save button click returns before the backend has necessarily committed the new
+        // project.disable.schedule value. Wait for the config to actually be persisted before
+        // navigating, instead of waiting on an unrelated condition (in-flight executions) that
+        // does not guarantee the save completed.
+        waitFor(
+            { client.get("/project/${projectName}/config", Map) },
+            { Map config -> config?.get("project.disable.schedule") == "true" }
+        )
+        // Navigate directly to jobs page to get a fresh DOM reflecting current server state
+        jobListPage.go("/project/${projectName}/jobs")
+        then:
+        jobListPage.expectScheduleDisabled()
+        when:
+        sideBarPage.goTo NavLinkTypes.ACTIVITY
+        def executions = activityPage.getActivityRowsByJobName(jobName).size()
+        // Capture API execution count before re-enabling so we can detect new executions by count.
+        // We cannot rely on the "running" state: the echo job completes in milliseconds and may
+        // already be finished before the first poll fires on a slow CI runner.
+        // Use max=100 to avoid the default page-size cap (20), which would prevent count-based detection
+        // from working once a project already has 20+ executions from prior schedule runs.
+        def executionCountBeforeEnable = ExecutionUtils.Retrievers.executionsForProject(client, projectName, "max=100").get().size()
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickNavLink(NavProjectSettings.EXEC_MODE)
+        projectEditPage.clickScheduleMode()
+        projectEditPage.save()
+        // Wait for at least one new execution to appear (running or already finished)
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName, "max=100"),
+                { List<Execution> execs -> execs.size() > executionCountBeforeEnable },
+                WaitingTime.EXCESSIVE)
+        // Disable schedule via API to stop accumulation; the */2s schedule generates
+        // executions faster than the EXCESSIVE timeout can drain them otherwise.
+        updateConfigurationProject(projectName, ["project.disable.schedule": "true"])
+        // Waits for all executions to finish (finite now that no new ones are created)
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName, "max=100"),
+                verifyForAll(ExecutionUtils.Verifiers.executionFinished()),
+                WaitingTime.EXCESSIVE)
+        sideBarPage.goTo NavLinkTypes.ACTIVITY
+        then:
+        executions < activityPage.getActivityRowsByJobName(jobName).size()
+        cleanup:
+        updateConfigurationProject(projectName, [
+                "project.disable.schedule": "true",
+                "project.later.schedule.enable": "false",
+                "project.disable.executions": "true"
+        ])
+        // Waits for all executions to finish
+        waitFor(ExecutionUtils.Retrievers.executionsForProject(client, projectName),
+                verifyForAll(ExecutionUtils.Verifiers.executionFinished()))
+        deleteProject(projectName)
+    }
+
+    /**
+     * V2 — written from scratch.
+     *
+     * Verifies that disabling project-level schedules through the Execution Mode settings page
+     * causes the Jobs list to display the schedule-disabled indicator, and that re-enabling
+     * restores normal schedule execution.
+     *
+     * Flow (confirmed via code inspection of ProjectEditPage, JobScheduleInfo.vue, JobListPage):
+     *  1. Navigate to Project Configure → Execution Mode tab
+     *  2. Toggle "Disable Schedule" checkbox and save
+     *  3. Load the Jobs page via a direct URL (full page load) to clear the Vue JobPageStore
+     *     cachedApi() in-memory cache — SPA navigation would reuse the stale cached value
+     *  4. Assert span.scheduletime.disabled is present (schedule-off indicator)
+     *  5. Re-enable schedules via the same UI path
+     *  6. Wait (API) for at least one new execution proving the schedule fired
+     *  7. Stop accumulation via API and drain
+     *  8. Assert execution count grew
+     */
+    def "disable schedules at project level v2"() {
+        given:
+        def projectName = "scheduleDisableV2"
+        setupProject(projectName)
+        def projectEditPage = page ProjectEditPage
+        def loginPage      = page LoginPage
+        def jobListPage    = page JobListPage
+        def jobName = "v2-scheduled-job"
+        def yamlJob = """
+                        -
+                          project: ${projectName}
+                          loglevel: INFO
+                          sequence:
+                            keepgoing: false
+                            strategy: node-first
+                            commands:
+                            - exec: echo hello
+                          description: ''
+                          name: ${jobName}
+                          schedule:
+                            month: '*'
+                            time:
+                              hour: '*'
+                              minute: '*'
+                              seconds: '*/2'
+                            weekday:
+                              day: '*'
+                            year: '*'
+                          scheduleEnabled: true
+                        """
+        def pathToJob = JobUtils.generateFileToImport(yamlJob, "yaml")
+        client.postWithMultipart(
+            "/project/${projectName}/jobs/import?format=yaml&dupeOption=skip",
+            new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("xmlBatch", new File(pathToJob).name,
+                    RequestBody.create(new File(pathToJob), MultipartBody.FORM))
+                .build()
+        )
+
+        when: "navigate to Execution Mode settings and disable schedules"
+        loginPage.go()
+        loginPage.login(TEST_USER, TEST_PASS)
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickNavLink(NavProjectSettings.EXEC_MODE)
+        projectEditPage.clickScheduleMode()
+        projectEditPage.save()
+        // The save button click returns before the backend has necessarily committed the new
+        // project.disable.schedule value. Wait for the config to actually be persisted before
+        // navigating, instead of waiting on an unrelated condition (in-flight executions) that
+        // does not guarantee the save completed.
+        waitFor(
+            { client.get("/project/${projectName}/config", Map) },
+            { Map config -> config?.get("project.disable.schedule") == "true" }
+        )
+
+        and: "load the Jobs page via direct URL so Vue store cache is cleared"
+        jobListPage.go("/project/${projectName}/jobs")
+
+        then: "the job row shows the schedule-disabled indicator"
+        jobListPage.expectScheduleDisabled()
+
+        when: "re-enable schedules via Execution Mode settings"
+        def baselineCount = ExecutionUtils.Retrievers
+            .executionsForProject(client, projectName, "max=100").get().size()
+        projectEditPage.go("/project/${projectName}/configure")
+        projectEditPage.clickNavLink(NavProjectSettings.EXEC_MODE)
+        projectEditPage.clickScheduleMode()
+        projectEditPage.save()
+
+        and: "wait for the schedule to fire at least once"
+        waitFor(
+            ExecutionUtils.Retrievers.executionsForProject(client, projectName, "max=100"),
+            { List<Execution> execs -> execs.size() > baselineCount },
+            WaitingTime.EXCESSIVE
+        )
+
+        and: "stop accumulation and drain"
+        updateConfigurationProject(projectName, ["project.disable.schedule": "true"])
+        waitFor(
+            ExecutionUtils.Retrievers.executionsForProject(client, projectName, "max=100"),
+            verifyForAll(ExecutionUtils.Verifiers.executionFinished()),
+            WaitingTime.EXCESSIVE
+        )
+
+        then: "new executions were produced"
+        ExecutionUtils.Retrievers.executionsForProject(client, projectName, "max=100")
+            .get().size() > baselineCount
+
+        cleanup:
+        updateConfigurationProject(projectName, [
+            "project.disable.schedule"     : "true",
+            "project.later.schedule.enable": "false",
+            "project.disable.executions"   : "true"
+        ])
+        waitFor(
+            ExecutionUtils.Retrievers.executionsForProject(client, projectName),
+            verifyForAll(ExecutionUtils.Verifiers.executionFinished())
+        )
+        deleteProject(projectName)
+    }
+}

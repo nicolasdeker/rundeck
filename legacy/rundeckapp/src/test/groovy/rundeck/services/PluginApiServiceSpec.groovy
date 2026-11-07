@@ -1,0 +1,761 @@
+/*
+ * Copyright 2018 Rundeck, Inc. (http://rundeck.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package rundeck.services
+
+import com.dtolabs.rundeck.core.common.Framework
+import com.dtolabs.rundeck.core.plugins.DescribedPlugin
+import com.dtolabs.rundeck.core.plugins.PluginMetadata
+import com.dtolabs.rundeck.core.plugins.PluginUtils
+import com.dtolabs.rundeck.core.plugins.ServiceProviderLoader
+import com.dtolabs.rundeck.core.plugins.configuration.Description
+import com.dtolabs.rundeck.core.plugins.configuration.PluginOutputMetadata
+import com.dtolabs.rundeck.core.plugins.configuration.Property
+import com.dtolabs.rundeck.core.plugins.configuration.StringRenderingConstants
+import com.dtolabs.rundeck.plugins.rundeck.UIPlugin
+import com.dtolabs.rundeck.plugins.util.PropertyBuilder
+import com.dtolabs.rundeck.server.plugins.RundeckPluginRegistry
+import grails.testing.services.ServiceUnitTest
+import grails.testing.web.GrailsWebUnitTest
+import grails.web.mapping.LinkGenerator
+import rundeck.codecs.MarkdownCodec
+import rundeck.codecs.SanitizedHTMLCodec
+import spock.lang.Specification
+
+import java.text.SimpleDateFormat
+
+class PluginApiServiceSpec extends Specification implements ServiceUnitTest<PluginApiService>, GrailsWebUnitTest {
+    String fakePluginId = "Fake Plugin".encodeAsSHA256().substring(0,12)
+
+    void "list plugins"() {
+        given:
+        messageSource.addMessage("framework.service.Notification.description",Locale.ENGLISH,"Triggered when a Job starts, succeeds, or fails.")
+        def fwksvc = Mock(FrameworkService)
+        def fwk = Mock(Framework)
+        fwksvc.getRundeckFramework() >> fwk
+        fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+        service.frameworkService = fwksvc
+        service.rundeckPluginRegistry = Mock(RundeckPluginRegistry)
+        service.uiPluginService = Mock(UiPluginService)
+        service.grailsLinkGenerator = Mock(LinkGenerator)
+
+        def pluginDescs = [
+                "Notification": [new FakePluginDescription()]
+        ]
+        def pluginData = [
+                descriptions        : pluginDescs,
+                serviceDefaultScopes: [],
+                bundledPlugins      : [],
+                embeddedFilenames   : [],
+                specialConfiguration: [],
+                specialScoping      : [],
+                uiPluginProfiles    : []
+        ]
+        def fakeMeta = new FakePluginMetadata()
+
+        service.metaClass.listPluginsDetailed = { -> pluginData }
+        service.metaClass.getLocale = { -> Locale.ENGLISH }
+
+        when:
+        1 * service.rundeckPluginRegistry.getPluginMetadata(_,_) >> fakeMeta
+        1 * service.uiPluginService.getProfileFor(_, _) >> [icon: 'foo']
+        1 * service.grailsLinkGenerator.link(_) >> 'http://localhost:8080/icon'
+        def response = service.listPlugins()
+        def service = response[0]
+        def entry = service.providers[0]
+
+        then:
+        response.size() == 1
+        service.service == "Notification"
+        service.desc == "Triggered when a Job starts, succeeds, or fails."
+        service.providers.size() == 1
+        entry.pluginId == fakePluginId
+        entry.name == "fake"
+        entry.title == "Fake Plugin"
+        entry.description == "This is the best fake plugin"
+        entry.highlightedOrder == 1
+        entry.isHighlighted == true
+        entry.builtin == false
+        entry.pluginVersion == "1.0"
+        entry.pluginDate == 1534253342000
+        entry.enabled == true
+        entry.iconUrl == 'http://localhost:8080/icon'
+    }
+
+    def "list installed plugin ids"() {
+        given:
+        messageSource.addMessage("framework.service.Notification.description",Locale.ENGLISH,"Triggered when a Job starts, succeeds, or fails.")
+        def fwksvc = Mock(FrameworkService)
+        def fwk = Mock(Framework)
+        fwksvc.getRundeckFramework() >> fwk
+        fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+        service.frameworkService = fwksvc
+        service.pluginService = Mock(PluginService)
+        service.rundeckPluginRegistry = Mock(RundeckPluginRegistry)
+        service.uiPluginService = Mock(UiPluginService)
+        service.grailsLinkGenerator = Mock(LinkGenerator)
+
+        def pluginDescs = [
+                "Notification": [new FakePluginDescription()]
+        ]
+        def pluginData = [
+                descriptions        : pluginDescs,
+                serviceDefaultScopes: [],
+                bundledPlugins      : [],
+                embeddedFilenames   : [],
+                specialConfiguration: [],
+                specialScoping      : [],
+                uiPluginProfiles    : []
+        ]
+        def fakeMeta = new FakePluginMetadata()
+
+        service.metaClass.listPluginsDetailed = { -> pluginData }
+        service.metaClass.getLocale = { -> Locale.ENGLISH }
+
+        when:
+        String uipluginid = PluginUtils.generateShaIdFromName("oneuiplugin")
+        def uiplugin = Stub(UIPlugin)
+        def uiplugindesc = Stub(Description)
+        def uiMeta = Stub(PluginMetadata) {
+            getPluginId() >> uipluginid
+        }
+        1 * service.pluginService.listPlugins(_,_) >> ["oneuiplugin":new FakeUIDescribedPlugin(uiplugin,uiplugindesc,"oneuiplugin")]
+        1 * service.uiPluginService.getProfileFor(_, _) >> [icon: 'foo']
+        1 * service.grailsLinkGenerator.link(_) >> 'http://localhost:8080/icon'
+        1 * service.rundeckPluginRegistry.getPluginMetadata('Notification',_) >> fakeMeta
+        1 * service.rundeckPluginRegistry.getPluginMetadata('UI',_) >> uiMeta
+        def idList = service.listInstalledPluginIds()
+
+        then:
+        idList.size() == 2
+        idList.keySet().contains(uipluginid)
+    }
+
+    def "plugin Property Map"() {
+        given:
+            service.uiPluginService = Mock(UiPluginService)
+            def prop = PropertyBuilder.builder()
+                                      .name("prop1")
+                                      .title("Property 1")
+                                      .description("A fake property for the fake plugin")
+                                      .required(true)
+                                      .defaultValue("alpha")
+                                      .values("alpha", "beta", "gamma")
+                                      .type(Property.Type.Select)
+            .renderingOptions([(StringRenderingConstants.DISPLAY_TYPE_KEY):StringRenderingConstants.DisplayType.CODE])
+                                      .build()
+
+            service.metaClass.getLocale = { -> Locale.ENGLISH }
+        when:
+            def result = service.pluginPropertyMap('svc', 'provider', prop)
+        then:
+            result != null
+            1 * service.uiPluginService.getPluginMessage(
+                'svc',
+                'provider',
+                "property.prop1.title",
+                _,
+                _
+            ) >> 'title.message'
+            1 * service.uiPluginService.getPluginMessage(
+                'svc',
+                'provider',
+                "property.prop1.description",
+                _,
+                _
+            ) >> 'description.message'
+            1 * service.uiPluginService.getPluginMessage(
+                'svc',
+                'provider',
+                "property.prop1.defaultValue",
+                _,
+                _
+            ) >> 'defaultValue.message'
+            result.name == 'prop1'
+            result.desc == 'description.message'
+            result.title == 'title.message'
+            result.defaultValue == 'alpha'
+            result.staticTextDefaultValue == 'defaultValue.message'
+            result.required == true
+            result.type == 'Select'
+            result.allowed == ['alpha', 'beta', 'gamma']
+            result.selectLabels == null
+            result.scope == null
+            result.options == ['displayType':'CODE']
+
+    }
+
+    def "plugin Property Map includes output metadata for exposed properties"() {
+        given:
+            service.uiPluginService = Mock(UiPluginService)
+            def prop = PropertyBuilder.builder()
+                                      .name("environmentName")
+                                      .title("Environment Name")
+                                      .type(Property.Type.String)
+                                      .outputMetadata([
+                                          new PluginOutputMetadata("data", "environmentName", "Exposed for conditional logic")
+                                      ])
+                                      .build()
+
+            service.metaClass.getLocale = { -> Locale.ENGLISH }
+        when:
+            def result = service.pluginPropertyMap('svc', 'provider', prop)
+        then:
+            service.uiPluginService.getPluginMessage(*_) >> { args -> args[3] }
+            result.outputMetadata == [
+                [group: "data", name: "environmentName", description: "Exposed for conditional logic"]
+            ]
+    }
+
+    def "plugin Property Map has null output metadata when property is not exposed"() {
+        given:
+            service.uiPluginService = Mock(UiPluginService)
+            def prop = PropertyBuilder.builder()
+                                      .name("plain")
+                                      .title("Plain")
+                                      .type(Property.Type.String)
+                                      .build()
+
+            service.metaClass.getLocale = { -> Locale.ENGLISH }
+        when:
+            def result = service.pluginPropertyMap('svc', 'provider', prop)
+        then:
+            service.uiPluginService.getPluginMessage(*_) >> { args -> args[3] }
+            result.outputMetadata == null
+    }
+
+    def "pluginOutputsAsList includes output-only and configurable outputs, without duplicates"() {
+        given:
+            service.uiPluginService = Mock(UiPluginService)
+            service.metaClass.getLocale = { -> Locale.ENGLISH }
+            def configurable = PropertyBuilder.builder()
+                                               .name("incidentId")
+                                               .title("Incident Id")
+                                               .type(Property.Type.String)
+                                               .outputMetadata([
+                                                   new PluginOutputMetadata("data", "incidentNumber", "Created incident")
+                                               ])
+                                               .build()
+            def outputOnly = PropertyBuilder.builder()
+                                             .name("outputResult")
+                                             .title("outputResult")
+                                             .type(Property.Type.String)
+                                             .outputMetadata([
+                                                 new PluginOutputMetadata("data", "outputResult", "Computed result"),
+                                                 new PluginOutputMetadata("data", "incidentNumber", "Duplicate")
+                                             ])
+                                             .outputOnly(true)
+                                             .build()
+            def plain = PropertyBuilder.builder()
+                                        .name("plain")
+                                        .type(Property.Type.String)
+                                        .build()
+
+        when:
+            def result = service.pluginOutputsAsList('svc', 'provider', [configurable, outputOnly, plain])
+
+        then:
+            service.uiPluginService.getPluginMessage(*_) >> { args -> args[3] }
+            result == [
+                [name: "incidentNumber", group: "data", description: "Created incident", title: "Incident Id"],
+                [name: "outputResult", group: "data", description: "Computed result", title: "outputResult"]
+            ]
+    }
+
+    def "pluginPropertiesAsMap excludes output-only properties from GUI rendering"() {
+        given:
+            service.uiPluginService = Mock(UiPluginService)
+            service.metaClass.getLocale = { -> Locale.ENGLISH }
+            def configurable = PropertyBuilder.builder()
+                                               .name("environmentName")
+                                               .title("Environment Name")
+                                               .type(Property.Type.String)
+                                               .build()
+            def outputOnly = PropertyBuilder.builder()
+                                             .name("outputResult")
+                                             .title("outputResult")
+                                             .type(Property.Type.String)
+                                             .outputMetadata([
+                                                 new PluginOutputMetadata("data", "outputResult", "Computed result")
+                                             ])
+                                             .outputOnly(true)
+                                             .build()
+
+        when:
+            def result = service.pluginPropertiesAsMap('svc', 'provider', [configurable, outputOnly])
+
+        then:
+            service.uiPluginService.getPluginMessage(*_) >> { args -> args[3] }
+            result.size() == 1
+            result[0].name == 'environmentName'
+    }
+
+    def "plugin Property Map sanitizes static html or markdown content"() {
+        given:
+            mockCodec(SanitizedHTMLCodec)
+            mockCodec(MarkdownCodec)
+            service.uiPluginService = Mock(UiPluginService)
+            def prop = PropertyBuilder.builder()
+                                      .name("prop1")
+                                      .title("Property 1")
+                                      .description("A fake property for the fake plugin")
+                                      .required(true)
+                                      .defaultValue(defaultValue)
+                                      .values("alpha", "beta", "gamma")
+                                      .type(Property.Type.Select)
+            .renderingOptions([
+                (StringRenderingConstants.DISPLAY_TYPE_KEY):StringRenderingConstants.DisplayType.STATIC_TEXT,
+                (StringRenderingConstants.STATIC_TEXT_CONTENT_TYPE_KEY):contentType,
+
+            ])
+                                      .build()
+
+            service.metaClass.getLocale = { -> Locale.ENGLISH }
+        when:
+            def result = service.pluginPropertyMap('svc', 'provider', prop)
+        then:
+            result != null
+            1 * service.uiPluginService.getPluginMessage(
+                'svc',
+                'provider',
+                "property.prop1.title",
+                _,
+                _
+            ) >> 'title.message'
+            1 * service.uiPluginService.getPluginMessage(
+                'svc',
+                'provider',
+                "property.prop1.description",
+                _,
+                _
+            ) >> 'description.message'
+            1 * service.uiPluginService.getPluginMessage(
+                'svc',
+                'provider',
+                "property.prop1.defaultValue",
+                _,
+                _
+            ) >> 'defaultValue.message'
+            result.name == 'prop1'
+            result.desc == 'description.message'
+            result.title == 'title.message'
+            result.defaultValue == 'aval'
+            result.staticTextDefaultValue == expected
+            result.required == true
+            result.type == 'Select'
+            result.allowed == ['alpha', 'beta', 'gamma']
+            result.selectLabels == null
+            result.scope == null
+            result.options == ['displayType':'STATIC_TEXT', staticTextContentType:'application/x-text-html-sanitized']
+        where:
+            defaultValue | contentType     | expected
+            'aval'       | 'text/html'     | 'defaultValue.message'
+            'aval'       | 'text/markdown' | '<article class="markdown-body"><p>defaultValue.message</p>\n</article>'
+    }
+
+    class FakeUIDescribedPlugin extends DescribedPlugin<UIPlugin> {
+
+        FakeUIDescribedPlugin(
+                final UIPlugin instance,
+                final Description description,
+                final String name
+        ) {
+            super(instance, description, name, null, null)
+        }
+    }
+
+    class FakePluginMetadata implements PluginMetadata {
+
+        @Override
+        String getFilename() {
+            return null
+        }
+
+        @Override
+        File getFile() {
+            return null
+        }
+
+        @Override
+        String getPluginArtifactName() {
+            return "Fake Plugin"
+        }
+
+        @Override
+        String getPluginAuthor() {
+            return null
+        }
+
+        @Override
+        String getPluginFileVersion() {
+            return "1.0"
+        }
+
+        @Override
+        String getPluginVersion() {
+            return "1.0"
+        }
+
+        @Override
+        String getPluginUrl() {
+            return null
+        }
+
+        @Override
+        Date getPluginDate() {
+            return  new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.Z").parse("2018-08-14T06:29:02.-0700")
+        }
+
+        @Override
+        Date getDateLoaded() {
+            return new Date()
+        }
+        @Override
+        String getPluginName() {
+            return "Fake Plugin"
+        }
+
+        @Override
+        String getPluginDescription() {
+            return null
+        }
+
+        @Override
+        String getPluginId() {
+            return null
+        }
+
+        @Override
+        String getRundeckCompatibilityVersion() {
+            return null
+        }
+
+        @Override
+        String getTargetHostCompatibility() {
+            return null
+        }
+
+        @Override
+        List<String> getTags() {
+            return null
+        }
+
+        @Override
+        String getPluginLicense() {
+            return null
+        }
+
+        @Override
+        String getPluginThirdPartyDependencies() {
+            return null
+        }
+
+        @Override
+        String getPluginSourceLink() {
+            return null
+        }
+
+        @Override
+        String getPluginDocsLink() {
+            return null
+        }
+
+        @Override
+        String getPluginType() {
+            return null
+        }
+
+    }
+
+
+    class FakePluginDescription implements Description {
+        String name = 'fake'
+
+        @Override
+        String getTitle() {
+            return "Fake Plugin"
+        }
+
+        @Override
+        String getDescription() {
+            return "This is the best fake plugin"
+        }
+
+        @Override
+        boolean isHighlighted() {
+            return true
+        }
+
+        @Override
+        int getOrder() {
+            return 1
+        }
+
+        @Override
+        List<Property> getProperties() {
+            def p1 = PropertyBuilder.builder()
+                                    .name("prop1")
+                                    .title("Property 1")
+                                    .description("A fake property for the fake plugin")
+                                    .required(true)
+                                    .defaultValue("alpha")
+                                    .values("alpha","beta","gamma")
+                                    .type(Property.Type.Select)
+                                    .build()
+            def p2 = PropertyBuilder.builder()
+                                    .name("password")
+                                    .title("Password")
+                                    .description("The password to the fake plugin")
+                                    .required(false)
+                                    .type(Property.Type.String)
+                                    .renderingAsPassword()
+                                    .build()
+
+            return [ p1, p2]
+        }
+
+        @Override
+        Map<String, String> getPropertiesMapping() {
+            return [:]
+        }
+
+        @Override
+        Map<String, String> getFwkPropertiesMapping() {
+            return [:]
+        }
+
+        @Override
+        Map<String, String> getMetadata() {
+            return null
+        }
+    }
+
+    class FakePluginDescriptionWithMetadata implements Description {
+        String name
+        Map<String, String> metadata
+        Class pluginGroupType
+
+        @Override
+        String getTitle() {
+            return "Fake Plugin"
+        }
+
+        @Override
+        String getDescription() {
+            return "This is a fake plugin with metadata"
+        }
+
+        @Override
+        boolean isHighlighted() {
+            return false
+        }
+
+        @Override
+        int getOrder() {
+            return 0
+        }
+
+        @Override
+        List<Property> getProperties() {
+            return []
+        }
+
+        @Override
+        Map<String, String> getPropertiesMapping() {
+            return [:]
+        }
+
+        @Override
+        Map<String, String> getFwkPropertiesMapping() {
+            return [:]
+        }
+
+        @Override
+        Map<String, String> getMetadata() {
+            return metadata
+        }
+
+        @Override
+        <T> Class<T> getPluginGroupType() {
+            return pluginGroupType
+        }
+    }
+
+    def "list plugins with groupBy metadata auto-discovery"() {
+        given:
+        messageSource.addMessage("framework.service.WorkflowNodeStep.description",Locale.ENGLISH,"Node Step")
+        def fwksvc = Mock(FrameworkService)
+        def fwk = Mock(Framework)
+        fwksvc.getRundeckFramework() >> fwk
+        fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+        service.frameworkService = fwksvc
+        service.rundeckPluginRegistry = Mock(RundeckPluginRegistry)
+        service.uiPluginService = Mock(UiPluginService)
+        service.grailsLinkGenerator = Mock(LinkGenerator)
+
+        def plugin1 = new FakePluginDescriptionWithMetadata(
+            name: 'aws-s3-cp',
+            metadata: ['groupBy': 'AWS S3']
+        )
+        def plugin2 = new FakePluginDescriptionWithMetadata(
+            name: 'aws-s3-ls',
+            metadata: ['groupBy': 'AWS S3']
+        )
+
+        def pluginDescs = [
+                "WorkflowNodeStep": [plugin1, plugin2]
+        ]
+        def pluginData = [
+                descriptions        : pluginDescs,
+                serviceDefaultScopes: [],
+                bundledPlugins      : [],
+                embeddedFilenames   : [],
+                specialConfiguration: [],
+                specialScoping      : [],
+                uiPluginProfiles    : []
+        ]
+        def fakeMeta = new FakePluginMetadata()
+
+        service.metaClass.listPluginsDetailed = { -> pluginData }
+        service.metaClass.getLocale = { -> Locale.ENGLISH }
+
+        when:
+        2 * service.rundeckPluginRegistry.getPluginMetadata(_,_) >> fakeMeta
+        2 * service.uiPluginService.getProfileFor(_, _) >> [icon: 'foo']
+        2 * service.grailsLinkGenerator.link(_) >>> ['http://localhost:8080/icon1', 'http://localhost:8080/icon2']
+        def response = service.listPlugins(true)
+        def serviceEntry = response[0]
+        def provider1 = serviceEntry.providers[0]
+        def provider2 = serviceEntry.providers[1]
+
+        then:
+        serviceEntry.providers.size() == 2
+        provider1.providerMetadata.groupBy == 'AWS S3'
+        provider1.providerMetadata.groupIconUrl == 'http://localhost:8080/icon1'
+        provider2.providerMetadata.groupBy == 'AWS S3'
+        provider2.providerMetadata.groupIconUrl == 'http://localhost:8080/icon1' // Cached from first plugin
+    }
+
+    def "list plugins with groupBy metadata but no icon"() {
+        given:
+        messageSource.addMessage("framework.service.WorkflowNodeStep.description",Locale.ENGLISH,"Node Step")
+        def fwksvc = Mock(FrameworkService)
+        def fwk = Mock(Framework)
+        fwksvc.getRundeckFramework() >> fwk
+        fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+        service.frameworkService = fwksvc
+        service.rundeckPluginRegistry = Mock(RundeckPluginRegistry)
+        service.uiPluginService = Mock(UiPluginService)
+        service.grailsLinkGenerator = Mock(LinkGenerator)
+
+        def plugin1 = new FakePluginDescriptionWithMetadata(
+            name: 'test-plugin',
+            metadata: ['groupBy': 'Test Group']
+        )
+
+        def pluginDescs = [
+                "WorkflowNodeStep": [plugin1]
+        ]
+        def pluginData = [
+                descriptions        : pluginDescs,
+                serviceDefaultScopes: [],
+                bundledPlugins      : [],
+                embeddedFilenames   : [],
+                specialConfiguration: [],
+                specialScoping      : [],
+                uiPluginProfiles    : []
+        ]
+        def fakeMeta = new FakePluginMetadata()
+
+        service.metaClass.listPluginsDetailed = { -> pluginData }
+        service.metaClass.getLocale = { -> Locale.ENGLISH }
+
+        when:
+        1 * service.rundeckPluginRegistry.getPluginMetadata(_,_) >> fakeMeta
+        1 * service.uiPluginService.getProfileFor(_, _) >> [:] // No icon
+        def response = service.listPlugins(true)
+        def serviceEntry = response[0]
+        def provider1 = serviceEntry.providers[0]
+
+        then:
+        provider1.providerMetadata.groupBy == 'Test Group'
+        provider1.providerMetadata.groupIconUrl == null
+    }
+
+    def "list plugins with groupBy metadata and explicit PluginGroup icon URL"() {
+        given:
+        messageSource.addMessage("framework.service.WorkflowNodeStep.description",Locale.ENGLISH,"Node Step")
+        def fwksvc = Mock(FrameworkService)
+        def fwk = Mock(Framework)
+        fwksvc.getRundeckFramework() >> fwk
+        fwk.getPluginManager() >> Mock(ServiceProviderLoader)
+        service.frameworkService = fwksvc
+        service.rundeckPluginRegistry = Mock(RundeckPluginRegistry)
+        service.uiPluginService = Mock(UiPluginService)
+        service.grailsLinkGenerator = Mock(LinkGenerator)
+
+        def plugin1 = new FakePluginDescriptionWithMetadata(
+            name: 'test-plugin-1',
+            metadata: ['groupBy': 'Test Group'],
+            pluginGroupType: FakePluginGroupWithIcon.class
+        )
+        def plugin2 = new FakePluginDescriptionWithMetadata(
+            name: 'test-plugin-2',
+            metadata: ['groupBy': 'Test Group'],
+            pluginGroupType: FakePluginGroupWithIcon.class
+        )
+
+        def pluginDescs = [
+                "WorkflowNodeStep": [plugin1, plugin2]
+        ]
+        def pluginData = [
+                descriptions        : pluginDescs,
+                serviceDefaultScopes: [],
+                bundledPlugins      : [],
+                embeddedFilenames   : [],
+                specialConfiguration: [],
+                specialScoping      : [],
+                uiPluginProfiles    : []
+        ]
+        def fakeMeta = new FakePluginMetadata()
+
+        service.metaClass.listPluginsDetailed = { -> pluginData }
+        service.metaClass.getLocale = { -> Locale.ENGLISH }
+
+        when:
+        2 * service.rundeckPluginRegistry.getPluginMetadata(_,_) >> fakeMeta
+        2 * service.uiPluginService.getProfileFor(_, _) >> [icon: 'foo'] // Has icon but should be ignored
+        // Mock grailsLinkGenerator: 
+        // Execution order: pluginIcon (provider1) -> groupIcon (provider1) -> pluginIcon (provider2)
+        // The groupIcon call extracts 'icon.svg' from '/explicit/group/icon.svg' and calls link() with action='groupIcon'
+        3 * service.grailsLinkGenerator.link(_) >>> ['http://localhost:8080/plugin-icon', '/explicit/group/icon.svg', 'http://localhost:8080/plugin-icon']
+        def response = service.listPlugins(true)
+        def serviceEntry = response[0]
+        def provider1 = serviceEntry.providers[0]
+        def provider2 = serviceEntry.providers[1]
+
+        then:
+        provider1.providerMetadata.groupBy == 'Test Group'
+        provider1.providerMetadata.groupIconUrl == '/explicit/group/icon.svg' // From PluginGroup class
+        provider2.providerMetadata.groupBy == 'Test Group'
+        provider2.providerMetadata.groupIconUrl == '/explicit/group/icon.svg' // Cached from first lookup
+    }
+
+    static class FakePluginGroupWithIcon {
+        static String getGroupIconUrl(String groupName) {
+            return '/explicit/group/icon.svg'
+        }
+    }
+}

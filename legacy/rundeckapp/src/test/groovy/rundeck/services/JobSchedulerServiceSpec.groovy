@@ -1,0 +1,48 @@
+package rundeck.services
+
+import com.dtolabs.rundeck.core.schedule.JobScheduleManager
+import grails.testing.services.ServiceUnitTest
+import spock.lang.Specification
+
+/**
+ * See the API for {@link grails.test.mixin.services.ServiceUnitTestMixin} for usage instructions
+ */
+class JobSchedulerServiceSpec extends Specification implements ServiceUnitTest<JobSchedulerService> {
+
+    def setup() {
+    }
+
+    def cleanup() {
+    }
+
+    void "delete job delegates via bean"() {
+        given:
+        service.rundeckJobScheduleManager = Mock(JobScheduleManager)
+        when:
+        service.deleteJobSchedule('a', 'b')
+
+        then:
+        1 * service.rundeckJobScheduleManager.deleteJobSchedule('a', 'b')
+    }
+
+    void "schedule job now delegates via bean"() {
+        given:
+        service.rundeckJobScheduleManager = Mock(JobScheduleManager)
+        when:
+        service.scheduleJobNow('a', 'b', [:], true)
+
+        then:
+        1 * service.rundeckJobScheduleManager.scheduleJobNow('a', 'b', [:], true)
+    }
+
+    void "schedule job at date delegates via bean"() {
+        given:
+        service.rundeckJobScheduleManager = Mock(JobScheduleManager)
+        Date date = new Date()
+        when:
+        service.scheduleJob('a', 'b', [:], date, true)
+
+        then:
+        1 * service.rundeckJobScheduleManager.scheduleJob('a', 'b', [:], date, true)
+    }
+}

@@ -1,0 +1,130 @@
+plugins{
+    id 'base'
+}
+configurations{
+    docker
+}
+dependencies{
+    docker project(path: ":rundeckapp", configuration: 'bootWar')
+}
+
+project.evaluationDependsOn(":rundeckapp")
+
+def dockerRepository = findProperty("dockerRepository")?: 'rundeck/rundeck'
+def providedTags = findProperty('dockerTags')?: ''
+def jreVersion = findProperty("jreVersion")?: 'openjdk-17-jre-headless'
+
+def dockerTags = [].plus(providedTags.split(',').findAll())
+
+if(vTag == 'GA'){
+    //only GA tagged with simple number
+    dockerTags << vNum //x.y.z
+}
+if (vTag != 'SNAPSHOT'){
+    //GA or other tags use resolved version
+    dockerTags << resolvedVersion // x.y.z-rc1-DATE OR x.y.z-DATE for GA
+}else if (dockerTags.size() == 0){
+    //SNAPSHOT tag used only if nothing else is specified
+    dockerTags << vTag //SNAPSHOT
+}
+
+// Ensure war exists, or build it otherwise.
+tasks.register('ensureWar') {
+    def rundeckapp = project(":rundeckapp")
+    def bootArchiveFile = rundeckapp.bootWar.archiveFile.get()
+
+    def warFile = file(bootArchiveFile)
+    if (!warFile.isFile()) {
+        dependsOn rundeckapp.bootWar
+    }
+}
+
+tasks.register('officialBuild') {
+    dependsOn ensureWar
+
+    inputs.dir "official/etc"
+    inputs.dir "official/lib"
+    inputs.dir "official/remco"
+    inputs.file "official/Dockerfile"
+
+    def outputDir = "$buildDir/tags"
+
+    outputs.dir outputDir
+
+    for (tag in dockerTags) {
+        outputs.file "$outputDir/$tag"
+    }
+
+    doLast {
+        file(outputDir).mkdir()
+
+        def rundeckapp = project(":rundeckapp")
+        def bootArchiveFile = rundeckapp.bootWar.archiveFile.get()
+        def bootArchiveFilename = rundeckapp.bootWar.archiveFileName.get()
+
+        copy {
+            from bootArchiveFile
+            into "$projectDir/official/.build"
+            rename "${bootArchiveFilename}", "rundeck.war"
+        }
+
+        def args = [
+            "docker",
+            "build",
+            "--no-cache",
+            "--platform=${findProperty('dockerPlatform') ?: System.getenv('DOCKER_DEFAULT_PLATFORM') ?: 'linux/amd64'}",
+            "--label=com.rundeck.version=$resolvedVersion",
+            "--label=com.rundeck.commit=$commit"
+        ]
+
+        for (tag in dockerTags)
+            args.add("-t=${dockerRepository}:$tag")
+
+        args.add(".")
+
+        exec {
+            workingDir "./official"
+            commandLine args
+        }
+
+        for (tag in dockerTags) {
+            file("$outputDir/$tag").createNewFile()
+        }
+
+    }
+
+    clean {
+        delete "$projectDir/official/.build"
+    }
+}
+
+tasks.register('officialPush') {
+    dependsOn officialBuild
+    doLast {
+        for (tag in dockerTags) {
+            exec {
+                commandLine "docker", "push", "${dockerRepository}:$tag"
+            }
+        }
+
+    }
+}
+
+tasks.register('buildUbuntuBase') {
+    doLast {
+        exec {
+            workingDir "./ubuntu-base"
+            commandLine "docker", "build", "--no-cache", "--build-arg", "JRE_VERSION=$jreVersion", "-t=rundeck/ubuntu-base", "."
+        }
+    }
+}
+officialBuild.dependsOn buildUbuntuBase
+
+tasks.register('pushUbuntuBase') {
+    dependsOn buildUbuntuBase
+    doLast {
+        exec {
+            commandLine "docker", "push", "rundeck/ubuntu-base"
+        }
+    }
+}

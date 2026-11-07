@@ -1,0 +1,8 @@
+/**
+ * Cobertura Plug-In 
+ * Disable for java 8
+ * https://github.com/stevesaliman/gradle-cobertura-plugin/issues/121
+ */
+
+logger.warn( "Cobertura not used")
+

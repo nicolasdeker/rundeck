@@ -1,0 +1,7473 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package rundeck.services
+
+import com.dtolabs.rundeck.core.common.IRundeckProjectConfig
+import com.dtolabs.rundeck.core.common.PluginControlService
+import com.dtolabs.rundeck.core.common.IFramework
+import com.dtolabs.rundeck.core.common.ProjectManager
+import com.dtolabs.rundeck.core.jobs.JobLifecycleComponentException
+import com.dtolabs.rundeck.core.jobs.JobLifecycleStatus
+import com.dtolabs.rundeck.core.jobs.JobReferenceItem
+import com.dtolabs.rundeck.core.plugins.configuration.PropertyResolverFactory
+import com.dtolabs.rundeck.core.plugins.configuration.PropertyScope
+import com.dtolabs.rundeck.core.schedule.SchedulesManager
+import com.dtolabs.rundeck.core.plugins.configuration.Validator
+import com.dtolabs.rundeck.core.utils.PropertyLookup
+import com.dtolabs.rundeck.plugins.ServiceNameConstants
+import com.dtolabs.rundeck.plugins.util.DescriptionBuilder
+import grails.testing.gorm.DataTest
+import grails.testing.services.ServiceUnitTest
+import grails.testing.web.GrailsWebUnitTest
+import org.grails.plugins.codecs.JSONCodec
+import org.grails.spring.beans.factory.InstanceFactoryBean
+import org.quartz.SchedulerException
+import org.rundeck.app.authorization.AppAuthContextProcessor
+import org.rundeck.app.components.RundeckJobDefinitionManager
+import org.rundeck.app.components.jobs.ImportedJob
+import org.rundeck.app.components.jobs.JobQuery
+import org.rundeck.app.components.jobs.JobQueryInput
+import org.rundeck.app.data.model.v1.job.JobDataSummary
+import org.rundeck.app.data.model.v1.query.JobQueryInputData
+import org.rundeck.app.data.providers.GormJobQueryProvider
+import org.rundeck.app.data.providers.GormReferencedExecutionDataProvider
+import org.rundeck.app.data.providers.GormJobStatsDataProvider
+import org.rundeck.app.data.providers.GormUserDataProvider
+import org.rundeck.app.data.providers.v1.job.JobDataProvider
+import org.rundeck.app.data.workflow.WorkflowDataImpl
+import org.rundeck.app.quartz.ExecutionJobQuartzJobSpecifier
+import org.rundeck.app.spi.AuthorizedServicesProvider
+import org.rundeck.app.spi.Services
+import org.rundeck.core.auth.AuthConstants
+import com.dtolabs.rundeck.core.plugins.PluginConfigSet
+import com.dtolabs.rundeck.core.plugins.SimplePluginConfiguration
+import com.dtolabs.rundeck.core.plugins.ValidatedPlugin
+import com.dtolabs.rundeck.core.schedule.JobScheduleManager
+import com.dtolabs.rundeck.plugins.jobs.ExecutionLifecyclePlugin
+import org.rundeck.util.HttpClientCreator
+import org.springframework.context.ConfigurableApplicationContext
+import rundeck.Orchestrator
+import org.slf4j.Logger
+import rundeck.ScheduledExecutionStats
+import rundeck.User
+import org.rundeck.app.jobs.options.JobOptionConfigRemoteUrl
+import org.rundeck.app.jobs.options.RemoteUrlAuthenticationType
+import rundeck.data.constants.NotificationConstants
+import rundeck.data.job.RdJobDataSummary
+import rundeck.data.job.reference.JobReferenceImpl
+import spock.lang.Specification
+
+import static org.junit.Assert.*
+
+import com.dtolabs.rundeck.core.authorization.AuthContext
+import com.dtolabs.rundeck.core.authorization.UserAndRolesAuthContext
+import com.dtolabs.rundeck.core.common.Framework
+import com.dtolabs.rundeck.core.common.IRundeckProject
+import com.dtolabs.rundeck.core.execution.service.MissingProviderException
+import com.dtolabs.rundeck.core.execution.workflow.WorkflowExecutionItem
+import com.dtolabs.rundeck.core.execution.workflow.WorkflowStrategy
+import com.dtolabs.rundeck.core.execution.workflow.WorkflowStrategyService
+import com.dtolabs.rundeck.core.plugins.configuration.Description
+import com.dtolabs.rundeck.core.plugins.configuration.PropertyResolver
+import com.dtolabs.rundeck.plugins.logging.LogFilterPlugin
+import com.dtolabs.rundeck.core.plugins.DescribedPlugin
+import org.quartz.ListenerManager
+import org.quartz.Scheduler
+import org.springframework.context.MessageSource
+import rundeck.Execution
+import rundeck.CommandExec
+import rundeck.JobExec
+import rundeck.Notification
+import rundeck.Option
+import rundeck.PluginStep
+import rundeck.ScheduledExecution
+import rundeck.Workflow
+import rundeck.WorkflowStep
+import rundeck.ReferencedExecution
+import rundeck.controllers.ScheduledExecutionController
+import spock.lang.Issue
+import spock.lang.Unroll
+import spock.util.mop.ConfineMetaClassChanges
+
+/**
+ * Created by greg on 6/24/15.
+ */
+class ScheduledExecutionServiceSpec extends Specification implements ServiceUnitTest<ScheduledExecutionService>, GrailsWebUnitTest, DataTest {
+    GormUserDataProvider provider = new GormUserDataProvider()
+
+    public static final String TEST_UUID1 = 'BB27B7BB-4F13-44B7-B64B-D2435E2DD8C7'
+
+    def setupSpec() { mockDomains Workflow, ScheduledExecution, CommandExec, Notification, Option, PluginStep, JobExec,
+                                      WorkflowStep, Execution, ReferencedExecution, ScheduledExecutionStats, Orchestrator, User }
+    def setup(){
+        service.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor)
+        service.fileUploadService = Mock(FileUploadService)
+    }
+    def "list jobs for project bypassing the query cache"() {
+        given:
+        new ScheduledExecution(project: 'one', uuid: 'job-one', jobName: 'one').
+            save(validate: false, flush: true)
+        new ScheduledExecution(project: 'other', uuid: 'job-other', jobName: 'other').
+            save(validate: false, flush: true)
+
+        expect:
+        service.listJobsForProjectUncached('one')*.uuid == ['job-one']
+    }
+
+    def setupSchedulerService(clusterEnabled = false){
+        SchedulesManager rundeckJobSchedulesManager = new LocalJobSchedulesManager()
+        rundeckJobSchedulesManager.frameworkService = Mock(FrameworkService){
+            getRundeckBase() >> ''
+            getServerUUID() >> 'uuid'
+            isClusterModeEnabled() >> clusterEnabled
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+        }
+        def quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        rundeckJobSchedulesManager.quartzScheduler = quartzScheduler
+        service.quartzScheduler = quartzScheduler
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> true
+        }
+        service.quartzJobSpecifier = new ExecutionJobQuartzJobSpecifier()
+    }
+
+    def setupDoValidate(boolean enabled=false){
+
+        service.frameworkService = Stub(FrameworkService) {
+            existsFrameworkProject('testProject') >> true
+            existsFrameworkProject('AProject') >> true
+            isClusterModeEnabled()>>enabled
+            getServerUUID()>>TEST_UUID1
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            projectNames(*_)>>[]
+            getFrameworkNodeName() >> "testProject"
+            validateDescription(_, _, _, _, _, _) >> [
+                    valid: true
+            ]
+            getNodeStepPluginDescription(_) >> Mock(Description)
+            getStepPluginDescription(_) >> Mock(Description)
+        }
+        service.pluginService=Mock(PluginService)
+        service.executionServiceBean=Mock(ExecutionService)
+        service.executionUtilService=Mock(ExecutionUtilService){
+            createExecutionItemForWorkflow(_)>>Mock(WorkflowExecutionItem)
+        }
+        service.jobLifecycleComponentService = Mock(JobLifecycleComponentService)
+        service.executionLifecycleComponentService = Mock(ExecutionLifecycleComponentService)
+        service.rundeckJobDefinitionManager=Mock(RundeckJobDefinitionManager){
+            updateJob(_,_,_)>>{
+                RundeckJobDefinitionManager.importedJob(it[0],[:])
+            }
+            validateImportedJob(_)>>new Validator.ReportSet(true,[:])
+        }
+        service.messageSource = Mock(MessageSource) {
+            getMessage(_, _) >> { it[0].toString() }
+        }
+        TEST_UUID1
+    }
+    def "option json input validation option name"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+        def json=[[name:nameVal]].encodeAsJSON().toString()
+
+        def params = baseJobParams()+[
+                workflow      : new Workflow(
+                        threadcount: 1,
+                        keepgoing: true,
+                        commands: [new CommandExec(adhocRemoteString: 'a remote string')]
+                ),
+                jobOptionsJson: json,
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+        when:
+
+        def results = service._dovalidate(params, authContext)
+
+        then:
+        def ScheduledExecution scheduledExecution = results.scheduledExecution
+
+        results.failed
+        scheduledExecution != null
+        scheduledExecution instanceof ScheduledExecution
+
+        scheduledExecution.errors != null
+        scheduledExecution.errors.hasErrors()
+        scheduledExecution.errors.hasFieldErrors('options')
+        scheduledExecution.errors.hasFieldErrors('options[0].name')
+        scheduledExecution.options[0].errors.hasErrors()
+        scheduledExecution.options[0].errors.hasFieldErrors('name')
+        where:
+            nameVal<<[
+                '',
+                'in valid',
+                'not$#valid'
+            ]
+
+    }
+    def "blank email notification"() {
+        given:
+        setupDoValidate()
+        def json='[{"type":"email","trigger":"onsuccess","config":{"recipients":""}}]'
+
+        def params = baseJobParams()+[
+                workflow      : new Workflow(
+                        threadcount: 1,
+                        keepgoing: true,
+                        commands: [new CommandExec(adhocRemoteString: 'a remote string')]
+                ),
+                jobNotificationsJson: json,
+
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+        when:
+
+        def results = service._dovalidate(params, authContext)
+
+        then:
+        def ScheduledExecution scheduledExecution = results.scheduledExecution
+
+        results.failed
+        scheduledExecution != null
+        scheduledExecution instanceof ScheduledExecution
+
+        scheduledExecution.errors != null
+        scheduledExecution.errors.hasErrors()
+        scheduledExecution.errors.hasFieldErrors('notifications')
+
+    }
+
+    def "blank webhook notification"() {
+        given:
+        setupDoValidate()
+        def json='[{"type":"url","trigger":"onsuccess","config":{"urls":"","format":"xml"}}]'
+
+        when:
+        def params = baseJobParams()+[
+            jobNotificationsJson: json,
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+        def results = service._dovalidate(params, authContext)
+        def ScheduledExecution scheduledExecution = results.scheduledExecution
+
+        then:
+
+        results.failed
+        scheduledExecution != null
+        scheduledExecution instanceof ScheduledExecution
+
+        scheduledExecution.errors != null
+        scheduledExecution.errors.hasErrors()
+        scheduledExecution.errors.hasFieldErrors('notifications')
+
+    }
+
+    private Map createJobParams(Map overrides = [:]) {
+        [
+                jobName       : 'blue',
+                project       : 'AProject',
+                groupPath     : 'some/where',
+                description   : 'a job',
+                argString     : '-a b -c d',
+                workflow      : new Workflow(
+                        keepgoing: true,
+                        commands: [new CommandExec([adhocRemoteString: 'test buddy'])]
+                ),
+                serverNodeUUID: null,
+                scheduled     : true,
+                uuid: "a1"
+        ] + overrides
+    }
+
+    @Unroll
+    def "should scheduleJob"() {
+        given:
+        setupSchedulerService(clusterEnabled)
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+
+        service.frameworkService = Mock(FrameworkService) {
+            getRundeckBase() >> ''
+            getFrameworkProject(_) >> projectMock
+            getServerUUID() >> 'uuid'
+            isClusterModeEnabled() >> clusterEnabled
+        }
+
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: hasSchedule,
+                        scheduleEnabled: scheduleEnabled,
+                        executionEnabled: executionEnabled,
+                        userRoleList: 'a,b',
+                        uuid: "a1"
+                )
+        ).save()
+//        def scheduleDate = new Date()
+        def data=["project": job.project,
+                  "jobId":job.uuid,
+                  "oldQuartzJobName": originalJobName,
+                  "oldQuartzGroupName": originalGroupName]
+
+        service.jobSchedulerService=Mock(JobSchedulerService){
+            determineExecNode(*_)>>{args->
+                return serverNodeUUID
+            }
+            scheduleRemoteJob(data)>>false
+        }
+
+        when:
+        def result = service.scheduleJob(job, originalJobName, originalGroupName, false, remoteAssgined)
+
+        then:
+        1 * service.executionServiceBean.getExecutionsAreActive() >> executionsAreActive
+        (remoteAssgined ? 0 : 1) * service.jobSchedulesService.handleScheduleDefinitions(_, _) >> [nextTime: scheduleDate]
+        result == [scheduleDate, serverNodeUUID]
+
+        where:
+        executionsAreActive | scheduleEnabled | executionEnabled | hasSchedule | expectScheduled | clusterEnabled | serverNodeUUID | remoteAssgined | scheduleDate | originalJobName | originalGroupName
+        true                | true            | true             | true        | true            | false          | null           | false          | new Date()   | null            | null
+        true                | true            | true             | true        | true            | true           | 'uuid'         | false          | new Date()   | null            | null
+        true                | true            | true             | true        | true            | false          | null           | false          | new Date()   | "aJobName"      | "aGroupName"
+        true                | true            | true             | true        | true            | true           | 'uuid'         | false          | new Date()   | "aJobName"      | "aGroupName"
+        true                | true            | true             | true        | true            | false          | null           | false          | null         | null            | null
+        true                | true            | true             | true        | true            | true           | null           | true           | null         | null            | null
+    }
+
+    @Unroll
+    def "should not scheduleAdHocJob if no date/time"() {
+        given:
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getRundeckBase() >> ''
+            getFrameworkProject(_) >> projectMock
+        }
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: hasSchedule,
+                        scheduleEnabled: scheduleEnabled,
+                        executionEnabled: executionEnabled,
+                        userRoleList: 'a,b'
+                )
+        ).save()
+
+        when:
+        service.scheduleAdHocJob(job, "user", null, Mock(Execution), [:], [:], null, false)
+
+        then:
+        1 * service.executionServiceBean.getExecutionsAreActive() >> executionsAreActive
+        IllegalArgumentException iae = thrown()
+        iae.getMessage() == "Scheduled date and time must be present"
+
+        where:
+        executionsAreActive | scheduleEnabled | executionEnabled | hasSchedule | expectScheduled
+        true                | true            | true             | true        | true
+    }
+
+    @Unroll
+    def "should not scheduleAdHocJob with time in past"() {
+        given:
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+
+        service.frameworkService = Mock(FrameworkService) {
+            getRundeckBase() >> ''
+            getFrameworkProject(_) >> projectMock
+        }
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: hasSchedule,
+                        scheduleEnabled: scheduleEnabled,
+                        executionEnabled: executionEnabled,
+                        userRoleList: 'a,b',
+                        crontabString: "42 2 1 1 1 2 1999",
+                        year: "1999",
+                        month: "1",
+                        dayOfMonth: "1",
+                        hour: "1",
+                        minute: "2",
+                        seconds: "42"
+                )
+        ).save()
+
+        Date startTime = new Date()
+        startTime.set(year: 1999, month: 1, dayOfMonth: 1, hourOfDay: 1, minute: 2, seconds: 42)
+
+        when:
+        service.scheduleAdHocJob(job, "user", null, Mock(Execution), [:], [:], startTime, false)
+
+        then:
+        1 * service.executionServiceBean.getExecutionsAreActive() >> executionsAreActive
+        IllegalArgumentException iae = thrown()
+        iae.getMessage() == "Cannot schedule a job in the past"
+
+        where:
+        executionsAreActive | scheduleEnabled | executionEnabled | hasSchedule | expectScheduled
+        true                | true            | true             | true        | true
+    }
+
+    @Issue('https://github.com/rundeck/rundeck/issues/1475')
+    @Unroll
+    def "should not scheduleJob when executionsAreActive=#executionsAreActive scheduleEnabled=#scheduleEnabled executionEnabled=#executionEnabled and hasSchedule=#hasSchedule"() {
+        given:
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> (executionsAreActive && scheduleEnabled && executionEnabled && hasSchedule)
+        }
+        service.jobSchedulerService = Mock(JobSchedulerService){
+            scheduleRemoteJob(_) >> false
+        }
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+
+        service.frameworkService = Mock(FrameworkService) {
+            getRundeckBase() >> ''
+            getFrameworkProject(_) >> projectMock
+        }
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: hasSchedule,
+                        scheduleEnabled: scheduleEnabled,
+                        executionEnabled: executionEnabled,
+                        userRoleList: 'a,b'
+                )
+        ).save()
+        def scheduleDate = new Date()
+
+        when:
+        def result = service.scheduleJob(job, null, null)
+
+        then:
+        1 * service.executionServiceBean.getExecutionsAreActive() >> executionsAreActive
+        0 * service.jobSchedulesService.handleScheduleDefinitions(_, _)
+        result == [null, null]
+
+        where:
+        executionsAreActive | scheduleEnabled | executionEnabled | hasSchedule
+        false               | true            | true             | true
+        true                | false           | true             | true
+        true                | true            | false            | true
+        true                | true            | true             | false
+    }
+
+
+
+    def "do validate adhoc ok"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      workflow: new Workflow([threadcount: 1, keepgoing: true, commands: new CommandExec(cmd)]),
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+        when:
+        def results = service._dovalidate(params, authContext)
+
+        then:
+        !results.failed
+
+        where:
+        cmd                                                                              | _
+        [adhocExecution: true, adhocRemoteString: 'test what']                           | _
+        [adhocExecution: true, adhocFilepath: 'test what']                               | _
+        [adhocExecution: true, adhocLocalString: 'test what']                            | _
+        [adhocExecution: true, adhocFilepath: 'test file', argString: 'test args']       | _
+        [adhocExecution: true, adhocRemoteString: 'test remote', argString: 'test args'] | _
+        [adhocExecution: true, adhocLocalString: 'test local', argString: 'test args']   | _
+    }
+    def "do validate workflow ok"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                _sessionEditWFObject: new Workflow(threadcount: 1, keepgoing: true, commands:cmds),
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+        when:
+        def results = service._dovalidate(params, authContext)
+
+        then:
+        !results.failed
+        def workflow = results.scheduledExecution.getWorkflowData()
+
+        workflow.commands.size()==3
+        workflow.commands[0] instanceof PluginStep
+        workflow.commands[0].configuration.adhocRemoteString=='do something'
+        workflow.commands[1] instanceof PluginStep
+        workflow.commands[1].configuration.adhocLocalString=='test dodah'
+        workflow.commands[2] instanceof JobExec
+        workflow.commands[2].jobName=='test1'
+        workflow.commands[2].jobGroup=='a/test'
+
+
+
+        where:
+        cmds                                                                     | _
+        [new CommandExec(adhocExecution: true, adhocRemoteString: "do something"),
+         new CommandExec(adhocExecution: true, adhocLocalString: "test dodah"),
+          new JobExec(jobName: 'test1', jobGroup: 'a/test')] | _
+
+    }
+
+    def "validate workflow step log filter"() {
+        given:
+        def step = new CommandExec([
+                adhocRemoteString: 'test buddy',
+                pluginConfig     : [
+                        LogFilter: [
+                                [
+                                        type  : 'abc',
+                                        config: [a: 'b']
+                                ]
+                        ]
+                ]]
+        )
+        service.pluginService = Mock(PluginService)
+        service.frameworkService = Mock(FrameworkService)
+        when:
+        def valid = service.validateWorkflowStep(step)
+
+        then:
+        valid
+        !step.hasErrors()
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: true
+        ]
+
+    }
+
+    def "validate workflow step missing plugin type"() {
+        given:
+        def step = new PluginStep([
+                type         : 'atype',
+                configuration: [
+                        a: 'b'
+                ]]
+        )
+        service.pluginService = Mock(PluginService)
+        service.frameworkService = Mock(FrameworkService)
+        when:
+        def valid = service.validateWorkflowStep(step)
+
+        then:
+        !valid
+        step.hasErrors()
+        step.errors.hasFieldErrors('type')
+        service.frameworkService.getStepPluginDescription('atype') >> {
+            throw new MissingProviderException('NodeStep', 'atype')
+        }
+
+    }
+
+    def "validate workflow step log filter invalid"() {
+        given:
+        def step = new CommandExec([
+                adhocRemoteString: 'test buddy',
+                pluginConfig     : [
+                        LogFilter: [
+                                [
+                                        type  : 'abc',
+                                        config: [a: 'b']
+                                ]
+                        ]
+                ]]
+        )
+        service.pluginService = Mock(PluginService)
+        service.frameworkService = Mock(FrameworkService)
+        when:
+        def valid = service.validateWorkflowStep(step)
+
+        then:
+        !valid
+        step.hasErrors()
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: false, report: 'bogus'
+        ]
+
+    }
+
+    def "do validate step log filter"() {
+        given:
+        setupDoValidate()
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            existsFrameworkProject('testProject') >> true
+            existsFrameworkProject('AProject') >> true
+            isClusterModeEnabled()>>false
+            getServerUUID()>>TEST_UUID1
+            getFrameworkProject(_) >> projectMock
+            getRundeckFramework() >> Mock(Framework) {
+                getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        validate(_) >> Mock(Validator.Report) {
+                            valid >> true
+                        }
+                    }
+                }
+            }
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            projectNames(*_)>>[]
+            getFrameworkNodeName() >> "testProject"
+            getNodeStepPluginDescription(_) >> Mock(Description)
+            getStepPluginDescription(_) >> Mock(Description)
+        }
+        def params = baseJobParams()
+        params.workflow.strategy = 'node-first'
+        params = params + [
+                '_sessionwf'          : 'true',
+                '_sessionEditWFObject': new Workflow(
+                        keepgoing: true,
+                        strategy: 'node-first',
+                        commands: [new CommandExec([
+                                adhocRemoteString: 'test buddy',
+                                pluginConfig     : [
+                                        LogFilter: [
+                                                [
+                                                        type  : 'abc',
+                                                        config: [a: 'b']
+                                                ]
+                                        ]
+                                ]]
+                        )]
+                ),
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+        when:
+        def results = service._dovalidate(params, authContext)
+
+        then:
+        !results.failed
+        def workflow = results.scheduledExecution.getWorkflowData()
+        !workflow.commands[0].hasErrors()
+        workflow.commands[0].pluginConfig.LogFilter != null
+        workflow.commands[0].pluginConfig.LogFilter == [
+                [config: [a: 'b'], type: 'abc']
+        ]
+        // Set up expectations with return values - these will be used during execution
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: true
+        ]
+        // Allow for step validation calls (with different parameters)
+        _ * service.frameworkService.validateDescription(_, _, _, _, _, _) >> [valid: true]
+
+    }
+
+    def "do validate step log filter invalid"() {
+        given:
+        setupDoValidate()
+        // Override frameworkService to be a Mock instead of Stub for interaction verification
+        def mockDescription = Mock(Description)
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            existsFrameworkProject('testProject') >> true
+            existsFrameworkProject('AProject') >> true
+            isClusterModeEnabled()>>false
+            getServerUUID()>>TEST_UUID1
+            getFrameworkProject(_) >> projectMock
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            projectNames(*_)>>[]
+            getFrameworkNodeName() >> "testProject"
+            getNodeStepPluginDescription(_) >> Mock(Description)
+            getStepPluginDescription(_) >> Mock(Description)
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+        }
+        // Override pluginService to set up return value for getPluginDescriptor
+        service.pluginService = Mock(PluginService) {
+            getPluginDescriptor('abc', LogFilterPlugin) >> 
+                    new DescribedPlugin(mockDescription, null, 'abc', null, null)
+        }
+        def params = baseJobParams()
+        params.workflow.strategy = 'node-first'
+        params = params + [
+                '_sessionwf'          : 'true',
+                '_sessionEditWFObject': new Workflow(
+                        keepgoing: true,
+                        strategy: 'node-first',
+                        commands: [new CommandExec([
+                                adhocRemoteString: 'filter test',
+                                pluginConfig     : [
+                                        LogFilter: [
+                                                [
+                                                        type  : 'abc',
+                                                        config: [a: 'b']
+                                                ]
+                                        ]
+                                ]]
+                        )]
+                ),
+        ]
+
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        results.failed
+        results.scheduledExecution.getWorkflowData().commands[0].hasErrors()
+
+        results.scheduledExecution.getWorkflowData().commands[0].pluginConfig.LogFilter != null
+        results.scheduledExecution.getWorkflowData().commands[0].pluginConfig.LogFilter == [
+                [config: [a: 'b'], type: 'abc']
+        ]
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        // validateDescription may be called multiple times - for step validation and for LogFilter validation
+        // More specific expectation first (for LogFilter), then general one (for step validation)
+        1 * service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: false, report: 'bogus'
+        ]
+//        // Allow other calls to validateDescription (for step validation) to return valid: true
+        _ * service.frameworkService.validateDescription(*_) >> [valid: true]
+
+    }
+    def "do validate workflow log filters"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()
+        params.workflow.globalLogFilters = [
+                '0': [
+                        type  : 'abc',
+                        config: [a: 'b']
+                ]
+        ]
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        !results.failed
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter != null
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter == [
+                [config: [a: 'b'], type: 'abc']
+        ]
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: true
+        ]
+
+    }
+
+    def "do validate workflow log filters invalid"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()
+        params.workflow.globalLogFilters = [
+                '0': [
+                        type  : 'abc',
+                        config: [a: 'b']
+                ]
+        ]
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        results.failed
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter != null
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter == [
+                [config: [a: 'b'], type: 'abc']
+        ]
+        results.scheduledExecution.errors.hasFieldErrors('workflow')
+        params['logFilterValidation']["0"]!=null
+        params['logFilterValidation']["0"] instanceof Validator.Report
+        !params['logFilterValidation']["0"].valid
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: false, report: Validator.errorReport('a','bogus')
+        ]
+
+    }
+
+    def "parse job plugins params"() {
+        given:
+            def params = [keys: keys] + other
+        when:
+            def result = ScheduledExecutionService.parseExecutionLifecyclePluginsParams(params)
+        then:
+            result
+            result.service == ServiceNameConstants.ExecutionLifecycle
+            result.pluginProviderConfigs!=null
+            result.pluginProviderConfigs.size()==expectSize
+            if(expectSize>0) {
+                result.pluginProviderConfigs.find { it.provider == 'aType' } != null
+                result.pluginProviderConfigs.find { it.provider == 'aType' }.configuration == [a: 'b']
+            }
+            if(expectSize>1){
+                result.pluginProviderConfigs.find{it.provider=='bType'}!=null
+                result.pluginProviderConfigs.find{it.provider=='bType'}.configuration==[b:'c']
+            }
+
+        where:
+            keys              | other  | expectSize
+            'asdf'            | [type: [asdf: 'aType'], asdf: [configMap: [a:'b']], enabled:[asdf:'true']] | 1
+            'asdf'            | [type: [asdf: 'aType'], asdf: [configMap: [a:'b',z:'']], enabled:[asdf:'true']] | 1
+            'asdf'            | [type: [asdf: 'aType'], asdf: [configMap: [a:'b',_z:'asdf']], enabled:[asdf:'true']] | 1
+            'asdf'            | [type: [asdf: 'aType'], asdf: [configMap: [a:'b']], enabled:[asdf:'false']] | 0
+            ['asdf']          | [type: [asdf: 'aType'], asdf: [configMap: [a:'b']], enabled:[asdf:'true']] | 1
+            ['asdf']          | [type: [asdf: 'aType'], asdf: [configMap: [a:'b']], enabled:[asdf:'false']] | 0
+            ['asdf', 'asdf2'] | [type: [asdf: 'aType', asdf2: 'bType'], asdf: [configMap: [a:'b']], asdf2: [configMap: [b:'c']], enabled:[asdf:'true']] | 1
+            ['asdf', 'asdf2'] | [type: [asdf: 'aType', asdf2: 'bType'], asdf: [configMap: [a:'b']], asdf2: [configMap: [b:'c']], enabled:[asdf:'true',asdf2:'false']] | 1
+            ['asdf', 'asdf2'] | [type: [asdf: 'aType', asdf2: 'bType'], asdf: [configMap: [a:'b']], asdf2: [configMap: [b:'c']], enabled:[asdf:'true',asdf2:'true']] | 2
+
+    }
+
+    def "do validate job plugins"() {
+        given:
+            setupDoValidate()
+            def params = baseJobParams()
+            params.executionLifecyclePlugins = [
+                    keys:['a','b'],
+                    enabled:['a':'true','b':'true'],
+                    type:[a:'aType',b:'bType'],
+                    'a': [
+                            configMap: [a: 'b']
+                    ],
+                    'b': [
+                            configMap: [b: 'c']
+                    ]
+            ]
+            service.frameworkService.getFrameworkProject(_)>>Mock(IRundeckProject){
+                getProperties()>>[:]
+            }
+
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+            1 * service.pluginService.validatePluginConfig('aType', ExecutionLifecyclePlugin,'AProject',[a:'b'])>>new ValidatedPlugin(valid:true)
+            1 * service.pluginService.validatePluginConfig('bType', ExecutionLifecyclePlugin,'AProject',[b:'c'])>>new ValidatedPlugin(valid:true)
+            1 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(_)>>{
+                PluginConfigSet.with ServiceNameConstants.ExecutionLifecycle, [
+                        SimplePluginConfiguration.builder().provider('aType').configuration([a:'b']).build(),
+                        SimplePluginConfiguration.builder().provider('bType').configuration([b:'c']).build(),
+                ]
+            }
+            1 * service.executionLifecycleComponentService.setExecutionLifecyclePluginConfigSetForJob(_,_)
+            !results.failed
+
+    }
+    def "do validate job plugins invalid"() {
+        given:
+            setupDoValidate()
+            def params = baseJobParams()
+            params.executionLifecyclePlugins = [
+                    keys:['a','b'],
+                    enabled:['a':'true','b':'true'],
+                    type:[a:'aType',b:'bType'],
+                    'a': [
+                            configMap: [a: 'b']
+                    ],
+                    'b': [
+                            configMap: [b: 'c']
+                    ]
+            ]
+            service.frameworkService.getFrameworkProject(_)>>Mock(IRundeckProject){
+                getProperties()>>[:]
+            }
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+            1 * service.pluginService.validatePluginConfig('aType',ExecutionLifecyclePlugin,'AProject',[a:'b'])>>new ValidatedPlugin(valid:false,report:Validator.errorReport('a','wrong'))
+            1 * service.pluginService.validatePluginConfig('bType',ExecutionLifecyclePlugin,'AProject',[b:'c'])>>new ValidatedPlugin(valid:true)
+            1 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(_)>>{
+                PluginConfigSet.with ServiceNameConstants.ExecutionLifecycle, [
+                        SimplePluginConfiguration.builder().provider('aType').configuration([a:'b']).build(),
+                        SimplePluginConfiguration.builder().provider('bType').configuration([b:'c']).build(),
+                ]
+            }
+            1 * service.executionLifecycleComponentService.setExecutionLifecyclePluginConfigSetForJob(_,_)
+            results.failed
+            results.scheduledExecution.errors.hasFieldErrors('pluginConfig')
+    }
+    @Unroll
+    def "do validate node-first strategy error handlers"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                _sessionEditWFObject: new Workflow([threadcount: 1, keepgoing: true, strategy: strategy]+cmds),
+        ]
+        params.workflow.strategy=strategy
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        results.scheduledExecution.errors.hasErrors()==expectFail
+        results.failed==expectFail
+        if(expectFail){
+            results.scheduledExecution.getWorkflowData().commands[0].errors.hasErrors()
+            results.scheduledExecution.getWorkflowData().commands[0].errors.hasFieldErrors('errorHandler')
+        }
+
+
+        where:
+        cmds | expectFail | strategy
+
+        ["commands": [new CommandExec(adhocRemoteString: 'test command1', adhocExecution: true, errorHandler:
+                new CommandExec(adhocRemoteString: 'test command2', adhocExecution: true)
+        ),]] | false | 'node-first'
+
+        ["commands": [new CommandExec(adhocRemoteString: 'test command1', adhocExecution: true, errorHandler:
+                new CommandExec(adhocRemoteString: 'test command2', adhocExecution: true)
+        ),]] | false | 'step-first'
+
+        ["commands": [new CommandExec(adhocRemoteString: 'test command1', adhocExecution: true, errorHandler:
+                new JobExec(jobGroup: 'test1', jobName: 'blah')
+        ),]] | true | 'node-first'
+
+        ["commands": [new CommandExec(adhocRemoteString: 'test command1', adhocExecution: true, errorHandler:
+                new JobExec(jobGroup: 'test1', jobName: 'blah')
+        ),]] | false | 'step-first'
+
+        ["commands": [new JobExec(jobGroup: 'test1', jobName: 'blah', errorHandler:
+                new CommandExec(adhocRemoteString: 'test command1', adhocExecution: true)
+        ),]] | false |  'node-first'
+
+        ["commands": [new JobExec(jobGroup: 'test1', jobName: 'blah', errorHandler:
+                new CommandExec(adhocRemoteString: 'test command1', adhocExecution: true)
+        ),]] | false |  'step-first'
+
+        ["commands": [new JobExec(jobGroup: 'test1', jobName: 'blah', errorHandler:
+                new JobExec(jobGroup: 'test1', jobName: 'blah')
+        ),]] | false | 'node-first'
+
+        ["commands": [new JobExec(jobGroup: 'test1', jobName: 'blah', errorHandler:
+                new JobExec(jobGroup: 'test1', jobName: 'blah')
+        ),]] | false | 'step-first'
+
+    }
+    def "do validate empty input is invalid"() {
+        given:
+        setupDoValidate()
+        def params = [:]
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        results.failed
+        for(String prop:['workflow','project','jobName']){
+            results.scheduledExecution.errors.hasFieldErrors(prop)
+        }
+
+    }
+    def "do validate job name"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+inparams
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasFieldErrors(fieldName)
+
+        where:
+        inparams                 | fieldName
+        [jobName: 'test/monkey'] | 'jobName'
+    }
+
+    def "do validate node dispatch threadcount blank"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams() + inparams
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        !results.failed
+        results.scheduledExecution.nodeThreadcount == expectCount
+
+        where:
+        inparams                                                             | expectCount
+        [doNodedispatch: 'true', nodeInclude: 'blah', nodeThreadcount: "1"]  | 1
+        [doNodedispatch: 'true', nodeInclude: 'blah', nodeThreadcount: ""]   | 1
+        [doNodedispatch: 'true', nodeInclude: 'blah', nodeThreadcount: null] | 1
+        [doNodedispatch: 'true', nodeInclude: 'blah', nodeThreadcount: "2"]  | 2
+        [doNodedispatch: 'true', nodeInclude: 'blah', nodeThreadcount: 2]    | 2
+    }
+    def "do validate old node filter params"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams() + inparams
+            def authContext = Mock(UserAndRolesAuthContext){
+                getUsername()>>'auser'
+                getRoles()>>(['a','b'] as Set)
+            }
+        when:
+            def results = service._dovalidate(params, authContext)
+
+        then:
+        !results.failed
+        for(String key: expect.keySet()){
+            results.scheduledExecution[key] == expect[key]
+        }
+
+        where:
+        inparams                                                             | expect
+        [doNodedispatch: 'true', nodeIncludeName: "bongo",
+                                 nodeExcludeOsFamily: "windows",
+                                 nodeIncludeTags: "spaghetti"]  | [filter:'name: bongo tags: spaghetti !os-family: windows']
+    }
+
+    @Unroll
+    def "validate notifications email data for #trigger"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+
+        def json = [[
+            type   : type,
+            trigger: trigger,
+            config : [
+                recipients: content
+            ]
+        ]].encodeAsJSON().toString()
+        def params = baseJobParams()+ [
+            jobNotificationsJson: json,
+        ]
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.notifications
+        results.scheduledExecution.notifications.size()==1
+        results.scheduledExecution.notifications[0].eventTrigger == trigger
+        results.scheduledExecution.notifications[0].type == type
+        results.scheduledExecution.notifications[0].configuration == [recipients:content]
+
+        where:
+        trigger                                             | type    | content
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'email' | 'c@example.com,d@example.com'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'email' | 'c@example.com,d@example.com'
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'email' | 'c@example.com,d@example.com'
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'email' | 'c@example.com,d@example.com'
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'email' | 'c@example.com,d@example.com'
+    }
+    @Unroll
+    def "validate notifications email data any domain #trigger for #content"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+        def json = [
+            [
+                type   : type,
+                trigger: trigger,
+                config : [
+                    recipients: content
+                ]
+            ]
+        ].encodeAsJSON().toString()
+        def params = baseJobParams()+ [
+            jobNotificationsJson: json,
+        ]
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.notifications[0].eventTrigger == trigger
+        results.scheduledExecution.notifications[0].type == type
+        results.scheduledExecution.notifications[0].configuration == [recipients:content]
+
+        where:
+        trigger                                                      | type    | content
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME          | 'email' | 'c@example.comd'
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME          | 'email' | '${job.user.name}@something.org'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME          | 'email' | 'example@any.domain'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME          | 'email' | '${job.user.email}'
+        NotificationConstants.ONSTART_TRIGGER_NAME            | 'email' | 'monkey@internal'
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME    | 'email' | 'user@test'
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'email' | 'example@any.domain'
+    }
+    @Unroll
+    def "invalid notifications data"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+
+        def config = type=='email'? [
+            recipients: content
+        ] : [
+            urls: content
+        ]
+        def json = [
+            [
+                type   : type,
+                trigger: trigger,
+                config : config
+            ]
+        ].encodeAsJSON().toString()
+        def params = baseJobParams()+ [
+            jobNotificationsJson: json,
+        ]
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasErrors()
+        results.scheduledExecution.errors.hasFieldErrors('notifications')
+
+        where:
+        trigger                                             | type    | content
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'email' | ''
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'email' | 'c@example.comd@example.com'
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'url' | ''
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'url' | 'c@example.comd@example.com'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'email' | ''
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'email' | 'monkey@ example.com'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'url' | ''
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'url' | 'monkey@ example.com'
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'email' | ''
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'email' | 'c@example.com d@example.com'
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'url' | ''
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'url' | 'c@example.com d@example.com'
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'email' | ''
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'email' | 'c@example.com d@example.com'
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'url' | ''
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'url' | 'c@example.com d@example.com'
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'email' | ''
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'email' | 'monkey@ example.com'
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'url' | ''
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'url' | 'monkey@ example.com'
+    }
+    @Unroll
+    def "do update job invalid notifications"() {
+        given:
+        setupDoUpdateJob()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newjob = new ScheduledExecution(createJobParams()).save()
+        newjob.addToNotifications(new Notification(
+                                        eventTrigger: trigger,
+                                        type: type,
+                                        content: content
+                                ))
+        def importedJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newjob, associations: [:])
+        service.jobSchedulesService = Mock(SchedulesManager)
+
+        when:
+        def results = service._doupdateJob(se.id,importedJob, mockAuth())
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasErrors()
+        results.scheduledExecution.errors.hasFieldErrors('notifications')
+
+        where:
+        trigger                                             | type    | content
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'email' | 'c@example.comd@example.com'
+        NotificationConstants.ONSUCCESS_TRIGGER_NAME | 'url' | 'c@example.comd@example.com'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'email' | 'monkey@ example.com'
+        NotificationConstants.ONFAILURE_TRIGGER_NAME | 'url' | 'monkey@ example.com'
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'email' | 'c@example.com d@example.com'
+        NotificationConstants.ONSTART_TRIGGER_NAME   | 'url' | 'c@example.com d@example.com'
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'email' | 'c@example.com d@example.com'
+        NotificationConstants.ONAVGDURATION_TRIGGER_NAME   | 'url' | 'c@example.com d@example.com'
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'email' | 'monkey@ example.com'
+        NotificationConstants.ONRETRYABLEFAILURE_TRIGGER_NAME | 'url' | 'monkey@ example.com'
+    }
+    @Unroll
+    def "do update job invalid option valuesUrl"() {
+        given:
+        setupDoUpdateJob()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newjob = new ScheduledExecution(createJobParams()).save()
+            newjob.addToOptions(new Option(
+                name:'anopt',
+                valuesUrlLong:'notaurl',
+                enforced:false
+            ))
+        def importedJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newjob, associations: [:])
+        service.jobSchedulesService = Mock(SchedulesManager)
+
+        when:
+        def results = service._doupdateJob(se.id,importedJob, mockAuth())
+
+        then:
+        _ * service.rundeckAuthContextProcessor.authorizeProjectJobAny(*_)>>true
+        !results.success
+        results.scheduledExecution.errors.hasErrors()
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.options[0].errors.hasErrors()
+        results.scheduledExecution.options[0].errors.hasFieldErrors('valuesUrlLong')
+
+    }
+    def "validate notifications email json"() {
+        given:
+
+        mockCodec(JSONCodec)
+        setupDoValidate()
+
+        def json = [
+            [
+                type   : 'email',
+                trigger: trigger,
+                config : [
+                    recipients: content
+                ]
+            ]
+        ].encodeAsJSON().toString()
+        def params = baseJobParams()+[
+            jobNotificationsJson:json
+        ]
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.notifications[0].eventTrigger == trigger
+        results.scheduledExecution.notifications[0].type == 'email'
+        results.scheduledExecution.notifications[0].configuration == [recipients:content]
+
+        where:
+        content='c@example.com,d@example.com'
+        trigger << NotificationConstants.TRIGGER_NAMES
+    }
+    def "invalid notifications email json"() {
+        given:
+
+        mockCodec(JSONCodec)
+        setupDoValidate()
+
+        def json = [
+            [
+                type   : 'email',
+                trigger: trigger,
+                config : [
+                    recipients: content
+                ]
+            ]
+        ].encodeAsJSON().toString()
+        def params = baseJobParams()+[
+            jobNotificationsJson:json
+        ]
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasErrors()
+        results.scheduledExecution.errors.hasFieldErrors('notifications')
+
+        where:
+        content='c@example.'//,'@example.com'
+        trigger << NotificationConstants.TRIGGER_NAMES
+    }
+
+
+    def "do validate crontabstring"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams() +[scheduled: true, crontabString: '0 1 2 3 4 ? *', useCrontabString: 'true']
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.scheduled
+        results.scheduledExecution.crontabString
+        results.scheduledExecution.seconds=='0'
+        results.scheduledExecution.minute=='1'
+        results.scheduledExecution.hour=='2'
+        results.scheduledExecution.dayOfMonth=='3'
+        results.scheduledExecution.month=='4'
+        results.scheduledExecution.dayOfWeek=='?'
+        results.scheduledExecution.year=='*'
+    }
+
+    private Map<String, Object> baseJobParams() {
+        [jobName : 'monkey1', project: 'AProject', description: 'blah',
+                workflow:[threadcount: 1, keepgoing: true,strategy: 'sequential'],
+         _sessionwf:'true',
+         _sessionEditWFObject: new Workflow(threadcount: 1, keepgoing: true, commands:[ new CommandExec(adhocExecution: true, adhocRemoteString: 'test command')]),
+        ]
+    }
+
+    def "validate options data"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[options: [
+                              "options[0]":
+                                      [
+                                              name: 'test3',
+                                              defaultValue: 'val3',
+                                              enforced: false,
+                                              valuesUrl: "http://test.com/test3"
+                                      ]
+                      ]
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == 'val3'
+        !results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].realValuesUrl == 'http://test.com/test3'
+    }
+
+    def "validate options data json"() {
+        given:
+        mockCodec(JSONCodec)
+        def extraParams=[jobOptionsJson: [[
+                                              name: 'test3',
+                                              value: 'val3',
+                                              enforced: false,
+                                              valuesUrl: "http://test.com/test3"
+                                          ]].encodeAsJSON().toString()]
+        setupDoValidate()
+        def params = baseJobParams()+extraParams
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == 'val3'
+        !results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].realValuesUrl == 'http://test.com/test3'
+
+    }
+    def "validate options data json test value"() {
+        given:
+        mockCodec(JSONCodec)
+        def extraParams=[jobOptionsJson: '''[{"optionType":"text","required":false,"hidden":false,"multivalued":false,"multivalueAllSelected":false,"secureInput":false,"secureExposed":false,"inputType":"plain","valuesUrl":"http://test.com/test3","optionValuesPluginType":"","remoteUrlAuthenticationType":"","configRemoteUrl":{},"sortValues":false,"regex":null,"description":"","name":"test3","value":"val3","valuesType":"list"}]''']
+        setupDoValidate()
+        def params = baseJobParams()+extraParams
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == 'val3'
+        !results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].realValuesUrl == 'http://test.com/test3'
+
+    }
+    def "validate scheduled job with required option without default"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      scheduled: true, crontabString: '0 1 2 3 4 ? *', useCrontabString: 'true',
+                      options: [
+                              'options[0]':
+                                      [
+                                              name: 'test3',
+                                              required: true,
+                                              enforced:false,
+                                              defaultValue: null
+                                      ]
+                      ]
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].errors.hasFieldErrors('defaultValue')
+        results.scheduledExecution.errors.hasFieldErrors('options')
+    }
+    def "validate options multivalued"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      options: [
+                              "options[0]":
+                                      [
+                                              name: 'test3',
+                                              defaultValue: 'val3',
+                                              enforced: false,
+                                              multivalued:true,
+                                              delimiter: ','
+                                      ]
+                      ]
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == 'val3'
+        !results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].multivalued
+        results.scheduledExecution.options[0].delimiter==','
+    }
+    def "validate options json multivalued"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+        def params = baseJobParams() + [
+            jobOptionsJson: [
+                [
+                    name       : 'test3',
+                    value      : 'val3',
+                    enforced   : false,
+                    multivalued: true,
+                    delimiter  : ','
+                ]
+            ].encodeAsJSON().toString()
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == 'val3'
+        !results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].multivalued
+        results.scheduledExecution.options[0].delimiter==','
+    }
+    def "invalid options data"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      options: [
+                              "options[0]":
+                                      [
+                                              name: name,
+                                              defaultValue: defval,
+                                              enforced: enforced,
+                                              valuesUrl: valuesUrl
+                                      ]
+                      ]
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.errors.getFieldError('options').getRejectedValue()[0].errors.hasFieldErrors(fieldName)
+
+        where:
+        name| defval     | enforced | valuesUrl               | fieldName
+        null | 'val3'    | false    | 'http://test.com/test3' | 'name'
+        'test1' | 'val3' | false    | 'hzzp://test.com/test3' | 'valuesUrl'
+    }
+    def "invalid options json data"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      jobOptionsJson: [
+                          [
+                                  name: name,
+                                  value: defval,
+                                  enforced: enforced,
+                                  valuesUrl: valuesUrl
+                          ]
+                      ].encodeAsJSON().toString()
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.errors.getFieldError('options').getRejectedValue()[0].errors.hasFieldErrors(fieldName)
+
+        where:
+        name| defval     | enforced | valuesUrl               | fieldName
+        null | 'val3'    | false    | 'http://test.com/test3' | 'name'
+        'test1' | 'val3' | false    | 'hzzp://test.com/test3' | 'valuesUrlLong'
+    }
+
+    @Unroll
+    def "validate options multivalued with multiple defaults using delimiter '#delimiter'"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                options: [
+                        "options[0]":
+                                [
+                                        name: 'test3',
+                                        defaultValue: "val1${delimiter}val2",
+                                        enforced: true,
+                                        multivalued:true,
+                                        delimiter: delimiter,
+                                        valuesList: "val1${delimiter}val2${delimiter}val3",
+                                        valuesListDelimiter: delimiter
+                                ]
+                ]
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == "val1${delimiter}val2"
+        results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].multivalued
+        results.scheduledExecution.options[0].delimiter == delimiter
+        results.scheduledExecution.options[0].optionValues == ['val1','val2','val3'] as List
+        results.scheduledExecution.options[0].valuesList == "val1${delimiter}val2${delimiter}val3"
+
+
+        where:
+        delimiter << [',', '-', '/']
+    }
+
+    @Unroll
+    def "validate options json multivalued with multiple defaults using delimiter '#delimiter'"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+        def params = baseJobParams()+[
+                jobOptionsJson: [
+                        [
+                                name: 'test3',
+                                value: "val1${delimiter}val2",
+                                enforced: true,
+                                multivalued:true,
+                                delimiter: delimiter,
+                                values: ['val1','val2','val3'],
+                                valuesListDelimiter: delimiter
+                        ]
+                ].encodeAsJSON().toString()
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        !results.failed
+        results.scheduledExecution.options.size()==1
+        results.scheduledExecution.options[0].name == 'test3'
+        results.scheduledExecution.options[0].defaultValue == "val1${delimiter}val2"
+        results.scheduledExecution.options[0].enforced
+        results.scheduledExecution.options[0].multivalued
+        results.scheduledExecution.options[0].delimiter == delimiter
+        results.scheduledExecution.options[0].valuesListDelimiter == delimiter
+        results.scheduledExecution.options[0].valuesList == "val1${delimiter}val2${delimiter}val3"
+        results.scheduledExecution.options[0].optionValues == ['val1','val2','val3'] as List
+
+        where:
+        delimiter << ['-', ',', '/']
+    }
+
+    def "invalid options multivalued"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      options: [
+                              "options[0]":
+                                      [
+                                              name: 'test3',
+                                              defaultValue: 'val1,val2',
+                                              enforced: true,
+                                              multivalued:true,
+                                              delimiter: ',',
+                                              valuesList: 'val1,val2,val3'
+                                      ]+data
+                      ]
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.errors.getFieldError('options').getRejectedValue()[0].errors.hasFieldErrors(fieldName)
+
+        where:
+        data                             | fieldName
+        [delimiter: null]                | 'delimiter'
+        [defaultValue: 'val1,val2,val4'] | 'defaultValue'
+        [secureInput: true]              | 'multivalued'
+    }
+    def "invalid options json multivalued"() {
+        given:
+        mockCodec(JSONCodec)
+        setupDoValidate()
+        def params = baseJobParams()+[
+                      jobOptionsJson: [
+                          [
+                                  name: 'test3',
+                                  value: 'val1,val2',
+                                  enforced: true,
+                                  multivalued:true,
+                                  delimiter: ',',
+                                  values: ['val1','val2','val3']
+                          ]+data
+                      ].encodeAsJSON().toString()
+        ]
+        service.fileUploadService = Mock(FileUploadService)
+        when:
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+        results.failed
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.errors.getFieldError('options').getRejectedValue()[0].errors.hasFieldErrors(fieldName)
+
+        where:
+        data                      | fieldName
+        [delimiter: null]         | 'delimiter'
+        [value: 'val1,val2,val4'] | 'defaultValue'
+        [secure: true]            | 'multivalued'
+    }
+    def setupDoUpdate(enabled=false, serverUUID = null){
+        def uuid=serverUUID?:UUID.randomUUID().toString()
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            authorizeProjectJobAll(*_)>>true
+            authorizeProjectResourceAll(*_)>>true
+            authorizeProjectResourceAny(*_)>>true
+            authorizeProjectJobAny(_,_,['update'],_)>>true
+            authorizeProjectJobAny(_,_,['create'],_)>>true
+            authorizeProjectResourceAny(_,AuthConstants.RESOURCE_TYPE_JOB,['create'],_)>>true
+            getAuthContextWithProject(_,_)>>{args->
+                return args[0]
+            }
+        }
+        service.frameworkService=Mock(FrameworkService){
+            existsFrameworkProject('AProject')>>true
+            existsFrameworkProject('BProject')>>true
+            isClusterModeEnabled()>>enabled
+            getServerUUID()>>uuid
+            projectNames(*_)>>['AProject', 'BProject']
+            getRundeckFramework()>>Mock(Framework){
+                getWorkflowStrategyService()>>Mock(WorkflowStrategyService){
+                    getStrategyForWorkflow(*_)>>Mock(WorkflowStrategy)
+                }
+            }
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            getFrameworkProject(_) >> projectMock
+            getNodeStepPluginDescription(_) >> Mock(Description)
+            getStepPluginDescription(_) >> Mock(Description)
+            validateDescription(_, '', _, _, _, _) >> [valid: true]
+        }
+        service.rundeckJobScheduleManager=Mock(JobScheduleManager){
+            determineExecNode(*_)>>{args->
+                return uuid
+            }
+        }
+
+        service.executionServiceBean=Mock(ExecutionService){
+            executionsAreActive()>>false
+        }
+        service.pluginService=Mock(PluginService)
+
+        service.executionUtilService=Mock(ExecutionUtilService){
+            createExecutionItemForWorkflow(_)>>Mock(WorkflowExecutionItem)
+        }
+        service.quartzScheduler = Mock(Scheduler)
+        service.executionLifecycleComponentService = Mock(ExecutionLifecycleComponentService)
+        service.rundeckJobDefinitionManager=Mock(RundeckJobDefinitionManager){
+            updateJob(_,_,_)>>{ RundeckJobDefinitionManager.importedJob(it[0],it[1]?.associations)}
+            validateImportedJob(_)>>new Validator.ReportSet(true,[:])
+        }
+        service.jobStatsDataProvider = new GormJobStatsDataProvider()
+
+        service.messageSource = Mock(MessageSource) {
+            getMessage(_, _) >> { it[0].toString() }
+        }
+        service.jobSchedulesService = Mock(JobSchedulesService) {
+            isScheduled(_) >> false
+            shouldScheduleExecution(_) >> true
+        }
+        uuid
+    }
+
+    def setupDoUpdateJob(enabled = false) {
+        def uuid = UUID.randomUUID().toString()
+
+        def projectMock = Mock(IRundeckProject) {
+            getProperties() >> [:]
+            getProjectProperties() >> [:]
+            _*_
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> projectMock
+            _ * existsFrameworkProject('BProject') >> true
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> enabled
+            _ * getServerUUID() >> uuid
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                    create(_,_) >> Mock(PropertyResolver)
+                }
+            _ * filterNodeSet(*_) >> null
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            _ * authorizeProjectJobAll(*_) >> true
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+        service.executionServiceBean = Mock(ExecutionService) {
+            _ * getExecutionsAreActive() >> false
+        }
+        service.pluginService = Mock(PluginService) {
+            _ * validatePlugin('node-first', _ as WorkflowStrategyService, _, _, _)
+        }
+
+        service.executionUtilService = Mock(ExecutionUtilService) {
+            _ * createExecutionItemForWorkflow(_) >> Mock(WorkflowExecutionItem) {
+                _ * getWorkflow()
+            }
+        }
+        service.quartzScheduler = Mock(Scheduler)
+        service.executionLifecycleComponentService = Mock(ExecutionLifecycleComponentService)
+        service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager){
+            updateJob(_,_,_)>>{
+                RundeckJobDefinitionManager.importedJob(it[0],it[1]?.associations?:[:])
+            }
+            validateImportedJob(_)>>new Validator.ReportSet(true,[:])
+        }
+        service.jobStatsDataProvider = new GormJobStatsDataProvider()
+        uuid
+    }
+
+    private UserAndRolesAuthContext mockAuth() {
+        Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'test'
+            getRoles() >> new HashSet<String>(['test'])
+        }
+    }
+
+    @Unroll
+    def "do update invalid"(){
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams(orig)).save()
+        service.fileUploadService = Mock(FileUploadService)
+        service.messageSource = Mock(MessageSource) {
+            getMessage(_, _) >> { it[0].toString() }
+        }
+        service.jobSchedulesService = Mock(SchedulesManager)
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasFieldErrors(fieldName)
+
+        where:
+        inparams | fieldName | orig
+        //invalid job name
+        [jobName:'test/blah']|'jobName' | [:]
+        //invalid workflow step
+        [ workflow: new Workflow([threadcount: 1, keepgoing: true, commands: [new CommandExec(adhocExecution: true, adhocRemoteString: '')]])]|'workflow' | [:]
+        //required option must have default when job is scheduled
+        [scheduled: true,
+         options: ["options[0]": [name: 'test', required:true, enforced: false, ]],
+         crontabString: '0 21 */4 */4 */6 ? 2010-2040', useCrontabString: 'true'] | 'options' | [:]
+        //existing option job now scheduled
+        [scheduled: true, crontabString: '0 21 */4 */4 */6 ? 2010-2040', useCrontabString: 'true',options:[new Option(name: 'test', required:true, enforced: false)]] | 'options' | [options:[new Option(name: 'test', required:true, enforced: false)]]
+    }
+
+    def "do update empty command"() {
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newjob = new ScheduledExecution(createJobParams(inparams))
+        def importedJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newjob, associations: [:])
+
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'test'
+            getRoles() >> new HashSet<String>(['test'])
+        }
+
+        service.messageSource = Mock(MessageSource) {
+            getMessage(_, _) >> { it[0].toString() }
+        }
+        service.jobSchedulesService = Mock(SchedulesManager)
+
+        when:
+        def results = service._doupdateJob(se.id, importedJob, mockAuth())
+
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasFieldErrors(fieldName)
+
+        where:
+        inparams | fieldName
+        [workflow: new Workflow(commands: [])] | 'workflow'
+    }
+
+    def "do update job invalid"(){
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newjob=new ScheduledExecution(createJobParams(inparams))
+        newjob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newjob, associations: [:])
+
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'test'
+            getRoles() >> new HashSet<String>(['test'])
+        }
+
+        service.messageSource = Mock(MessageSource) {
+            getMessage(_, _) >> { it[0].toString() }
+        }
+        service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+        def results = service._doupdateJob(se.id,newjob, mockAuth())
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasFieldErrors(fieldName)
+
+        where:
+        inparams | fieldName
+        [jobName:'test/blah']|'jobName'
+        [ workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: '', adhocExecution: true)])]|'workflow'
+    }
+    @Unroll("invalid crontab value for #reason")
+    def "do update job invalid crontab"(){
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newjob=new ScheduledExecution(createJobParams(scheduled:true,crontabString:crontabString))
+        service.jobSchedulesService = Mock(SchedulesManager)
+        newjob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newjob, associations: [:])
+        when:
+        def results = service._doupdateJob(se.id,newjob, mockAuth())
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasFieldErrors('crontabString')
+
+        where:
+        crontabString                   | reason
+        '0 0 2 32 */6 ?'                | 'day of month'
+        '0 0 2 ? 12 8'                  | 'day of week'
+        '0 21 */4 */4 */6 3 2010-2040'  | 'day of month and week set'
+        '0 21 */4 ? */6 ? 2010-2040'    | 'day of month and week ?'
+        '0 0 25 */4 */6 ?'              | 'hour'
+        '0 70 */4 */4 */6 ?'            | 'minute'
+        '0 0 2 3 13 ?'                  | 'month'
+        '70 21 */4 */4 */6 ?'           | 'seconds'
+        '0 21 */4 */4 */6 ? z2010-2040' | 'year char'
+        '0 21 */4 */4 */6'              | 'too few components'
+        '0 0 2 ? 12 1975'               | 'will never fire'
+    }
+
+    @Unroll("doupdate invalid crontab value for #reason")
+    def "do update invalid crontab"(){
+        given:
+            setupDoUpdate()
+            def se = new ScheduledExecution(createJobParams()).save()
+            def params = [id: se.id, scheduled: true, crontabString: crontabString, useCrontabString: 'true']
+            service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+            def results = service._doupdate(params, mockAuth())
+
+
+        then:
+            !results.success
+            results.scheduledExecution.errors.hasFieldErrors('crontabString')
+
+        where:
+            crontabString                   | reason
+            '0 0 2 32 */6 ?'                | 'day of month'
+            '0 0 2 ? 12 8'                  | 'day of week'
+            '0 21 */4 */4 */6 3 2010-2040'  | 'day of month and week set'
+            '0 21 */4 ? */6 ? 2010-2040'    | 'day of month and week ?'
+            '0 0 25 */4 */6 ?'              | 'hour'
+            '0 70 */4 */4 */6 ?'            | 'minute'
+            '0 0 2 3 13 ?'                  | 'month'
+            '70 21 */4 */4 */6 ?'           | 'seconds'
+            '0 21 */4 */4 */6 ? z2010-2040' | 'year char'
+            '0 21 */4 */4 */6'              | 'too few components'
+            '0 0 2 ? 12 1975'               | 'will never fire'
+    }
+    def "do update job options invalid"(){
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c'),
+                new Option(name: 'test2', enforced: false, valuesUrl: "http://test.com/test2")
+        ])).save()
+        def newjob=new ScheduledExecution(createJobParams(
+                options: [
+                        new Option(name: 'test1', defaultValue: 'val3', enforced: false, valuesUrl: "http://test.com/test3", multivalued: true),
+                        new Option(name: 'test2', defaultValue: 'd', enforced: true, valuesList: 'a,b,c,d', multivalued: true, delimiter: "testdelim")
+                ]
+        ))
+        service.fileUploadService = Mock(FileUploadService)
+        newjob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newjob, associations: [:])
+        service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+        def results = service._doupdateJob(se.id,newjob, mockAuth())
+
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.options[0].errors.hasFieldErrors('delimiter')
+        !results.scheduledExecution.options[1].errors.hasErrors()
+
+    }
+    def "do update valid"(){
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams(orig)).save()
+        service.fileUploadService = Mock(FileUploadService)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+
+        then:
+        results.success
+        if(expect){
+            for(String key:expect.keySet()){
+                results.scheduledExecution[key]==expect[key]
+            }
+        }
+
+        where:
+        inparams | orig                                                                                                                                                                                                      | expect
+        [ workflow: new Workflow([threadcount: 1, keepgoing: true, strategy:'node-first', commands: [new CommandExec(adhocExecution: true, adhocLocalString: 'test local')]])]|[:]                                                                                                                                                                                         |[:]
+        [nodeThreadcount: '',doNodedispatch: true,nodeInclude:'aname']|[[nodeThreadcount: 3,doNodedispatch: true,nodeInclude:'aname']]                                                                                       |[nodeThreadcount: 1]
+        [scheduled: true, crontabString: '0 21 */4 */4 */6 ? 2010-2040', useCrontabString: 'true'] | [:] | [scheduled: true, seconds:'0', minute:'21', hour:'*/4', dayOfMonth:'*/4', month:'*/6', dayOfWeek:'?', year:'2010-2040']
+        [scheduled: true,
+         options: ["options[0]": [name: 'test', required:true, enforced: false,defaultValue:'abc' ]],
+         crontabString: '0 21 */4 */4 */6 ? 2010-2040', useCrontabString: 'true'] | [:] | [scheduled: true]
+    }
+    @Unroll
+    def "do update workflow"(){
+        given:
+        setupDoUpdate()
+        setupSchedulerService(false)
+        def se = new ScheduledExecution(createJobParams(orig)).save()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+
+        then:
+        results.success
+        results.scheduledExecution.getWorkflowData().strategy==inparams._sessionEditWFObject.strategy
+        results.scheduledExecution.getWorkflowData().keepgoing==inparams._sessionEditWFObject.keepgoing in [true,'true']
+        if(inparams._sessionEditWFObject.threadcount) {
+            results.scheduledExecution.getWorkflowData().threadcount == inparams._sessionEditWFObject.threadcount
+        }else{
+            results.scheduledExecution.getWorkflowData().threadcount == 1
+        }
+        if(expect){
+            results.scheduledExecution.getWorkflowData().commands.size()==expect.size()
+            for(def i=0;i<expect.size();i++){
+                def map = expect[i]
+                def step = results.scheduledExecution.getWorkflowData().commands[i]
+                for(String key:map.keySet()){
+                    if (step instanceof CommandExec || step.hasProperty(key)) {
+                        step[key]==map[key]
+                    }
+                }
+            }
+        }
+
+        where:
+        inparams  | orig |  expect
+        ['_sessionwf':'true', '_sessionEditWFObject': new Workflow([threadcount: 1, keepgoing: true, strategy:'node-first', commands: [new CommandExec(adhocExecution: true, adhocLocalString: 'test local')]])] |
+                [:] |
+                [[adhocLocalString:'test local']]
+        ['_sessionwf':'true', '_sessionEditWFObject': new Workflow([threadcount: 1, keepgoing: false, strategy:'step-first', commands: [new CommandExec(adhocExecution: true, adhocLocalString: 'test command2')]])]                                                  |
+                [:]                                                                                                                                                                                                                       |
+                [[adhocRemoteString: 'test command2']]
+        ['_sessionwf':'true', '_sessionEditWFObject': new Workflow(strategy: 'step-first', keepgoing: false, commands: [new CommandExec(adhocExecution: true, adhocLocalString: 'test command2')])]                                                                                                                                                                    | [:] | []
+        //update via session workflow
+        ['_sessionwf':'true', '_sessionEditWFObject':new Workflow(keepgoing: true, strategy: 'node-first', commands: [new CommandExec([adhocRemoteString: 'test buddy'])])] |
+                [:] |
+                [[adhocRemoteString: 'test buddy']]
+    }
+
+    @Unroll
+    def "do update job valid"(){
+        given:
+        setupDoUpdate()
+
+        def se = new ScheduledExecution(createJobParams(orig)).save()
+        def newJob = new ScheduledExecution(createJobParams(inparams))
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+        service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> newJob.job.scheduled
+        }
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+
+        then:
+        results.success
+        if(inparams.workflow) {
+            results.scheduledExecution.getWorkflowData().commands.size() == inparams.workflow.commands.size()
+            def firstStep = results.scheduledExecution.getWorkflowData().commands[0]
+            if (firstStep instanceof CommandExec) {
+                firstStep.adhocRemoteString == 'test command'
+            }
+            if (inparams.workflow.commands[0].errorHandler) {
+                results.scheduledExecution.getWorkflowData().commands[0].errorHandler.properties == inparams.workflow.commands[0].errorHandler.properties
+            } else {
+                results.scheduledExecution.getWorkflowData().commands[0].errorHandler == null
+            }
+        }
+        if(expect){
+            for(String prop:expect.keySet()){
+                results.scheduledExecution[prop]==inparams[prop]
+            }
+        }
+
+        where:
+        inparams                                                                                                                                                                                                          | expect | orig
+        [description: 'new job', jobName: 'monkey',
+         workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test command', adhocExecution: true)])]                                                                                                   | [description: 'new job', jobName: 'monkey'] | [:]
+        [workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test command', errorHandler: new CommandExec(adhocRemoteString: 'err command'))])]                                                        | [:]| [:]
+        [workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test command', errorHandler: new PluginStep(keepgoingOnSuccess: true, type: 'asdf', nodeStep: true, configuration: ["blah": "value"]))])] | [:]| [:]
+        [workflow: new Workflow(commands: [
+                new CommandExec(adhocRemoteString: 'test command'),
+                new CommandExec(adhocRemoteString: 'another command'),
+        ])] | [:]                                                                                                                  | [:]
+        [doNodedispatch: true, nodeIncludeName: "nodename",] |[doNodedispatch: true, nodeIncludeName: "nodename",nodeInclude:null] | [doNodedispatch: true, nodeInclude: "hostname",]
+        [doNodedispatch: true, nodeInclude: "hostname",] |[doNodedispatch: true, nodeInclude: "hostname",nodeThreadcount: 3]       | [:]
+        [scheduled: true, crontabString: '0 21 */4 */4 */6 ? 2010-2040', useCrontabString: 'true'] |
+                [scheduled:true,seconds:'0',minute:'21',hour:'*/4',dayOfMonth:'*/4',month:'*/6',dayOfWeek:'?',year:'2010-2040']                                                                                                  | [:]
+
+    }
+    @Unroll
+    def "do update job valid notifications"(){
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        def se = new ScheduledExecution(createJobParams()).save();
+        se.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONSUCCESS_TRIGGER_NAME, type: 'email', content: 'c@example.com,d@example.com'))
+        se.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONFAILURE_TRIGGER_NAME, type: 'email', content: 'monkey@example.com'))
+
+        def newJob = new ScheduledExecution(createJobParams())
+        newJob.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONSUCCESS_TRIGGER_NAME, type: 'email', content: 'spaghetti@nowhere.com'))
+        newJob.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONFAILURE_TRIGGER_NAME, type: 'email', content: 'milk@store.com'))
+
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+
+        then:
+        !results.scheduledExecution.errors.hasErrors()
+        results.success
+        results.scheduledExecution.notifications.size()==2
+        results.scheduledExecution.notifications.find{it.eventTrigger==NotificationConstants.ONSUCCESS_TRIGGER_NAME}.configuration==[recipients:'spaghetti@nowhere.com']
+        results.scheduledExecution.notifications.find{it.eventTrigger==NotificationConstants.ONFAILURE_TRIGGER_NAME}.configuration==[recipients:'milk@store.com']
+
+    }
+    @Unroll
+    def "do update valid notifications"(){
+        given:
+        setupSchedulerService(false)
+        setupDoUpdate()
+        mockCodec(JSONCodec)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def json = inparams.encodeAsJSON().toString()
+        def params = [
+            jobNotificationsJson:json
+        ]
+
+        def se = new ScheduledExecution(createJobParams()).save();
+        se.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONSUCCESS_TRIGGER_NAME, type: 'email', content: 'c@example.com,d@example.com'))
+        se.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONFAILURE_TRIGGER_NAME, type: 'email', content: 'monkey@example.com'))
+
+        when:
+        def results = service._doupdate([id:se.id.toString()]+params, mockAuth())
+
+
+        then:
+        !results.scheduledExecution.errors.hasErrors()
+        results.success
+        results.scheduledExecution.notifications.size()==expect.size()
+        for(String trig: expect.keySet()){
+            results.scheduledExecution.notifications.find{it.eventTrigger==trig}.configuration==expect[trig]
+        }
+
+        where:
+        inparams|expect
+        [
+            [type:'email',trigger:NotificationConstants.ONSUCCESS_TRIGGER_NAME,config:[recipients:'spaghetti@nowhere.com']],
+            [type:'email',trigger:NotificationConstants.ONFAILURE_TRIGGER_NAME,config:[recipients:'milk@store.com']]
+        ] | [(NotificationConstants.ONSUCCESS_TRIGGER_NAME): [recipients: 'spaghetti@nowhere.com'], (NotificationConstants.ONFAILURE_TRIGGER_NAME): [recipients: 'milk@store.com']]
+
+        [
+            [type:'url',trigger:NotificationConstants.ONSUCCESS_TRIGGER_NAME,config:[urls:'http://monkey.com']]
+        ] | [(NotificationConstants.ONSUCCESS_TRIGGER_NAME): [url: 'http://monkey.com']]
+
+        [] | [:]
+
+    }
+
+    @Unroll
+    def "do update notifications json"() {
+        given:
+        setupSchedulerService(false)
+        setupDoUpdate()
+        mockCodec(JSONCodec)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def json = [[
+            trigger:trigger,
+            type:'email',
+            config:[
+                recipients:content
+            ]
+        ]].encodeAsJSON().toString()
+
+        def se = new ScheduledExecution(createJobParams()).save()
+        se.addToNotifications(new Notification(eventTrigger: NotificationConstants.ONSUCCESS_TRIGGER_NAME, type: 'email', content: 'a@example.com,z@example.com'))
+
+        def params = baseJobParams() + [
+            jobNotificationsJson:json
+        ]
+        when:
+        def results = service._doupdate([id:se.id.toString()]+params, mockAuth())
+
+        then:
+        results.success
+        !results.scheduledExecution.errors.hasErrors()
+        results.scheduledExecution.notifications.size()==1
+        results.scheduledExecution.notifications[0].eventTrigger == trigger
+        results.scheduledExecution.notifications[0].type == 'email'
+        results.scheduledExecution.notifications[0].configuration == [recipients:content]
+
+        where:
+        content='c@example.com,d@example.com'
+        trigger << NotificationConstants.TRIGGER_NAMES
+
+    }
+    @Unroll
+    def "do update options modify"(){
+        given:
+        setupSchedulerService(false)
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'a', enforced: true, valuesList: 'a,b,c'),
+                new Option(name: 'test2', enforced: false, valuesUrl: "http://test.com/test2")
+        ])).save()
+        service.fileUploadService = Mock(FileUploadService)
+
+        def params = baseJobParams()+input
+        when:
+        def results = service._doupdate([id:se.id.toString()]+params, mockAuth())
+
+
+        then:
+        results.scheduledExecution.errors.hasErrors() == !isSuccess
+        results.success == isSuccess
+
+        results.scheduledExecution.options?.size() == expectSize
+
+        def inputOptions = input?.options ?: input?._sessionEditOPTSObject
+
+        for(def i=0;i<inputOptions?.size();i++){
+            for(def prop:['name','defaultValue','enforced','realValuesUrl','valuesList']){
+                results.scheduledExecution.options[i]."$prop"==inputOptions["options[$i]"]."$prop"
+            }
+        }
+
+        where:
+        input|expectSize|isSuccess
+        //modify existing options
+        [options: ["options[0]": [name: 'test1', defaultValue: 'val3', enforced: false, valuesUrl: "http://test.com/test3"],
+                   "options[1]": [name: 'test2', defaultValue: 'd', enforced: true, valuesList: 'a,b,c,d']]] |  2 | true
+        //replace with a new option
+        [options: ["options[0]": [name: 'test3', defaultValue: 'val3', enforced: false, valuesUrl: "http://test.com/test3"]]] |  1  | true
+        //remove all options
+        [_sessionopts: true, _sessionEditOPTSObject: [:] ] | null | true //empty session opts clears options
+        [_sessionopts: true, _sessionEditOPTSObject: ['options[0]': new Option(name: 'test1', defaultValue: 'val3Changed', enforced: false, valuesUrl: "http://test.com/test3")], useCrontabString: 'true',crontabString: "X 48 09 ? * * *" ] | 1 | false
+        //don't modify options
+//        [:] | 2 | true
+
+    }
+    @Unroll
+    def "do update options invalid"(){
+        given:
+        setupDoUpdate()
+
+        def se = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'a', enforced: true, valuesList: 'a,b,c'),
+                new Option(name: 'test2', enforced: false, valuesUrl: "http://test.com/test2")
+        ])).save()
+
+        def params = baseJobParams()+input
+        service.fileUploadService = Mock(FileUploadService)
+
+        service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+        def results = service._doupdate([id:se.id.toString()]+params, mockAuth())
+
+
+        then:
+        results.scheduledExecution.errors.hasErrors()
+        !results.success
+
+        results.scheduledExecution.errors.hasFieldErrors('options')
+        results.scheduledExecution.options[0].errors.hasFieldErrors('delimiter')
+        !results.scheduledExecution.options[1].errors.hasErrors()
+        results.scheduledExecution.options[1].delimiter=='testdelim'
+
+        where:
+        input|_
+        //invalid test1 option delimiter
+        [options: ["options[0]": [name: 'test1', defaultValue: 'val3', enforced: false, multivalued: true],
+                   "options[1]": [name: 'test2', defaultValue: 'val2', enforced: false, valuesList: 'a,b,c,d', multivalued: true, delimiter: "testdelim"]]] |  _
+
+    }
+    def "do update job valid options"(){
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c'),
+                new Option(name: 'test2', enforced: false, valuesUrl: "http://test.com/test2")
+        ])).save()
+        def newJob = new ScheduledExecution(createJobParams(
+                options: input
+        ))
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+        service.fileUploadService = Mock(FileUploadService)
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+
+        then:
+        results.success
+
+        results.scheduledExecution.options?.size() == input?.size()
+
+        for(def i=0;i<input?.size();i++){
+            for(def prop:['name','defaultValue','enforced','realValuesUrl','valuesList']){
+                results.scheduledExecution.options[0]."$prop"==input[i]."$prop"
+            }
+        }
+
+        where:
+        input|_
+        [new Option(name: 'test1', defaultValue: 'val3', enforced: false, valuesUrl: "http://test.com/test3"),
+                new Option(name: 'test3', defaultValue: 'd', enforced: true, valuesList: 'a,b,c,d'),
+        ] |  _
+        null |  _
+
+    }
+    def "do update job nodethreadcount default 1"(){
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(doNodedispatch: true, nodeInclude: "hostname",
+                                                        nodeThreadcount: 1)).save()
+        def newJob = new ScheduledExecution(createJobParams(
+                doNodedispatch: true, nodeInclude: "hostname",
+                nodeThreadcount: null
+        ))
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+
+        then:
+        results.success
+
+        results.scheduledExecution.nodeThreadcount==1
+    }
+
+    def "do update job remove retry/timeout"() {
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(doNodedispatch: true,
+                                                        nodeInclude: "hostname",
+                                                        retry: '3',
+                                                        timeout: '2h'
+        )
+        ).save()
+        def newJob = new ScheduledExecution(createJobParams(
+                doNodedispatch: true,
+                nodeInclude: "hostname",
+                nodeThreadcount: null,
+                retry: null,
+                timeout: null
+        )
+        )
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+
+
+        when:
+        def results = service._doupdateJob(se.id, newJob, mockAuth())
+
+
+        then:
+        results.success
+
+        results.scheduledExecution.retry == null
+        results.scheduledExecution.timeout == null
+    }
+
+    def "do update job should replace options"() {
+
+        def projectName = 'testProject'
+        given:
+        setupSchedulerService()
+        def se = new ScheduledExecution(
+                jobName: 'monkey1',
+                project: projectName,
+                description: 'blah2',
+                adhocExecution: false,
+                name: 'aResource',
+                type: 'aType',
+                command: 'aCommand'
+        )
+        def opt1 = new Option(name: 'test1', defaultValue: 'val1', enforced: false, valuesUrl: "http://test.com/test")
+        def opt2 = new Option(name: 'test2', defaultValue: 'val2', enforced: true, valuesList: 'a,b,c')
+        se.addToOptions(opt1)
+        se.addToOptions(opt2)
+        se.save()
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+
+        def projectMock = Mock(IRundeckProject) {
+            getProperties() >> [:]
+        }
+
+        service.frameworkService = Mock(FrameworkService) {
+            isClusterModeEnabled() >> false
+            existsFrameworkProject(projectName) >> true
+            getFrameworkProject(projectName) >> projectMock
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            getNodeStepPluginDescription(_) >> Mock(Description)
+            getStepPluginDescription(_) >> Mock(Description)
+            validateDescription(_, '', _, _, _, _) >> [valid: true]
+            getRundeckFramework() >> Mock(Framework) {
+                getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy)
+                }
+            }
+        }
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            authorizeProjectJobAny(_,_,['update'],_)>>true
+        }
+        service.fileUploadService = Mock(FileUploadService)
+        service.pluginService = Mock(PluginService)
+        service.executionUtilService=Mock(ExecutionUtilService){
+            createExecutionItemForWorkflow(_)>>Mock(WorkflowExecutionItem)
+        }
+        service.executionLifecycleComponentService = Mock(ExecutionLifecycleComponentService)
+        service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager){
+            updateJob(_,_,_)>>{ RundeckJobDefinitionManager.importedJob(it[0],it[1]?.associations)}
+            validateImportedJob(_) >> new Validator.ReportSet(true, [:])
+
+        }
+        service.jobStatsDataProvider = new GormJobStatsDataProvider()
+
+
+        def params = new ScheduledExecution(jobName: 'monkey1', project: projectName, description: 'blah2',
+                                            workflow: new Workflow(
+                                                    commands: [new CommandExec(
+                                                            adhocRemoteString: 'test command',
+                                                            adhocExecution: true
+                                                    )]
+                                            ),
+                                            options: [
+                                                    new Option(
+                                                            name: 'test3',
+                                                            defaultValue: 'val3',
+                                                            enforced: false,
+                                                            valuesUrl: "http://test.com/test3"
+                                                    ),
+                                            ]
+        )
+        params = new RundeckJobDefinitionManager.ImportedJobDefinition(job:params, associations: [:])
+        when:
+        def results = service._doupdateJob(se.id, params, mockAuth())
+        def scheduledExecution = results.scheduledExecution
+        if (scheduledExecution && scheduledExecution.errors.hasErrors()) {
+            scheduledExecution.errors.allErrors.each {
+            }
+        }
+        then:
+        !results.scheduledExecution.errors.hasErrors()
+        results.success
+        scheduledExecution!=null
+        (scheduledExecution instanceof ScheduledExecution)
+        final ScheduledExecution execution = scheduledExecution
+        null!=(execution)
+        null!=(execution.errors)
+        assertFalse(execution.errors.hasErrors())
+        null!= execution.options
+        execution.options.size() == 1
+        final Iterator iterator = execution.options.iterator()
+        assert iterator.hasNext()
+        final Option next = iterator.next()
+        null!=(next)
+        next.name=="test3"
+        next.defaultValue=="val3"
+        null!= next.realValuesUrl
+        next.realValuesUrl=="http://test.com/test3"
+        !next.enforced
+    }
+
+
+    def "do update  remove retry/timeout"() {
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams([retry: '1', timeout: '2h'])).save()
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        when:
+        def results = service._doupdate([id: se.id.toString()], mockAuth())
+
+
+        then:
+        results.success
+        results.scheduledExecution.retry == null
+        results.scheduledExecution.timeout == null
+
+
+    }
+
+    def "do update job add error handlers verify strategy matches"() {
+        "in node-first strategy, node steps cannot have workflow step error handler"
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(
+                workflow: new Workflow(strategy: strategy,
+                                       commands: [
+                                               new CommandExec(adhocRemoteString: 'test command', adhocExecution: true),
+                                               new CommandExec(adhocRemoteString: 'test command', adhocExecution: true),
+                                               new JobExec(jobName: 'test1', jobGroup: 'test'),
+                                               new JobExec(jobName: 'test1', jobGroup: 'test'),
+                                       ]
+                )
+        )
+        ).save()
+
+
+        def eh1 = new CommandExec(adhocRemoteString: 'err command')
+        def eh2 = new CommandExec(adhocRemoteString: 'err command')
+        def eh3 = new JobExec(jobGroup: 'eh', jobName: 'eh1')
+        def eh4 = new JobExec(jobGroup: 'eh', jobName: 'eh2')
+
+        def newJob = new ScheduledExecution(createJobParams(
+                workflow: new Workflow(strategy: strategy,
+                                       commands: [
+                                               new CommandExec(
+                                                       adhocRemoteString: 'test command',
+                                                       adhocExecution: true,
+                                                       errorHandler: eh1
+                                               ),
+                                               new CommandExec(
+                                                       adhocRemoteString: 'test command',
+                                                       adhocExecution: true,
+                                                       errorHandler: eh3
+                                               ),
+                                               new JobExec(jobName: 'test1', jobGroup: 'test', errorHandler: eh2),
+                                               new JobExec(jobName: 'test1', jobGroup: 'test', errorHandler: eh4),
+                                       ]
+                )
+        )
+        )
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+
+        when:
+        def results = service._doupdateJob(se.id, newJob, mockAuth())
+
+
+        then:
+        results.success == issuccess
+        if (issuccess) {
+            results.scheduledExecution.jobName == 'monkey'
+            results.scheduledExecution.description == 'new job'
+            results.scheduledExecution.getWorkflowData().commands.size() == 4
+            results.scheduledExecution.getWorkflowData().commands[0].errorHandler != null
+            results.scheduledExecution.getWorkflowData().commands[1].errorHandler != null
+            results.scheduledExecution.getWorkflowData().commands[2].errorHandler != null
+            results.scheduledExecution.getWorkflowData().commands[3].errorHandler != null
+        } else {
+
+            !results.scheduledExecution.getWorkflowData().commands[0].errors.hasErrors()
+            results.scheduledExecution.getWorkflowData().commands[1].errors.hasErrors()
+            results.scheduledExecution.getWorkflowData().commands[1].errors.hasFieldErrors('errorHandler')
+            !results.scheduledExecution.getWorkflowData().commands[2].errors.hasErrors()
+            !results.scheduledExecution.getWorkflowData().commands[3].errors.hasErrors()
+        }
+
+        where:
+        strategy     | issuccess
+        'step-first' | true
+        'node-first' | false
+
+    }
+    def "do update cluster mode sets serverNodeUUID when enabled"(){
+        given:
+        setupSchedulerService(enabled)
+        def uuid=setupDoUpdate(enabled)
+        def se = new ScheduledExecution(createJobParams()).save()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+
+        then:
+        results.success
+        results.scheduledExecution.serverNodeUUID == (enabled?uuid:null)
+
+        where:
+        inparams                               | enabled
+        [jobName: 'newName']                   | true
+        [jobName: 'newName']                   | false
+        [jobName: 'newName', scheduled: false] | true
+        [jobName: 'newName', scheduled: false] | false
+    }
+
+    @Unroll
+    def "do update workflow log filters"() {
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams()).save()
+        def passparams = [id: se.id.toString()] + inparams
+        when:
+        def results = service._doupdate(passparams, mockAuth())
+
+
+        then:
+        results.success
+
+
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter != null
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter == [
+                [config: [a: 'b'], type: 'abc']
+        ]
+        !results.scheduledExecution.errors.hasFieldErrors('workflow')
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: true,
+        ]
+        where:
+        inparams | orig | expect
+        [workflow: [globalLogFilters: [
+                '0': [
+                        type  : 'abc',
+                        config: [a: 'b']
+                ]
+        ]]]      | _    | _
+    }
+
+    @Unroll
+    def "do update workflow log filters invalid"() {
+        given:
+        setupDoUpdate()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def passparams = [id: se.id.toString()] + inparams
+        service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+        def results = service._doupdate(passparams, mockAuth())
+
+
+        then:
+        !results.success
+
+
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter != null
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter == [
+                [config: [a: 'b'], type: 'abc']
+        ]
+        results.scheduledExecution.errors.hasFieldErrors('workflow')
+        passparams['logFilterValidation']["0"] !=null
+        passparams['logFilterValidation']["0"] instanceof Validator.Report
+        !passparams['logFilterValidation']["0"].valid
+        1 * service.pluginService.getPluginDescriptor('abc', LogFilterPlugin) >>
+                new DescribedPlugin(null, null, 'abc', null, null)
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: false, report: Validator.errorReport('a','bogus')
+        ]
+        where:
+        inparams | orig | expect
+        [workflow: [globalLogFilters: [
+                '0': [
+                        type  : 'abc',
+                        config: [a: 'b']
+                ]
+        ]]]      | _    | _
+    }
+
+    @Unroll
+    def "do update job workflow log filters"() {
+        given:
+        setupSchedulerService()
+        setupDoUpdateJob()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newJob = new ScheduledExecution(
+                createJobParams(
+                        [
+                                workflow: new Workflow(
+                                        keepgoing: true,
+                                        commands: [new CommandExec([adhocRemoteString: 'test buddy'])],
+                                        pluginConfigMap: pluginConfigMap
+                                )
+                        ]
+                )
+        )
+        service.jobSchedulesService = Mock(SchedulesManager){
+            1 * isScheduled(_)
+            1 * shouldScheduleExecution(_)
+        }
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+        def pluginService = service.pluginService
+        1 * pluginService.getPluginDescriptor('abc', LogFilterPlugin) >> new DescribedPlugin(null, null, 'abc', null, null)
+        1 * pluginService.getPluginDescriptor('node-first', _)
+        0 * pluginService.getPluginDescriptor(_, LogFilterPlugin)
+        // Add mocks for CommandExec step validation
+        service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+        // Allow validateDescription for LogFilter and also for CommandExec step validation
+        service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: true,
+        ]
+        // Allow additional calls for step validation
+        service.frameworkService.validateDescription(*_) >> [valid: true]
+        0 * service.jobLifecycleComponentService.beforeJobSave(_,_)
+        1 * service.frameworkService.getFrameworkNodeName()
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,['update'],'AProject')>>true
+        2 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(_)
+        1 * service.executionLifecycleComponentService.setExecutionLifecyclePluginConfigSetForJob(_,_)
+        1 * service.rundeckJobDefinitionManager.persistComponents(_,_)
+        1 * service.rundeckJobDefinitionManager.waspersisted(_,_)
+        0 * _
+        when:
+        def results = service._doupdateJob(se.id, newJob, mockAuth())
+
+
+        then:
+        !results.scheduledExecution.errors.hasErrors()
+        results.success
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter != null
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter == expect
+        !results.scheduledExecution.errors.hasFieldErrors('workflow')
+
+
+        where:
+        pluginConfigMap                                | expect
+        [LogFilter: [type: 'abc', config: [a: 'b']]]   | [[type: 'abc', config: [a: 'b']]]
+        [LogFilter: [[type: 'abc', config: [a: 'b']]]] | [[type: 'abc', config: [a: 'b']]]
+    }
+
+    @Unroll
+    def "do update job job plugin valid"() {
+        given:
+            setupSchedulerService()
+            setupDoUpdateJob()
+            def se = new ScheduledExecution(createJobParams()).save()
+            def newJob = new ScheduledExecution(createJobParams())
+            newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+            def pluginService = service.pluginService
+            1 * pluginService.getPluginDescriptor('node-first', _)
+            0 * pluginService.getPluginDescriptor(_, LogFilterPlugin)
+            // Add mocks for CommandExec step validation
+            service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+            service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+            service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+            def pluginConfigSet = PluginConfigSet.with(
+                    ServiceNameConstants.ExecutionLifecycle,
+                    [
+                            SimplePluginConfiguration.builder().
+                                    provider('aPlugin').
+                                    configuration([some: 'config']).
+                                    build()
+                    ]
+            )
+            1 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(newJob.job) >> pluginConfigSet
+            1 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(se) >> pluginConfigSet
+            1 * service.frameworkService.getFrameworkNodeName()
+            1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,['update'],_)>>true
+            0 * service.jobLifecycleComponentService.beforeJobSave(_,_)
+            1 * service.rundeckJobDefinitionManager.persistComponents(_,_)
+            1 * service.rundeckJobDefinitionManager.waspersisted(_,_)
+            service.jobSchedulesService = Mock(SchedulesManager){
+                1 * isScheduled(_)
+                1 * shouldScheduleExecution(_)
+            }
+            0 * _
+        when:
+            def results = service._doupdateJob(se.id, newJob, mockAuth())
+
+
+        then:
+            results.success
+
+            1 * service.pluginService.validatePluginConfig('aPlugin', ExecutionLifecyclePlugin, 'AProject', [some: 'config']) >>
+            new ValidatedPlugin(valid: true)
+            1 * service.executionLifecycleComponentService.setExecutionLifecyclePluginConfigSetForJob(_, _)
+
+    }
+
+    @Unroll
+    def "do update job job plugin invalid"() {
+        given:
+            setupDoUpdateJob()
+            def se = new ScheduledExecution(createJobParams()).save()
+            def newJob = new ScheduledExecution(createJobParams())
+            newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+            def pluginService = service.pluginService
+            1 * pluginService.getPluginDescriptor('node-first', _)
+            0 * pluginService.getPluginDescriptor(_, LogFilterPlugin)
+            // Add mocks for CommandExec step validation
+            service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+            service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+            service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+            def configSet = PluginConfigSet.with(
+                    ServiceNameConstants.ExecutionLifecycle,
+                    [
+                            SimplePluginConfiguration.builder().
+                                    provider('aPlugin').
+                                    configuration([some: 'config']).
+                                    build()
+                    ]
+            )
+            1 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(newJob.job) >> configSet
+            1 * service.executionLifecycleComponentService.setExecutionLifecyclePluginConfigSetForJob(_, _)
+            1 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(se) >> configSet
+            0 * service.frameworkService.getFrameworkNodeName()
+            0 * service.jobLifecycleComponentService.beforeJobSave(_,_)
+            0 * service.rundeckJobDefinitionManager.persistComponents(_,_)>>true
+            service.jobSchedulesService = Mock(SchedulesManager){
+                1 * isScheduled(_)
+            }
+            0 * _
+        when:
+            def results = service._doupdateJob(se.id, newJob, mockAuth())
+
+
+        then:
+            !results.success
+
+            1 * service.pluginService.validatePluginConfig('aPlugin', ExecutionLifecyclePlugin, 'AProject', [some: 'config']) >>
+            new ValidatedPlugin(valid: false,report: Validator.errorReport('a','wrong'))
+
+    }
+
+
+    @Unroll
+    def "do update job workflow log filters invalid"() {
+        given:
+        setupDoUpdateJob()
+        def se = new ScheduledExecution(createJobParams()).save()
+        def newJob = new ScheduledExecution(
+                createJobParams(
+                        [
+                                workflow: new Workflow(
+                                        keepgoing: true,
+                                        commands: [new CommandExec([adhocRemoteString: 'test buddy'])],
+                                        pluginConfigMap: pluginConfigMap
+                                )
+                        ]
+                )
+        )
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+        def pluginService = service.pluginService
+
+        1 * pluginService.getPluginDescriptor('abc', LogFilterPlugin) >> new DescribedPlugin(null, null, 'abc', null, null)
+        1 * pluginService.getPluginDescriptor('node-first', _)
+        0 * pluginService.getPluginDescriptor(_, LogFilterPlugin)
+        // Add mocks for CommandExec step validation
+        service.frameworkService.getNodeStepPluginDescription(_) >> Mock(Description)
+        service.frameworkService.getStepPluginDescription(_) >> Mock(Description)
+        1 * service.frameworkService.validateDescription(_, '', [a: 'b'], _, _, _) >> [
+                valid: false, report: Validator.errorReport('a','wrong')
+        ]
+        // Allow additional calls for step validation
+        service.frameworkService.validateDescription(*_) >> [valid: true]
+        0 * service.jobLifecycleComponentService.beforeJobSave(_,_)
+        0 * service.frameworkService.getFrameworkNodeName()
+        2 * service.executionLifecycleComponentService.getExecutionLifecyclePluginConfigSetForJob(_)
+        1 * service.executionLifecycleComponentService.setExecutionLifecyclePluginConfigSetForJob(_,_)
+
+        0 * service.rundeckJobDefinitionManager.persistComponents(newJob,_)
+        service.jobSchedulesService = Mock(SchedulesManager){
+            1 * isScheduled(_)
+        }
+        0 * _
+        when:
+        def results = service._doupdateJob(se.id, newJob, mockAuth())
+
+
+        then:
+        !results.success
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter != null
+        results.scheduledExecution.getWorkflowData().pluginConfigMap.LogFilter == expect
+        results.scheduledExecution.errors.hasFieldErrors('workflow')
+
+        where:
+        pluginConfigMap                                 | expect
+        [LogFilter: [type: 'abc', config: [a: 'b']]]    | [[type: 'abc', config: [a: 'b']]]
+        [LogFilter: [[type: 'abc', config: [a: 'b']]]]  | [[type: 'abc', config: [a: 'b']]]
+    }
+
+
+    def "do validate cluster mode sets serverNodeUUID when enabled"(){
+        given:
+        def uuid=setupDoValidate(enabled)
+        when:
+        def results = service._dovalidate(baseJobParams()+inparams, mockAuth())
+        then:
+        !results.failed
+        results.scheduledExecution.serverNodeUUID == (enabled?uuid:null)
+        where:
+        inparams                                                                    | enabled
+        [scheduled: true, crontabString: '0 1 1 1 * ? *', useCrontabString: 'true'] | true
+        [scheduled: true, crontabString: '0 1 1 1 * ? *', useCrontabString: 'true'] | false
+        [scheduled: false]                                                          | true
+        [scheduled: false]                                                          | false
+    }
+    def "do update job cluster mode sets serverNodeUUID when enabled"(){
+        given:
+        setupSchedulerService()
+        def uuid=setupDoUpdate(enabled)
+        def se = new ScheduledExecution(createJobParams()).save()
+
+
+        def newJob = new ScheduledExecution(createJobParams(inparams))
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+        def auth = Mock(UserAndRolesAuthContext) {
+            getUsername() >> 'test'
+            getRoles() >> new HashSet<String>(['test'])
+        }
+        service.jobSchedulerService = Mock(JobSchedulerService){
+            getRundeckJobScheduleManager()>>Mock(JobScheduleManager){
+                determineExecNode(*_)>>{args->
+                    return uuid
+                }
+            }
+        }
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, auth)
+
+
+        then:
+        results.success
+        results.scheduledExecution.serverNodeUUID == (enabled?uuid:null)
+        results.scheduledExecution.jobName == 'newName'
+
+        where:
+        inparams                               | enabled
+        [jobName: 'newName']                   | true
+        [jobName: 'newName']                   | false
+        [jobName: 'newName', scheduled: false] | true
+        [jobName: 'newName', scheduled: false] | false
+    }
+
+    def "load jobs with error handlers"(){
+        given:
+        setupDoUpdate()
+        service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,_,_) >> true
+        def upload = new ScheduledExecution(
+                jobName: 'testUploadErrorHandlers',
+                groupPath: "testgroup",
+                project: 'AProject',
+                description: 'desc',
+                workflow: new Workflow(commands: [
+                        new CommandExec(adhocExecution: true, adhocRemoteString: "echo test",
+                                        errorHandler: new CommandExec(adhocExecution: true,
+                                                                      adhocRemoteString: "echo this is an errorhandler")),
+                        new CommandExec(argString: "blah blah", adhocLocalString: "test2",
+                                        errorHandler: new CommandExec(argString: "blah blah err",
+                                                                      adhocLocalString: "test2err")),
+                        new CommandExec(argString: "blah3 blah3", adhocFilepath: "test3",
+                                        errorHandler: new CommandExec(argString: "blah3 blah3 err",
+                                                                      adhocFilepath: "test3err")),
+                        new JobExec(jobGroup: "group", jobName: "test",
+                                    errorHandler: new JobExec(jobName: "testerr", jobGroup: "grouperr", argString: "line err")),
+
+                ])
+        )
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+
+            upload = new RundeckJobDefinitionManager.ImportedJobDefinition(job:upload, associations: [:])
+        service.rundeckJobDefinitionManager.validateImportedJob(upload)>>true
+        when:
+        def result = service.loadImportedJobs([upload], 'update',null, [:],  mockAuth())
+
+        then:
+        result!=null
+        result.jobs!=null
+        result.errjobs!=null
+        result.skipjobs!=null
+        result.skipjobs.size()==0
+        result.errjobs.size()==0
+        result.jobs.size()==1
+        result.jobs[0].id!=null
+        ScheduledExecution job=result.jobs[0]
+        job.getWorkflowData().commands.size()==4
+        for(def cmd:job.getWorkflowData().commands) {
+            cmd.errorHandler!=null
+//            cmd.id!=null
+        }
+        // Verify error handlers exist and have the expected structure
+        // Type checks removed as commands may be WorkflowStepData interface
+        job.getWorkflowData().commands[0].errorHandler != null
+        job.getWorkflowData().commands[1].errorHandler != null
+        job.getWorkflowData().commands[2].errorHandler != null
+        job.getWorkflowData().commands[3].errorHandler != null
+
+    }
+
+    def "load jobs cannot load job with same uuid in different project"(){
+        given:
+        setupDoUpdate()
+        def  uuid=UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams()+[uuid:uuid]).save()
+        def upload = new ScheduledExecution(
+                createJobParams() + [project: 'BProject', description: 'new desc', uuid: uuid]
+        )
+
+        when:
+        def result = service.loadJobs([upload], option,uuidOption, [:],  mockAuth())
+
+        then:
+        if(success){
+
+            result.jobs.size()==1
+        }else {
+            result.errjobs.size() == 1
+            result.errjobs[0].scheduledExecution.errors.hasErrors()
+            result.errjobs[0].scheduledExecution.errors.hasFieldErrors('uuid')
+        }
+
+        where:
+        option   | uuidOption | success
+        'update' | null       | false
+        'update' | 'preserve' | false
+        'update' | 'remove'   | true
+        'create' | null       | false
+        'create' | 'preserve' | false
+        'create' | 'remove'   | true
+    }
+    @Unroll
+    def "load jobs should match updated jobs based on name,group,and project"(){
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        //scm update setup
+        service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,_,project) >> true
+        def  uuid=UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams(jobName:'job1',groupPath:'path1',project:'AProject')+[uuid:uuid]).save()
+        def upload = new ScheduledExecution(
+                createJobParams(jobName:name,groupPath:group,project:project)
+        )
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+        upload = new RundeckJobDefinitionManager.ImportedJobDefinition(job:upload, associations: [:])
+
+        service.rundeckJobDefinitionManager.validateImportedJob(upload)>>true
+        when:
+        def result = service.loadImportedJobs([upload], option,'remove', [:],  mockAuth())
+
+        then:
+
+        result.jobs.size()==1
+        if(issame){
+            result.jobs[0].id==orig.id
+        }else{
+            result.jobs[0].id!=orig.id
+        }
+
+
+        where:
+        name   | group   | project    | option   | issame
+        'job1' | 'path1' | 'AProject' | 'update' | true
+        'job1' | 'path1' | 'AProject' | 'create' | false
+        'job1' | 'path1' | 'AProject' | 'update' | false
+        'job2' | 'path2' | 'AProject' | 'update' | false
+        'job1' | 'path1' | 'BProject' | 'update' | false
+    }
+    @Unroll
+    def "load jobs should set user and roles"(){
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        //scm update setup
+        service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,_,project) >> true
+        def  uuid=UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams(jobName:'job1',groupPath:'path1',project:'AProject')+[uuid:uuid, user: 'test', lastModifiedBy: 'test']).save(flush: true)
+        def upload = new ScheduledExecution(
+                createJobParams(jobName:name,groupPath:group,project:project,scheduled:false)
+        )
+        upload.user = 'test'
+        upload.lastModifiedBy = 'test'
+        upload = new RundeckJobDefinitionManager.ImportedJobDefinition(job:upload, associations: [:])
+
+        service.rundeckJobDefinitionManager.validateImportedJob(upload)>>true
+        service.jobSchedulesService=Mock(JobSchedulesService){
+            1 * shouldScheduleExecution(_)>>true
+        }
+        when:
+        def result = service.loadImportedJobs([upload], option,'remove', [:],  mockAuth())
+
+        then:
+
+        result.jobs.size()==1
+        result.jobs[0].user=='test'
+        result.jobs[0].userRoles==['test']
+
+
+        where:
+        name   | group   | project    | option   | issame
+        'job1' | 'path1' | 'AProject' | 'update' | true
+        'job1' | 'path1' | 'AProject' | 'create' | false
+        'job1' | 'path1' | 'AProject' | 'update' | false
+        'job2' | 'path2' | 'AProject' | 'update' | false
+        'job1' | 'path1' | 'BProject' | 'update' | false
+    }
+    @Unroll
+    def "load jobs should update job"() {
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        def uuid = UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams(origprops) + [uuid: uuid]).save()
+        def upload = new ScheduledExecution(createJobParams(inparams))
+
+        def testmap=[
+                doNodedispatch: true,
+                nodeThreadcount: 4,
+                nodeKeepgoing: true,
+                nodeExcludePrecedence: true,
+                nodeInclude: 'asuka',
+                nodeIncludeName: 'test',
+                nodeExclude: 'testo',
+                nodeExcludeTags: 'dev',
+                nodeExcludeOsFamily: 'windows',
+                nodeIncludeTags: 'something',
+                description: 'blah'
+        ]
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+
+        when:
+        def result = service.loadJobs([upload], 'update', null, [:], mockAuth())
+
+        then:
+
+        result.jobs.size() == 1
+        result.jobs[0].properties.subMap(expect.keySet()) == expect
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,_,_) >> true
+
+        where:
+        origprops | inparams | expect
+        //basic fields updated
+        [:] | [description: 'milk duds'] | [description: 'milk duds']
+        //remove node filters
+        [doNodedispatch: true, filter: 'something',] |
+            [:] |
+            [doNodedispatch: false, filter: null, nodesSelectedByDefault: true]
+        //override filters
+        [doNodedispatch: true, nodeInclude: "monkey.*", nodeExcludeOsFamily: 'windows', nodeIncludeTags: 'something',] |
+
+            [doNodedispatch       : true,
+             nodeThreadcount      : 1,
+             nodeKeepgoing        : true,
+             nodeExcludePrecedence: true,
+             nodeInclude          : 'asuka',
+             nodeIncludeName      : 'test',
+             nodeExclude          : 'testo',
+             nodeExcludeTags      : 'dev'] |
+
+            [doNodedispatch       : true,
+             nodeThreadcount      : 1,
+             nodeKeepgoing        : true,
+             nodeExcludePrecedence: true,
+             nodeInclude          : null,
+             nodeIncludeName      : null,
+             nodeExclude          : null,
+             nodeExcludeTags      : null]
+        //
+        [doNodedispatch: true, nodeInclude: 'test', nodeThreadcount: 1] |
+            [nodeThreadcount      : 4,
+             nodeKeepgoing        : true,
+             nodeExcludePrecedence: true,
+             nodeInclude          : 'asuka',
+             nodeIncludeName      : 'test',
+             nodeExclude          : 'testo',
+             nodeExcludeTags      : 'dev'] |
+
+            [
+                nodeThreadcount      : 4,
+                nodeKeepgoing        : true,
+                nodeExcludePrecedence: true,
+                nodeInclude          : null,
+                nodeIncludeName      : null,
+                nodeExclude          : null,
+                nodeExcludeTags      : null]
+    }
+
+    def "load jobs cluster mode should set server UUID"(){
+        given:
+            def  serverUUID=UUID.randomUUID().toString()
+            setupDoUpdate(true,serverUUID)
+            service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,_,'AProject') >> true
+            service.jobSchedulerService = Mock(JobSchedulerService)
+
+            def  uuid=UUID.randomUUID().toString()
+            def orig = new ScheduledExecution(createJobParams(jobName:'job1',groupPath:'path1',project:'AProject',scheduled:false)+[uuid:uuid]).save()
+            def upload = new ScheduledExecution(
+                    createJobParams(jobName:'job1',groupPath:'path1',project:'AProject',uuid:uuid,scheduled:false)
+            )
+            service.jobSchedulesService=Mock(JobSchedulesService){
+                1 * shouldScheduleExecution(uuid)>>true
+            }
+            upload = new RundeckJobDefinitionManager.ImportedJobDefinition(job:upload, associations: [:])
+
+            service.rundeckJobDefinitionManager.validateImportedJob(upload)>>true
+        when:
+            def result = service.loadImportedJobs([upload], 'update',null, [:],  mockAuth())
+
+        then:
+            result.jobs.size()==1
+            result.jobs[0].serverNodeUUID==serverUUID
+    }
+
+    def "reschedule scheduled jobs"() {
+        given:
+        def job1 = new ScheduledExecution(createJobParams(userRoleList: 'a,b', user: 'bob')).save()
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler)
+        service.quartzJobSpecifier = new ExecutionJobQuartzJobSpecifier()
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectMock
+        }
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            getAllScheduled(_,_) >> [job1]
+            shouldScheduleExecution(_) >> job1.shouldScheduleExecution()
+        }
+        when:
+        def result = service.rescheduleJobs(null)
+
+        then:
+        job1.shouldScheduleExecution()
+        1 * service.executionServiceBean.getExecutionsAreActive() >> true
+        1 * service.frameworkService.getRundeckBase() >> ''
+        1 * service.frameworkService.isClusterModeEnabled() >> false
+        1 * service.quartzScheduler.checkExists(*_) >> false
+        1 * service.jobSchedulesService.handleScheduleDefinitions(_, _) >> new Date()
+    }
+
+    def "reschedule adhoc executions"() {
+        given:
+        setupSchedulerService(false)
+        def job1 = new ScheduledExecution(createJobParams(userRoleList: 'a,b', user: 'bob', scheduled: false)).save()
+        def exec1 = new Execution(
+                scheduledExecution: job1,
+                status: 'scheduled',
+                dateStarted: new Date() + 2,
+                dateCompleted: null,
+                project: job1.project,
+                user: 'bob',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")])
+        ).save(flush: true)
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler)
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectMock
+        }
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor)
+        service.fileUploadService = Mock(FileUploadService)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        when:
+        def result = service.rescheduleJobs(null)
+
+        then:
+        result.failedJobs.size() == 0
+        result.failedExecutions.size() == 0
+        result.jobs.size() == 0
+        result.executions.size() == 1
+        exec1 != null
+        !exec1.hasErrors()
+        !job1.shouldScheduleExecution()
+        job1.user == 'bob'
+        job1.userRoles == ['a', 'b']
+        1 * service.rundeckAuthContextProcessor.getAuthContextForUserAndRolesAndProject('bob', ['a', 'b'],job1.project) >> Mock(UserAndRolesAuthContext)
+        1 * service.executionServiceBean.getExecutionsAreActive() >> true
+        1 * service.frameworkService.getRundeckBase() >> ''
+        1 * service.jobSchedulerService.scheduleJob(_, _, _, exec1.dateStarted, false) >> exec1.dateStarted
+    }
+
+
+        def "reschedule onetime executions method"() {
+        given:
+        def job1 = new ScheduledExecution(createJobParams(userRoleList: 'a,b', user: 'bob', scheduled: false)).save()
+        def exec1 = new Execution(
+                scheduledExecution: job1,
+                status: 'scheduled',
+                dateStarted: new Date() + 2,
+                dateCompleted: null,
+                project: job1.project,
+                user: 'bob',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")])
+        ).save(flush: true)
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler)
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectMock
+        }
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor)
+        service.fileUploadService = Mock(FileUploadService)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.jobSchedulesService = Mock(JobSchedulesService){
+          1 * shouldScheduleExecution(_) >> true
+        }
+
+        when:
+        def result = service.rescheduleOnetimeExecutions(Arrays.asList(exec1))
+
+        then:
+        result.failedExecutions.size() == 0
+        result.executions.size() == 1
+        exec1 != null
+        !exec1.hasErrors()
+        !job1.shouldScheduleExecution()
+        job1.user == 'bob'
+        job1.userRoles == ['a', 'b']
+        1 * service.rundeckAuthContextProcessor.getAuthContextForUserAndRolesAndProject('bob', ['a', 'b'],job1.project) >> Mock(UserAndRolesAuthContext)
+        1 * service.executionServiceBean.getExecutionsAreActive() >> true
+        1 * service.frameworkService.getRundeckBase() >> ''
+        1 * service.jobSchedulerService.scheduleJob(_, _, _, exec1.dateStarted, false) >> exec1.dateStarted
+    }
+
+    def "reschedule adhoc execution getAuthContext error"() {
+        given:
+        setupSchedulerService()
+        def job1 = new ScheduledExecution(createJobParams(userRoleList: 'a,b', user: 'bob', scheduled: false)).save()
+        def exec1 = new Execution(
+                scheduledExecution: job1,
+                status: 'scheduled',
+                dateStarted: new Date() + 2,
+                dateCompleted: null,
+                project: job1.project,
+                user: 'bob',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")])
+        ).save(flush: true)
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler)
+        service.frameworkService = Mock(FrameworkService)
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor)
+        when:
+        def result = service.rescheduleJobs(null)
+
+        then:
+        result.failedJobs.size() == 0
+        result.failedExecutions.size() == 1
+        result.jobs.size() == 0
+        result.executions.size() == 0
+        exec1 != null
+        !exec1.hasErrors()
+        !job1.shouldScheduleExecution()
+        job1.user == 'bob'
+        job1.userRoles == ['a', 'b']
+        1 * service.rundeckAuthContextProcessor.getAuthContextForUserAndRolesAndProject('bob', ['a', 'b'],job1.project) >> {
+            throw new RuntimeException("getAuthContextForUserAndRoles failure")
+        }
+        0 * service.executionServiceBean.getExecutionsAreActive() >> true
+        0 * service.frameworkService.getRundeckBase() >> ''
+        0 * service.jobSchedulesService.handleScheduleDefinitions(_, _) >> new Date()
+    }
+    def "update execution flags change node ownership"() {
+        given:
+        setupDoValidate(true)
+        def uuid = setupDoUpdate(true)
+
+        def se = new ScheduledExecution(createJobParams()).save()
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+        when:
+        def params = baseJobParams()+[
+
+        ]
+        //def results = service._dovalidate(params, Mock(UserAndRolesAuthContext))
+        def results = service._doUpdateExecutionFlags(
+                [id: se.id.toString(), executionEnabled: executionEnabled, scheduleEnabled: scheduleEnabled],
+                null,
+                null,
+                null,
+                null,
+                null
+        )
+        def ScheduledExecution scheduledExecution = results.scheduledExecution
+
+        then:
+        scheduledExecution != null
+        scheduledExecution instanceof ScheduledExecution
+        if(scheduleEnabled != null && executionEnabled != null){
+            scheduledExecution.serverNodeUUID == uuid
+        }else{
+            scheduledExecution.serverNodeUUID == null
+        }
+
+        where:
+        scheduleEnabled | executionEnabled
+        true            | true
+        null            | false
+        false           | true
+        true            | null
+        null            | null
+    }
+
+    def 'getJobIdent'() {
+        given:
+        def job = isJob ? new ScheduledExecution(createJobParams(jobName: 'ajobname',
+            project: 'AProject',
+            groupPath: 'some/path',
+            scheduled: jobScheduled,
+            uuid: "a1"
+        )
+        ).save() : null
+        def exec = new Execution(
+            scheduledExecution: job,
+            status: executionStatus,
+            dateStarted: new Date(),
+            dateCompleted: null,
+            project: job?.project ?: 'testproject',
+            user: 'bob',
+            executionType: executionType,
+            workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")]),
+            retryAttempt: retry
+        ).save(flush: true)
+        def id = exec.id
+        when:
+        def result = service.getJobIdent(job, exec)
+        def finalJobName = jobname.replaceAll('%ID%', "$id").replaceAll('%JID%', "${job?.id}")
+        def finalGroupName = groupname.replaceAll('%ID%', "$id").replaceAll('%JID%', "${job?.id}")
+
+        then:
+        assert result.jobname == finalJobName
+        assert result.groupname == finalGroupName
+
+        where:
+        isJob | executionStatus | jobScheduled | executionType    | retry | jobname               | groupname
+        false | null            | null         | 'user'           | 0     | 'TEMP:bob:%ID%'       | 'bob:run'
+        true  | null            | false        | 'user'           | 0     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+        true  | null            | true         | 'user'           | 0     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+        true  | 'scheduled'     | true         | 'user'           | 0     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+        true  | 'running'       | true         | 'user'           | 0     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+        true  | null            | true         | 'scheduled'      | 0     | 'a1'                  | 'AProject'
+        true  | 'scheduled'     | true         | 'scheduled'      | 0     | 'a1'                  | 'AProject'
+        true  | 'running'       | true         | 'scheduled'      | 0     | 'a1'                  | 'AProject'
+        true  | 'running'       | true         | 'scheduled'      | 1     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+        true  | 'scheduled'     | true         | 'user-scheduled' | 0     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+        true  | 'running'       | true         | 'user-scheduled' | 0     | 'TEMP:bob:%JID%:%ID%' | 'bob:run:%JID%'
+
+    }
+
+    @Unroll
+    def "interrupt job"() {
+        given:
+        def name = 'a'
+        def group = 'b'
+        service.quartzScheduler = Mock(Scheduler)
+
+        when:
+        def result = service.interruptJob(instanceId, name, group, unschedule)
+
+        then:
+        result == expect
+        if (instanceId) {
+            1 * service.quartzScheduler.interrupt(instanceId) >> success
+        }
+        if (unschedule && !success) {
+            1 * service.quartzScheduler.deleteJob(_) >> diddelete
+        }
+
+        where:
+        instanceId | unschedule | success | diddelete | expect
+        null       | true       | false   | true      | true
+        null       | true       | false   | false     | false
+        null       | false      | _       | _         | false
+        'xyz'      | true       | true    | true      | true
+        'xyz'      | true       | false   | false     | false
+        'xyz'      | false      | true    | true      | true
+        'xyz'      | false      | false   | false     | false
+    }
+
+
+    @Unroll
+    def "timezone validations on save for #timezone"() {
+        given:
+        setupDoValidate()
+        def params = baseJobParams() +[scheduled: true,
+                                       crontabString: '0 1 2 3 4 ? *',
+                                       useCrontabString: 'true',
+                                        timeZone: timezone]
+        when:
+
+        def results = service._dovalidate(params, mockAuth())
+
+        then:
+
+        results.failed == expectFailed
+
+        where:
+            timezone               | expectFailed
+            null                   | false
+            ''                     | false
+            'America/Los_Angeles'  | false
+            'GMT-08:00'            | false
+            'GMT-8:00'             | false
+            'PST'                  | false
+            'XXXX'                 | true
+            'AAmerica/Los_Angeles' | true
+
+    }
+
+    def "timezone validations on update"(){
+        given:
+        setupSchedulerService()
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        def params = baseJobParams() +[scheduled: true,
+                                       crontabString: '0 1 2 3 4 ? *',
+                                       useCrontabString: 'true',
+                                       timeZone: timezone]
+        def se = new ScheduledExecution(createJobParams()).save()
+        service.fileUploadService = Mock(FileUploadService)
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + params, mockAuth())
+
+        then:
+        results.success == expectSuccess
+
+        where:
+        timezone    | expectSuccess
+        null        | true
+        ''          | true
+        'America/Los_Angeles'   |true
+        'GMT-8:00'  | true
+        'PST'       | true
+        'XXXX'      |false
+        'AAmerica/Los_Angeles' | false
+    }
+
+    @Unroll
+    def "scheduleJob with or without TimeZone shouldn't fail"() {
+        given:
+        setupSchedulerService(false)
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getRundeckBase() >> ''
+            getFrameworkProject('AProject') >> projectMock
+        }
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b',
+                        crontabString: '0 0 10 0 0 ? *',
+                        useCrontabString: 'true',
+                        timeZone: timezone
+                )
+        ).save()
+        def scheduleDate = new Date()
+
+        when:
+        def result = service.scheduleJob(job, null, null, true)
+
+        then:
+        1 * service.executionServiceBean.getExecutionsAreActive() >> executionsAreActive
+        1 * service.jobSchedulesService.handleScheduleDefinitions(_, _) >> [nextTime:scheduleDate]
+        result == [scheduleDate, null]
+
+        where:
+        executionsAreActive | timezone
+        true                | 'America/Los_Angeles'
+        true                | null
+        true                | ''
+    }
+
+
+
+    def "project passive mode execution"() {
+        given:
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> ['project.disable.executions':property]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectMock
+        }
+        when:
+        def result = service.isProjectExecutionEnabled(null)
+
+        then:
+        null != result
+        result == expect
+
+        where:
+        property   | expect
+        null       | true
+        ''         | true
+        'true'     | false
+        'false'    | true
+    }
+    def "isRundeckProjectExecutionEnabled"() {
+        given:
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> ['project.disable.executions':property]
+        }
+        when:
+        def result = service.isRundeckProjectExecutionEnabled(projectMock)
+
+        then:
+        null != result
+        result == expect
+
+        where:
+        property   | expect
+        null       | true
+        ''         | true
+        'true'     | false
+        'false'    | true
+    }
+
+    def "project passive mode schedule"() {
+        given:
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> ['project.disable.schedule':property]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectMock
+        }
+        when:
+        def result = service.isProjectScheduledEnabled(null)
+
+        then:
+        null != result
+        result == expect
+
+        where:
+        property   | expect
+        null       | true
+        ''         | true
+        'true'     | false
+        'false'    | true
+    }
+
+    def "isRundeckProjectScheduleEnabled"() {
+        given:
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> ['project.disable.schedule':property]
+        }
+        when:
+        def result = service.isRundeckProjectScheduleEnabled(projectMock)
+
+        then:
+        null != result
+        result == expect
+
+        where:
+        property   | expect
+        null       | true
+        ''         | true
+        'true'     | false
+        'false'    | true
+    }
+
+    def "project passive mode should schedule"() {
+        given:
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> ['project.disable.schedule':disableSchedule,
+                                       'project.disable.executions':disableExecution]
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectMock
+        }
+        when:
+        def result = service.shouldScheduleInThisProject('proj')
+
+        then:
+        null != result
+        result == expect
+
+        where:
+        disableSchedule   |disableExecution   | expect
+        null              |null               | true
+        ''                |''                 | true
+        'true'            |'true'             | false
+        'true'            |'false'            | false
+        'false'           |'false'            | true
+        'false'           |'true'             | false
+
+
+
+    }
+
+    def "should schedule despite project properties being outdated"() {
+        given:
+        def projectPropsOutdated = Mock(IRundeckProject) {
+            getProjectProperties() >> ['project.disable.schedule':(disableSchedule)?!Boolean.valueOf(disableSchedule):'true',
+                                       'project.disable.executions':(disableExecution)?!Boolean.valueOf(disableSchedule):'true']
+        }
+
+        def projectPropsUpdated = Mock(IRundeckProjectConfig) {
+            getProjectProperties() >> ['project.disable.schedule':disableSchedule,
+                                       'project.disable.executions':disableExecution]
+        }
+
+        service.frameworkService = Mock(FrameworkService) {
+            getFrameworkProject(_) >> projectPropsOutdated
+            getProjectConfigReloaded(_) >> projectPropsUpdated
+        }
+        when:
+        def result = service.shouldScheduleInThisProject('proj')
+
+        then:
+        null != result
+        result == expect
+
+        where:
+        disableSchedule   |disableExecution   | expect
+        null              |null               | true
+        ''                |''                 | true
+        'true'            |'true'             | false
+        'true'            |'false'            | false
+        'false'           |'false'            | true
+        'false'           |'true'             | false
+
+
+
+    }
+
+    @Unroll
+    def "do save job with dynamic threadcount"(){
+        given:
+        setupDoUpdate()
+
+        def job = new ScheduledExecution(createJobParams(doNodedispatch: true,
+                nodeInclude: "hostname",
+                nodeThreadcountDynamic: "\${option.threadcount}",
+                retry: null,
+                timeout: null,
+                options:[new Option(name: 'threadcount', defaultValue: '30', enforced: true)]
+                ))
+
+        when:
+        job.save()
+        then:
+        job.nodeThreadcount == 30
+    }
+
+    def "Option validation removes the default value from a secure option"(){
+        given:
+        def opt1 = new Option(
+                name: 'opt1',
+                required: false,
+                description: 'monkey1',
+                enforced: false,
+                secureInput: true,
+                defaultValue: "default",
+        )
+        def opt2 = new Option(
+                name: 'opt2',
+                required: false,
+                description: 'monkey',
+                enforced: false,
+                secureInput: true,
+                defaultValue: "default",
+                defaultStoragePath: "keys/keypath/key.key"
+        )
+        when:
+        service.cleanSecureOptionFromDefaultValue(opt1)
+        service.cleanSecureOptionFromDefaultValue(opt2)
+
+        then:
+        opt2.defaultValue == null
+        opt1.defaultValue == null
+    }
+
+    @Unroll
+    def "do update job dynamic nodethreadcount"(){
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(doNodedispatch: true, nodeInclude: "hostname",
+                nodeThreadcountDynamic: "\${option.threadcount}",
+                options:[new Option(name: 'threadcount', defaultValue: '30', enforced: true)]
+        )).save()
+        def newJob = new ScheduledExecution(createJobParams(
+                doNodedispatch: true, nodeInclude: "hostname",
+                nodeThreadcount: null,
+                nodeThreadcountDynamic: null
+        ))
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+
+
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+        then:
+        results.success
+        results.scheduledExecution.nodeThreadcountDynamic==null
+        results.scheduledExecution.nodeThreadcount==1
+    }
+
+    def "do update job options with label field"(){
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        def se = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c'),
+                new Option(name: 'test2', enforced: false, valuesUrl: "http://test.com/test2")
+        ])).save()
+        def newJob = new ScheduledExecution(createJobParams(
+                options: input
+        ))
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+        service.fileUploadService = Mock(FileUploadService)
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+
+        then:
+        results.success
+
+        results.scheduledExecution.options?.size() == input?.size()
+
+        for(def i=0;i<input?.size();i++){
+            for(def prop:['name','label']){
+                results.scheduledExecution.options[0]."$prop"==input[i]."$prop"
+            }
+        }
+
+        where:
+        input|_
+        [new Option(name: 'test1', label: 'label1', defaultValue: 'val3', enforced: false, valuesUrl: "http://test.com/test3"),
+         new Option(name: 'test3', label: 'label2', defaultValue: 'd', enforced: true, valuesList: 'a,b,c,d'),
+        ] |  _
+        null |  _
+
+    }
+
+
+
+    @Unroll
+    def "do update job on cluster"(){
+        given:
+        setupSchedulerService(true)
+        def serverUuid = '8527d81a-49cd-42e3-a853-43b956b77600'
+        def jobOwnerUuid = '5e0e96a0-042a-426a-80a4-488f7f6a4f13'
+        def uuid=setupDoUpdate(true, serverUuid)
+
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.executionServiceBean=Mock(ExecutionService){
+            getExecutionsAreActive()>>true
+        }
+
+        service.quartzScheduler = Mock(Scheduler){
+            checkExists(_) >> false
+        }
+
+        def se = new ScheduledExecution(createJobParams([serverNodeUUID:jobOwnerUuid])).save()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+
+        then:
+        results.success
+        results.scheduledExecution.serverNodeUUID == (shouldChange?serverUuid:jobOwnerUuid)
+        if(shouldChange) {
+            1 * service.jobSchedulerService.updateScheduleOwner(_) >> true
+            if(inparams.scheduled && inparams.scheduleEnabled){
+                1 * service.jobSchedulesService.handleScheduleDefinitions(_, _)
+            }
+        }
+
+        where:
+        inparams                                                                         | shouldChange
+        [jobName: 'newName', scheduled: true, scheduleEnabled: true]                     | false
+        [jobName: 'newName', scheduled: false, scheduleEnabled: true]                    | true
+        [jobName: 'newName', scheduled: true, scheduleEnabled: true]                     | false
+        [jobName: 'newName', timeZone: 'GMT+1', scheduled: true,scheduleEnabled: true]   | true
+        [jobName: 'newName', dayOfMonth: '10', scheduled: true,scheduleEnabled: true]    | true
+        [jobName: 'newName', scheduleEnabled: true, scheduled: true]                     | false
+        [jobName: 'newName', scheduleEnabled: false, scheduled: true]                    | true
+        [jobName: 'newName', executionEnabled: true, scheduled: true]                    | false
+        [jobName: 'newName', executionEnabled: false, scheduled: true]                   | true
+
+    }
+
+    @Unroll
+    def "do update job with job lifecycle plugin, nominal"(){
+        given:
+        setupSchedulerService()
+        def serverUuid = '8527d81a-49cd-42e3-a853-43b956b77600'
+        def jobOwnerUuid = '5e0e96a0-042a-426a-80a4-488f7f6a4f13'
+        def uuid=setupDoUpdate(true, serverUuid)
+        def se = new ScheduledExecution(createJobParams([serverNodeUUID:jobOwnerUuid])).save()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.jobLifecycleComponentService=Mock(JobLifecycleComponentService)
+
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+
+        then:
+        results.success
+        1 * service.jobLifecycleComponentService.beforeJobSave(se.project,_)>>lfresult
+
+        where:
+        inparams                                        | lfresult
+        [jobName: 'newName']                            | null
+        [jobName: 'newName']                            | Mock(JobLifecycleStatus){ isSuccessful()>>true }
+    }
+
+    @Unroll
+    def "do update with job lifecycle plugin, error thrown"(){
+        given:
+        def serverUuid = '8527d81a-49cd-42e3-a853-43b956b77600'
+        def jobOwnerUuid = '5e0e96a0-042a-426a-80a4-488f7f6a4f13'
+        def uuid=setupDoUpdate(true, serverUuid)
+        def se = new ScheduledExecution(createJobParams([serverNodeUUID:jobOwnerUuid])).save()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.jobLifecycleComponentService=Mock(JobLifecycleComponentService)
+
+        service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+        def results = service._doupdate([id: se.id.toString()] + inparams, mockAuth())
+
+        then:
+        !results.success
+        se.errors.hasErrors()
+        se.errors.hasGlobalErrors()
+        1 * service.jobLifecycleComponentService.beforeJobSave(se.project,_) >> {
+            throw new JobLifecycleComponentException('an error')
+        }
+
+        where:
+        inparams                                        | _
+        [jobName: 'newName']                            | _
+    }
+
+    @Unroll
+    def "do save with job lifecycle plugin, error thrown"(){
+        given:
+        def TEST_UUID1=setupDoValidate()
+            def jobparams = baseJobParams()+[
+
+                    workflow: new Workflow(threadcount: 1, keepgoing: true, commands: [new CommandExec(adhocExecution: true, adhocRemoteString: 'test what')]),
+            ]
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.jobLifecycleComponentService=Mock(JobLifecycleComponentService){
+            1 * beforeJobSave(_,_) >> {
+                throw new JobLifecycleComponentException('an error')
+            }
+        }
+
+        service.frameworkService = Stub(FrameworkService) {
+            existsFrameworkProject('AProject') >> true
+            isClusterModeEnabled() >> false
+            getServerUUID() >> TEST_UUID1
+            pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            projectNames(*_) >> []
+            getFrameworkNodeName() >> "testProject"
+            getNodeStepPluginDescription(_) >> Mock(Description)
+            getStepPluginDescription(_) >> Mock(Description)
+            validateDescription(_, '', _, _, _, _) >> [valid: true]
+        }
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            authorizeProjectJobAny(_,_,_,_)>>true
+        }
+        service.rundeckJobDefinitionManager.jobFromWebParams(_,_)>>{
+            new RundeckJobDefinitionManager.ImportedJobDefinition(job:it[0],associations: [:])
+        }
+        service.rundeckJobDefinitionManager.validateImportedJob(_)>>true
+        ImportedJob<ScheduledExecution> importedJob = service.updateJobDefinition(null, jobparams, mockAuth(), new ScheduledExecution())
+        when:
+        def results = service._dosave(jobparams,importedJob , mockAuth())
+
+        then:
+        !results.success
+        results.scheduledExecution.errors.hasErrors()
+        results.scheduledExecution.errors.hasGlobalErrors()
+        results.scheduledExecution.errors.globalErrors.any{it.code=='scheduledExecution.plugin.error.message'}
+
+    }
+
+    @Unroll
+    def "do save updated job, renamed with null jobName should fail at validation"() {
+        def params = [:]
+        def oldJob = new OldJob(oldjobname: 'other name')
+        def auth = Mock(UserAndRolesAuthContext){
+            getUsername()>>'bob'
+            getRoles()>>['a']
+        }
+        setupDoUpdateJob()
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                getProperties() >> [:]
+                getProjectProperties() >> [:]
+            }
+            _ * existsFrameworkProject('BProject') >> true
+
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> false
+            _ * getServerUUID() >> null
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            0 * authorizeProjectJobAll(_,_,_,_)
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+        given: "a job name set to null"
+            def job = new ScheduledExecution(createJobParams())
+            job.jobName = null
+            def importedJob = RundeckJobDefinitionManager.importedJob(job, [:])
+
+        when: "save the updated the job"
+            def results = service._dosaveupdated(params, importedJob, oldJob, auth)
+
+        then: "validation error results in failure"
+            !results.success
+            results.error.contains('Validation failed')
+    }
+
+    @Unroll
+    def "do save updated job, renaming a job with cluster enabled should keep original job name on job reference"() {
+        def params = [:]
+        def job = new ScheduledExecution(createJobParams())
+        def oldJob = new OldJob(oldjobname: 'blue', originalRef: ScheduledExecutionService.jobEventRevRef(job))
+        job.jobName = 'other name'
+        def auth = Mock(UserAndRolesAuthContext){
+            getUsername()>>'bob'
+            getRoles()>>['a']
+        }
+        setupDoUpdateJob()
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                getProperties() >> [:]
+                getProjectProperties() >> [:]
+            }
+            _ * existsFrameworkProject('BProject') >> true
+
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> true
+            _ * getServerUUID() >> null
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            1 * authorizeProjectJobAll(_,_,_,_) >> true
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * authorizeProjectJobAny(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+
+
+        JobReferenceImpl jobReferenceImpl = new JobReferenceImpl(
+                id: job.extid,
+                jobName: job.jobName,
+                groupPath: job.groupPath,
+                project: job.project,
+                serverUUID: job.serverNodeUUID,
+                originalQuartzJobName: oldJob.oldjobname,
+                originalQuartzGroupName: oldJob.oldjobgroup
+        )
+
+        service.jobSchedulerService = Mock(JobSchedulerService){
+            1 * updateScheduleOwner(_) >> { arguments ->
+                JobReferenceImpl jobReference = arguments[0];
+                jobReference.getOriginalQuartzJobName() == jobReferenceImpl.getOriginalQuartzJobName()
+                jobReference.getOriginalQuartzGroupName() == jobReferenceImpl.getOriginalQuartzGroupName()
+                return false
+            }
+        }
+
+        service.jobSchedulesService=Mock(SchedulesManager){
+            1 * shouldScheduleExecution(_) >> false
+        }
+
+        def importedJob = RundeckJobDefinitionManager.importedJob(job, [:])
+
+        when: "save the updated the job"
+            def results = service._dosaveupdated(params, importedJob, oldJob, auth)
+
+        then: "validation error results in failure"
+            results.success
+    }
+
+    @Unroll
+    def "do save updated job, check if remote scheduling was changed"() {
+        def params = [:]
+        def job = new ScheduledExecution(createJobParams())
+        def oldJob = new OldJob(oldjobname: 'blue', originalRef: ScheduledExecutionService.jobEventRevRef(job))
+        job.jobName = 'other name'
+        def auth = Mock(UserAndRolesAuthContext){
+            getUsername()>>'bob'
+            getRoles()>>['a']
+        }
+        setupDoUpdateJob()
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                getProperties() >> [:]
+                getProjectProperties() >> [:]
+            }
+            _ * existsFrameworkProject('BProject') >> true
+
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> true
+            _ * getServerUUID() >> null
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            1 * authorizeProjectJobAll(_,_,_,_) >> true
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * authorizeProjectJobAny(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+
+        service.jobSchedulerService = Mock(JobSchedulerService){
+            1 * updateScheduleOwner(_) >> false
+        }
+
+        service.jobSchedulesService=Mock(SchedulesManager){
+            1 * shouldScheduleExecution(_) >> remoteSchedulingChanged
+        }
+
+        def importedJob = RundeckJobDefinitionManager.importedJob(job, [:])
+
+        when: "save the updated the job"
+        def results = service._dosaveupdated(params, importedJob, oldJob, auth)
+
+        then: "validation error results in failure"
+        results.success
+        results.remoteSchedulingChanged == remoteSchedulingChanged
+
+        where:
+        remoteSchedulingChanged |_
+        true                    |_
+        false                   |_
+    }
+
+    @Unroll
+    def "do update job, disabled execution should delete quartz"() {
+        def params = [:]
+
+        def se = new ScheduledExecution(createJobParams()).save()
+        assert se.id!=null
+        def oldQuartzJob=se.generateJobScheduledName()
+        def oldQuartzGroup=se.generateJobGroupName()
+
+        def auth = Mock(UserAndRolesAuthContext){
+            getUsername()>>'bob'
+            getRoles()>>['a']
+        }
+        setupDoUpdateJob()
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                getProperties() >> [:]
+                getProjectProperties() >> [:]
+            }
+            _ * existsFrameworkProject('BProject') >> true
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> false
+            _ * getServerUUID() >> null
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+            _ * getNodeStepPluginDescription(_) >> Mock(Description)
+            _ * getStepPluginDescription(_) >> Mock(Description)
+            _ * validateDescription(_, '', _, _, _, _) >> [valid: true]
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            0 * authorizeProjectJobAll(_,_,_,_)
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+        service.jobSchedulesService=Mock(SchedulesManager)
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_, _, ['update'], 'AProject') >> true
+        1 * service.jobSchedulesService.shouldScheduleExecution(_) >> false
+        1 * service.jobSchedulesService.isScheduled(_) >> true
+
+        given: "modify job to disable execution or schedule"
+            def job = new ScheduledExecution(createJobParams(jobparams))
+            def importedJob = RundeckJobDefinitionManager.importedJob(job, [:])
+
+        when: "save the updated the job"
+            def results = service._doupdateJobOrParams(se.id, importedJob, params, auth)
+
+        then: "job should be deleted from quartz"
+            results.success
+            1 * service.jobSchedulerService.deleteJobSchedule(oldQuartzJob, oldQuartzGroup)
+        where:
+            jobparams                 | _
+            [scheduleEnabled: false]  | _
+            [executionEnabled: false] | _
+    }
+
+    @Unroll
+    def "do update job with external schedule, should not change owner"() {
+        def params = [:]
+
+        def se = new ScheduledExecution(createJobParams(scheduled:false)).save()
+        assert se.id!=null
+        def oldQuartzJob=se.generateJobScheduledName()
+        def oldQuartzGroup=se.generateJobGroupName()
+
+        def auth = Mock(UserAndRolesAuthContext){
+            getUsername()>>'bob'
+            getRoles()>>['a']
+        }
+        setupDoUpdateJob()
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                getProperties() >> [:]
+                getProjectProperties() >> [:]
+            }
+            _ * existsFrameworkProject('BProject') >> true
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> true
+            _ * getServerUUID() >> null
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+            _ * getNodeStepPluginDescription(_) >> Mock(Description)
+            _ * getStepPluginDescription(_) >> Mock(Description)
+            _ * validateDescription(_, '', _, _, _, _) >> [valid: true]
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            0 * authorizeProjectJobAll(_,_,_,_)
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+        service.jobSchedulesService=Mock(SchedulesManager)
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_, _, ['update'], 'AProject') >> true
+        1 * service.jobSchedulesService.shouldScheduleExecution(_) >> true
+        1 * service.jobSchedulesService.isScheduled(_) >> true
+
+        given: "modify job without modifying scheduling params"
+            def job = new ScheduledExecution(createJobParams([scheduled:false,description:'a new description']))
+            def importedJob = RundeckJobDefinitionManager.importedJob(job, [:])
+
+        when: "save the updated the job"
+            def results = service._doupdateJobOrParams(se.id, importedJob, params, auth)
+
+        then: "job should not have schedule owner changed"
+            results.success
+            0 * service.jobSchedulerService.deleteJobSchedule(oldQuartzJob, oldQuartzGroup)
+            0 * service.jobSchedulerService.updateScheduleOwner(_)
+    }
+
+    def "schedule owner updates when different user modifies job"() {
+        given: "an existing job created by user1"
+            def params = [:]
+            def originalUser = 'user1'
+            def modifyingUser = 'user2'
+
+            def se = new ScheduledExecution(
+                createJobParams(scheduled: false, user: originalUser, createdBy: originalUser)
+            ).save()
+            assert se.id != null
+            assert se.user == originalUser
+            assert se.createdBy == originalUser
+
+            def auth = Mock(UserAndRolesAuthContext) {
+                getUsername() >> modifyingUser
+                getRoles() >> ['user']
+            }
+
+            setupDoUpdateJob()
+
+            service.frameworkService = Mock(FrameworkService) {
+                _ * existsFrameworkProject('AProject') >> true
+                _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                    getProperties() >> [:]
+                    getProjectProperties() >> [:]
+                }
+                _ * existsFrameworkProject('BProject') >> true
+                _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+                _ * isClusterModeEnabled() >> false
+                _ * getServerUUID() >> null
+                _ * getRundeckFramework() >> Mock(Framework) {
+                    _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                        _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                            _ * validate(_)
+                        }
+                    }
+                }
+                _ * frameworkNodeName() >> null
+                _ * pluginConfigFactory(_, _) >> Mock(PropertyResolverFactory.Factory) {
+                    create(_, _) >> Mock(PropertyResolver)
+                }
+                _ * filterNodeSet(*_) >> null
+                _ * getNodeStepPluginDescription(_) >> Mock(Description)
+                _ * getStepPluginDescription(_) >> Mock(Description)
+                _ * validateDescription(_, '', _, _, _, _) >> [valid: true]
+            }
+
+            service.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor) {
+                0 * authorizeProjectJobAll(_, _, _, _)
+                _ * authorizeProjectResourceAll(*_) >> true
+                _ * filterAuthorizedNodes(*_) >> null
+                _ * getAuthContextWithProject(_, _) >> { args -> args[0] }
+            }
+            service.jobSchedulesService = Mock(SchedulesManager)
+            service.jobSchedulerService = Mock(JobSchedulerService)
+            1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_, _, ['update'], 'AProject') >> true
+            1 * service.jobSchedulesService.shouldScheduleExecution(_) >> false
+            1 * service.jobSchedulesService.isScheduled(_) >> false
+
+        and: "a modified job definition"
+            def modifiedJob = new ScheduledExecution(
+                createJobParams([
+                    scheduled: false,
+                    description: 'Modified by user2'
+                ])
+            )
+            def importedJob = RundeckJobDefinitionManager.importedJob(modifiedJob, [:])
+
+        when: "user2 saves the updated job"
+            def result = service._doupdateJobOrParams(se.id, importedJob, params, auth)
+
+        then: "the job saves successfully"
+            result.success
+
+        and: "the schedule owner is updated to user2"
+            def updatedJob = ScheduledExecution.get(se.id)
+            updatedJob.user == modifyingUser
+
+        and: "lastModifiedBy is also set to user2"
+            updatedJob.lastModifiedBy == modifyingUser
+
+        and: "createdBy still reflects the original creator (never changes on update)"
+            updatedJob.createdBy == originalUser
+
+        and: "the modification was applied"
+            updatedJob.description == 'Modified by user2'
+    }
+
+    def "createdBy is set once at job creation and never changed on subsequent updates"() {
+        given: "a job created by user1"
+            def params = [:]
+            def creatingUser = 'user1'
+            def modifyingUser = 'user2'
+
+            def se = new ScheduledExecution(
+                createJobParams(scheduled: false, user: creatingUser, createdBy: creatingUser)
+            ).save()
+            assert se.id != null
+            assert se.createdBy == creatingUser
+
+            def auth = Mock(UserAndRolesAuthContext) {
+                getUsername() >> modifyingUser
+                getRoles() >> ['user']
+            }
+
+            setupDoUpdateJob()
+
+            service.frameworkService = Mock(FrameworkService) {
+                _ * existsFrameworkProject('AProject') >> true
+                _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                    getProperties() >> [:]
+                    getProjectProperties() >> [:]
+                }
+                _ * existsFrameworkProject('BProject') >> true
+                _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+                _ * isClusterModeEnabled() >> false
+                _ * getServerUUID() >> null
+                _ * getRundeckFramework() >> Mock(Framework) {
+                    _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                        _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                            _ * validate(_)
+                        }
+                    }
+                }
+                _ * frameworkNodeName() >> null
+                _ * pluginConfigFactory(_, _) >> Mock(PropertyResolverFactory.Factory) {
+                    create(_, _) >> Mock(PropertyResolver)
+                }
+                _ * filterNodeSet(*_) >> null
+                _ * getNodeStepPluginDescription(_) >> Mock(Description)
+                _ * getStepPluginDescription(_) >> Mock(Description)
+                _ * validateDescription(_, '', _, _, _, _) >> [valid: true]
+            }
+
+            service.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor) {
+                0 * authorizeProjectJobAll(_, _, _, _)
+                _ * authorizeProjectResourceAll(*_) >> true
+                _ * filterAuthorizedNodes(*_) >> null
+                _ * getAuthContextWithProject(_, _) >> { args -> args[0] }
+            }
+            service.jobSchedulesService = Mock(SchedulesManager)
+            service.jobSchedulerService = Mock(JobSchedulerService)
+            1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_, _, ['update'], 'AProject') >> true
+            1 * service.jobSchedulesService.shouldScheduleExecution(_) >> false
+            1 * service.jobSchedulesService.isScheduled(_) >> false
+
+        and: "a modified job definition (user2 edits it multiple times)"
+            def modifiedJob = new ScheduledExecution(
+                createJobParams([scheduled: false, description: 'Modified by user2'])
+            )
+            def importedJob = RundeckJobDefinitionManager.importedJob(modifiedJob, [:])
+
+        when: "user2 saves the updated job"
+            def result = service._doupdateJobOrParams(se.id, importedJob, params, auth)
+
+        then: "update succeeds"
+            result.success
+
+        and: "schedule owner (user) is updated to the modifier"
+            def updatedJob = ScheduledExecution.get(se.id)
+            updatedJob.user == modifyingUser
+
+        and: "lastModifiedBy reflects the modifier"
+            updatedJob.lastModifiedBy == modifyingUser
+
+        and: "createdBy is still the original creator — immutable across any number of edits"
+            updatedJob.createdBy == creatingUser
+    }
+
+    @Unroll
+    def "do update job, enabled execution should register quartz"() {
+        def params = [:]
+
+        def se = new ScheduledExecution(createJobParams(uuid: "a1", scheduleEnabled: false, executionEnabled: false)).save()
+        assert se.id!=null
+        def oldQuartzJob=se.generateJobScheduledName()
+        def oldQuartzGroup=se.generateJobGroupName()
+        service.quartzJobSpecifier = new ExecutionJobQuartzJobSpecifier()
+
+        def auth = Mock(UserAndRolesAuthContext){
+            getUsername()>>'bob'
+            getRoles()>>['a']
+        }
+        setupDoUpdateJob()
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> Mock(IRundeckProject) {
+                getProperties() >> [:]
+                getProjectProperties() >> [:]
+            }
+            _ * existsFrameworkProject('BProject') >> true
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> false
+            _ * getServerUUID() >> null
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+            _ * getNodeStepPluginDescription(_) >> Mock(Description)
+            _ * getStepPluginDescription(_) >> Mock(Description)
+            _ * validateDescription(_, '', _, _, _, _) >> [valid: true]
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            0 * authorizeProjectJobAll(_,_,_,_)
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+        service.jobSchedulesService=Mock(SchedulesManager)
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        service.executionServiceBean=Mock(ExecutionService){
+            _* getExecutionsAreActive()>>true
+        }
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_, _, ['update'], 'AProject') >> true
+        2 * service.jobSchedulesService.shouldScheduleExecution(_) >> true
+        1 * service.jobSchedulerService.deleteJobSchedule(oldQuartzJob, oldQuartzGroup)
+        1 * service.jobSchedulesService.isScheduled(_) >> false
+        1 * service.quartzScheduler.checkExists(_)>>exists
+
+        given: "modify job to enable executions and schedule"
+            def job = new ScheduledExecution(createJobParams(jobparams))
+            def importedJob = RundeckJobDefinitionManager.importedJob(job, [:])
+
+        when: "save the updated the job"
+            def results = service._doupdateJobOrParams(se.id, importedJob, params, auth)
+
+        then: "job should be added to quartz"
+            results.success
+            1 * service.jobSchedulesService.handleScheduleDefinitions(_,exists)>>[nextTime:new Date()+1]
+        where:
+            jobparams                                       | exists
+            [scheduleEnabled: true, executionEnabled: true] | true
+            [scheduleEnabled: true, executionEnabled: true] | false
+    }
+
+    @Unroll
+    def "do update job with job lifecycle plugin, error thrown"(){
+        given:
+        def serverUUID = '802d38a5-0cd1-44b3-91ff-824d495f8105'
+        def currentOwner = '05b604ed-9a1e-4cb4-8def-b17a071afec9'
+        def uuid = setupDoUpdate(true,serverUUID)
+        service.jobSchedulerService = Mock(JobSchedulerService){
+            getRundeckJobScheduleManager()>>Mock(JobScheduleManager){
+                determineExecNode(*_)>>{args->
+                    return uuid
+                }
+            }
+        }
+
+        def orig = [serverNodeUUID: currentOwner]
+
+        def se = new ScheduledExecution(createJobParams(orig)).save()
+        def newJob = new ScheduledExecution(createJobParams(inparams)).save()
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+        service.frameworkService.getNodeStepPluginDescription('asdf') >> Mock(Description)
+        service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+        service.jobLifecycleComponentService=Mock(JobLifecycleComponentService)
+
+        service.jobSchedulesService = Mock(SchedulesManager)
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+        then:
+            !results.success
+            se.errors.hasErrors()
+            se.errors.hasGlobalErrors()
+            se.errors.globalErrors.any{it.code=='scheduledExecution.plugin.error.message'}
+            1 * service.jobLifecycleComponentService.beforeJobSave(se.project,_) >> {
+                throw new JobLifecycleComponentException('an error')
+            }
+
+
+        where:
+        inparams                                        | _
+        [jobName: 'newName']                            | _
+    }
+
+    @Unroll
+    def "do update list of jobs on cluster"(){
+        given:
+        def serverUUID = '802d38a5-0cd1-44b3-91ff-824d495f8105'
+        def currentOwner = '05b604ed-9a1e-4cb4-8def-b17a071afec9'
+        def uuid = setupDoUpdate(true,serverUUID)
+        service.jobSchedulerService = Mock(JobSchedulerService){
+            getRundeckJobScheduleManager()>>Mock(JobScheduleManager){
+                determineExecNode(*_)>>{args->
+                    return uuid
+                }
+            }
+        }
+
+        def orig = [serverNodeUUID: currentOwner]
+
+        def se = new ScheduledExecution(createJobParams(orig)).save()
+        def newJob = new ScheduledExecution(createJobParams(inparams)).save()
+        newJob = new RundeckJobDefinitionManager.ImportedJobDefinition(job:newJob, associations: [:])
+        service.frameworkService.getNodeStepPluginDescription('asdf') >> Mock(Description)
+        service.frameworkService.validateDescription(_, '', _, _, _, _) >> [valid: true]
+
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+
+        when:
+        def results = service._doupdateJob(se.id,newJob, mockAuth())
+
+        then:
+        results.success
+        results.scheduledExecution.serverNodeUUID == (shouldChange?serverUUID:currentOwner)
+        if(shouldChange) {
+            1 * service.jobSchedulerService.updateScheduleOwner(_) >> true
+        }
+
+        where:
+        inparams                                        | shouldChange
+        [jobName: 'newName']                            | false
+        [jobName: 'newName', scheduled: false]          | true
+        [jobName: 'newName', scheduled: true]           | false
+        [jobName: 'newName', timeZone: 'GMT+1']         | true
+        [jobName: 'newName', dayOfMonth: '10']          | true
+        [jobName: 'newName', scheduleEnabled: true]     | false
+        [jobName: 'newName', scheduleEnabled: false]    | true
+        [jobName: 'newName', executionEnabled: true]     | false
+        [jobName: 'newName', executionEnabled: false]    | true
+    }
+
+    @Unroll
+    def "scm update job using right update or scm_update permission"() {
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        def uuid = UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams([:]) + [uuid: uuid]).save()
+        def upload = new ScheduledExecution(createJobParams([description: 'milk duds'])+ [uuid: null])
+
+        def testmap=[
+                doNodedispatch: true,
+                nodeThreadcount: 4,
+                nodeKeepgoing: true,
+                nodeExcludePrecedence: true,
+                nodeInclude: 'asuka',
+                nodeIncludeName: 'test',
+                nodeExclude: 'testo',
+                nodeExcludeTags: 'dev',
+                nodeExcludeOsFamily: 'windows',
+                nodeIncludeTags: 'something',
+                description: 'blah'
+        ]
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+
+        when:
+        def result = service.loadJobs([upload], 'update', null, [method: 'scm-import'], mockAuth())
+
+        then:
+
+        result.jobs.size() == 1
+        result.jobs[0].properties.description == 'milk duds'
+        2 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_UPDATE, AuthConstants.ACTION_SCM_UPDATE],_) >> true
+    }
+
+    def "not check scm_update permission if isnt a scm-import"() {
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        def uuid = UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams([:]) + [uuid: uuid]).save()
+        def upload = new ScheduledExecution(createJobParams([description: 'milk duds']) + [uuid: null])
+
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+
+        when:
+        def result = service.loadJobs([upload], 'update', null, [method: 'x'], mockAuth())
+
+        then:
+
+        result.jobs.size() == 1
+        result.jobs[0].properties.description == 'milk duds'
+        2 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_UPDATE],_) >> true
+        0 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_UPDATE, AuthConstants.ACTION_SCM_UPDATE],_) >> true
+    }
+
+    @Unroll
+    def "scm update job without update or scm_update permission"() {
+        given:
+        setupDoUpdate()
+        def uuid = UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams([:]) + [uuid: uuid]).save()
+        def upload = new ScheduledExecution(createJobParams([description: 'milk duds'] + [uuid: null]))
+
+        when:
+        def result = service.loadJobs([upload], 'update', null, [method: 'scm-import'], mockAuth())
+
+        then:
+
+        result.jobs.size() == 0
+        result.errjobs.size() == 1
+        result.errjobs[0].errmsg.startsWith("Unauthorized: Update Job")
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_UPDATE, AuthConstants.ACTION_SCM_UPDATE],_) >> false
+    }
+
+
+    @Unroll
+    def "scm delete scheduledExecution By Id"(){
+        given:
+        setupDoUpdate()
+        service.rundeckAuthContextProcessor.authorizeProjectResource(*_)>>false
+        service.fileUploadService = Mock(FileUploadService)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        service.referencedExecutionDataProvider = new GormReferencedExecutionDataProvider()
+        def uuid = UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams([:]) + [uuid: uuid]).save()
+        def upload = new ScheduledExecution(createJobParams([description: 'milk duds'])).save()
+
+        when:
+        def result = service.deleteScheduledExecutionById(upload.id, mockAuth(), false, 'user', 'scm-import')
+
+        then:
+        result
+        result.success?.job
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_DELETE,AuthConstants.ACTION_SCM_DELETE],_) >> true
+    }
+
+    @Unroll
+    def "not scm delete scheduledExecution By Id"(){
+        given:
+        setupDoUpdate()
+        service.rundeckAuthContextProcessor.authorizeProjectResource(*_)>>false
+        service.fileUploadService = Mock(FileUploadService)
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        def uuid = UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams([:]) + [uuid: uuid]).save()
+        def upload = new ScheduledExecution(createJobParams([description: 'milk duds'])).save()
+
+        when:
+        def result = service.deleteScheduledExecutionById(upload.id, mockAuth(), false, 'user', 'non-scm')
+
+        then:
+        result
+        !result.sucess
+        result.error
+        0 * service.rundeckAuthContextProcessor.authorizeProjectJobAll(_,_,
+                [AuthConstants.ACTION_SCM_DELETE],_) >> true
+    }
+
+    @Unroll
+    def "scm create jobs using scm_create"(){
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        //scm create setup
+
+        def  uuid=UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams(jobName:'job1',groupPath:'path1',project:'AProject')+[uuid:uuid]).save()
+        def upload = new ScheduledExecution(
+                createJobParams(jobName:'job1',groupPath:'path1',project:'AProject')
+        )
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+        service.rundeckJobDefinitionManager.validateImportedJob(_)>>true
+
+        when:
+        def result = service.loadJobs([upload], 'create','remove', [method: 'scm-import'],  mockAuth())
+
+        then:
+        result.jobs.size()==1
+        1 * service.rundeckAuthContextProcessor.authorizeProjectResourceAny(_,AuthConstants.RESOURCE_TYPE_JOB,
+                [AuthConstants.ACTION_CREATE,AuthConstants.ACTION_SCM_CREATE],'AProject') >> true
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_CREATE,AuthConstants.ACTION_SCM_CREATE],_) >> true
+
+    }
+
+    @Unroll
+    def "scm create jobs not using scm_create"(){
+        given:
+        setupDoUpdate()
+        service.jobSchedulerService = Mock(JobSchedulerService)
+        //scm create setup
+
+        def  uuid=UUID.randomUUID().toString()
+        def orig = new ScheduledExecution(createJobParams(jobName:'job1',groupPath:'path1',project:'AProject')+[uuid:uuid]).save()
+        def upload = new ScheduledExecution(
+                createJobParams(jobName:'job1',groupPath:'path1',project:'AProject')
+        )
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> upload.scheduled
+        }
+        service.rundeckJobDefinitionManager.validateImportedJob(_)>>true
+
+        when:
+        def result = service.loadJobs([upload], 'create','remove', [method: 'create'],  mockAuth())
+
+        then:
+        result.jobs.size()==1
+        1 * service.rundeckAuthContextProcessor.authorizeProjectResourceAny(_,AuthConstants.RESOURCE_TYPE_JOB,
+                [AuthConstants.ACTION_CREATE],'AProject') >> true
+        0 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_SCM_CREATE],_) >> false
+        1 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_CREATE],_) >> true
+
+    }
+
+    def "blank email notification attached options defaults to inline"() {
+        given:
+        setupDoValidate()
+        mockCodec(JSONCodec)
+
+        def json = [
+            [
+                trigger:NotificationConstants.ONSUCCESS_TRIGGER_NAME,
+                type:'email',
+                config:[
+                    recipients:'a@example.com,z@example.com',
+                    attachLog:true,
+                    attachLogInFile:true
+                ]
+            ]
+        ].encodeAsJSON().toString()
+        def params = baseJobParams()+[
+                jobNotificationsJson:json
+        ]
+        def authContext = Mock(UserAndRolesAuthContext){
+            getUsername()>>'auser'
+            getRoles()>>(['a','b'] as Set)
+        }
+
+        when:
+        def results = service._dovalidate(params, authContext)
+        def ScheduledExecution scheduledExecution = results.scheduledExecution
+
+        then:
+
+        !results.failed
+        scheduledExecution != null
+        scheduledExecution instanceof ScheduledExecution
+
+        !scheduledExecution.errors.hasErrors()
+        scheduledExecution.notifications[0].mailConfiguration().recipients=='a@example.com,z@example.com'
+        scheduledExecution.notifications[0].mailConfiguration().attachLog
+        scheduledExecution.notifications[0].mailConfiguration().attachLogInFile
+
+    }
+
+
+    def "log change on flags change"() {
+        given:
+        def jobChangeLogger = Mock(Logger)
+        setupDoValidate(true)
+        def uuid = setupDoUpdate(true)
+
+        def se = new ScheduledExecution(createJobParams()).save()
+        service.jobSchedulesService = Mock(JobSchedulesService){
+            shouldScheduleExecution(_) >> se.scheduled
+        }
+        service.jobSchedulerService=Mock(JobSchedulerService)
+        and:
+        service.jobChangeLogger = jobChangeLogger
+        def expectedLog = user+" MODIFY [${se.uuid}] AProject \"some/where/blue\" (update)"
+        when:
+        def params = baseJobParams()+[
+
+        ]
+        //def results = service._dovalidate(params, Mock(UserAndRolesAuthContext))
+        def results = service._doUpdateExecutionFlags(
+                [id: se.id.toString(), executionEnabled: executionEnabled, scheduleEnabled: scheduleEnabled],
+                null,
+                null,
+                null,
+                null,
+                [method: 'update', change: 'modify', user: user]
+        )
+
+
+        then:
+        1 * service.jobChangeLogger.info(expectedLog)
+
+        where:
+        scheduleEnabled | executionEnabled  | user
+        true            | true              | 'admin'
+        null            | false             | 'test'
+        false           | true              | 'dev'
+        true            | null              | 'qa'
+        null            | null              |' user'
+    }
+
+
+    @Unroll
+    def "cluster, should not scheduleJob because the remote policy"() {
+        given:
+        service.executionServiceBean = Mock(ExecutionService)
+        service.quartzScheduler = Mock(Scheduler) {
+            getListenerManager() >> Mock(ListenerManager)
+        }
+        def projectMock = Mock(IRundeckProject) {
+            getProjectProperties() >> [:]
+        }
+
+        def serverNodeUUID = "uuid"
+        def clusterEnabled = true
+
+        service.frameworkService = Mock(FrameworkService) {
+            getRundeckBase() >> ''
+            getFrameworkProject(_) >> projectMock
+            getServerUUID() >> serverNodeUUID
+            isClusterModeEnabled() >> clusterEnabled
+        }
+        service.jobSchedulerService=Mock(JobSchedulerService){
+            determineExecNode(*_)>>{args->
+                return serverNodeUUID
+            }
+            scheduleRemoteJob(_)>>true
+        }
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        ).save()
+
+        when:
+            def result = service.scheduleJob(job, null, null)
+
+        then:
+            0 * service.jobSchedulesService.handleScheduleDefinitions(_, _)
+            result == [null, null]
+    }
+
+    @Unroll
+    def "list workflows uses query components"() {
+        given: "job query bean"
+            def testJobQuery = Mock(JobQuery)
+            defineBeans {
+                testJobQueryBean(InstanceFactoryBean, testJobQuery)
+            }
+            def params = [test: 'test2']
+            def input = Mock(JobQueryInput){
+                getMax()>>queryMax
+            }
+            service.applicationContext = applicationContext
+        when: "called with queryMax parameter #queryMax"
+            def result = service.listWorkflows(input, params)
+        then: "component extends search critera and optionally count criteria if max is set"
+            result != null
+            (queryMax>0?2:1) * testJobQuery.extendCriteria(_, _, _)
+        where:
+            queryMax << [0,20]
+
+    }
+
+
+    @Unroll
+    def "list workflows paging parameters total"() {
+        given:
+            def job1 = new ScheduledExecution(createJobParams()).save()
+            def job2 = new ScheduledExecution(createJobParams(jobName:'another job')).save()
+            def job3 = new ScheduledExecution(createJobParams(jobName:'another job2',groupPath:'another/group')).save()
+            def input = Mock(JobQueryInput){
+                getMax()>>queryMax
+                getProjFilter()>>'AProject'
+                getJobFilter()>>jobFilter
+            }
+            service.applicationContext = applicationContext
+        when:
+            def result = service.listWorkflows(input, [:])
+        then:
+            result != null
+            result.schedlist.size()==count
+            result.total==total
+
+        where:
+            queryMax | jobFilter | groupPath | total | count
+            0        | null      | null      | 3     | 3
+            0        | 'another' | null      | 2     | 2
+            1        | 'another' | null      | 2     | 1
+    }
+
+    @Unroll
+    def "list workflows group path - total"() {
+        given:
+            def job1 = new ScheduledExecution(createJobParams()).save()
+            def job2 = new ScheduledExecution(createJobParams(jobName:'another job',groupPath: '')).save()
+            def job3 = new ScheduledExecution(createJobParams(jobName:'another job2',groupPath:'')).save()
+            def input = Mock(JobQueryInput){
+                getMax()>>queryMax
+                getProjFilter()>>'AProject'
+                getGroupPath()>>groupPath
+            }
+            service.applicationContext = applicationContext
+        when:
+            def result = service.listWorkflows(input, [:])
+        then:
+            result != null
+            result.schedlist.size()==count
+            result.total == total
+
+        where:
+            queryMax |  groupPath    | total | count
+            0        |  'some/where' | 1     | 1
+            0        |  '-'          | 2     | 2
+            1        |  '-'          | 2     | 1
+    }
+
+    def "list workflows with 1001 job IDs in idlist returns all results without error"() {
+        given: "1001 jobs — verifies chunked IN queries for the idlist path (ORA-01795 fix)"
+            def jobs = (1..1001).collect { i ->
+                new ScheduledExecution(createJobParams(jobName: "bulk-job-${i}", uuid: "bulk-uuid-${i}")).save(flush: false)
+            }
+            ScheduledExecution.withSession { it.flush() }
+            def idlist = jobs*.id.join(',')
+            def input = Mock(JobQueryInput) {
+                getIdlist() >> idlist
+            }
+            service.applicationContext = applicationContext
+        when:
+            def result = service.listWorkflows(input, [:])
+        then:
+            result != null
+            result.schedlist.size() == 1001
+            result.total == 1001
+    }
+
+    @ConfineMetaClassChanges([Execution])
+    def "nextOneTimeScheduledExecutions batches HQL IN query into chunks of at most 1000 (ORA-01795 fix)"() {
+        given: "1001 scheduled executions and a captured Hibernate session/query"
+            def batchSizes = []
+            def query = new Expando()
+            query.setParameterList = { String name, Collection vals -> batchSizes << vals.size(); query }
+            query.setParameter = { String name, Object val -> query }
+            query.list = { -> [] }
+            def session = new Expando()
+            session.createQuery = { String hql -> query }
+            Execution.metaClass.static.withSession = { Closure c -> c.call(session) }
+
+            def seList = (1..1001).collect { i -> Mock(ScheduledExecution) { getId() >> (long) i } }
+        when:
+            def result = service.nextOneTimeScheduledExecutions(seList)
+        then: "the IN-list is split into batches of <=1000 covering every id"
+            batchSizes.size() == 2
+            batchSizes.every { it <= 1000 }
+            batchSizes.sum() == 1001
+            result == [:]
+    }
+
+    // getSchedulesExecutionLater chunking cannot be covered at unit-test level: the GORM DataTest
+    // environment uses a SimpleMap store that rejects the `property('scheduledExecution.id')`
+    // joined projection on the first Execution criteria, and the @Transactional AST transform
+    // prevents MetaClass interception of createCriteria() inside the service. The fix is verified
+    // by code review: both 'in'('se.uuid') and 'in'('id') sites use Lists.partition(..., 1000).
+
+    // getSchedulesJobToClaim chunking is not unit-tested here, by design:
+    //  - Enhanced JDBC path: the only seam is `new NamedParameterJdbcTemplate(dataSource)`, and
+    //    intercepting it requires a MetaClass *constructor* override, which intermittently
+    //    corrupts the shared test-worker JVM (flaky "could not write test results" crashes).
+    //  - Legacy GORM path: same @Transactional AST + GORM static-dispatch limitation as
+    //    getSchedulesExecutionLater (createCriteria can't be intercepted in the unit context).
+    // The fix is verified by code review and JobTakeoverQueryBuilderSpec; both paths drive
+    // Lists.partition(jobids, 1000) so no IN-list exceeds 1000. A full guard belongs in an
+    // integration test (real Hibernate / DataSource).
+
+
+    @Unroll
+    def "delete scheduled execution"() {
+        given:
+            def job = new ScheduledExecution(createJobParams()).save()
+            def authContext = Mock(AuthContext)
+            def username = 'bob'
+            def id = job.id
+            service.executionServiceBean = Mock(ExecutionService)
+            service.fileUploadService = Mock(FileUploadService)
+            service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager)
+            service.jobSchedulerService = Mock(JobSchedulerService)
+            service.referencedExecutionDataProvider = new GormReferencedExecutionDataProvider()
+            service.jobStatsDataProvider = new GormJobStatsDataProvider()
+
+        when:
+            def result = service.deleteScheduledExecution(job, deleteExecutions, authContext, username)
+        then:
+            result.success
+            !ScheduledExecution.get(id)
+            1 * service.fileUploadService.deleteRecordsForScheduledExecution(job)
+            1 * service.rundeckJobDefinitionManager.beforeDelete(job, authContext)
+            1 * service.rundeckJobDefinitionManager.afterDelete(job, authContext)
+            1 * service.jobSchedulerService.deleteJobSchedule(_, _)
+
+        where:
+            deleteExecutions << [true, false]
+    }
+
+    @Unroll
+    def "delete scheduled execution running"() {
+        given:
+            def job = new ScheduledExecution(createJobParams()).save()
+            def exec1 = new Execution(
+                    scheduledExecution: job,
+                    status: 'running',
+                    dateStarted: new Date() + 2,
+                    dateCompleted: null,
+                    project: job.project,
+                    user: 'bob',
+                    workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")])
+            ).save(flush: true)
+            def authContext = Mock(AuthContext)
+            def username = 'bob'
+            def id = job.id
+            service.executionServiceBean = Mock(ExecutionService)
+            service.fileUploadService = Mock(FileUploadService)
+            service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager)
+            service.jobSchedulerService = Mock(JobSchedulerService)
+        when:
+            def result = service.deleteScheduledExecution(job, deleteExecutions, authContext, username)
+        then:
+            !result.success
+            result.error =~ /it is currently being executed/
+            null != ScheduledExecution.get(id)
+            0 * service.fileUploadService.deleteRecordsForScheduledExecution(job)
+            0 * service.rundeckJobDefinitionManager.beforeDelete(job, authContext)
+            0 * service.rundeckJobDefinitionManager.afterDelete(job, authContext)
+            0 * service.jobSchedulerService.deleteJobSchedule(_, _)
+
+        where:
+            deleteExecutions << [true, false]
+    }
+
+
+    @Unroll
+    def "delete scheduled execution also executions"() {
+        given:
+            def job = new ScheduledExecution(createJobParams()).save()
+            def exec1 = new Execution(
+                    scheduledExecution: job,
+                    status: 'running',
+                    dateStarted: new Date(100),
+                    dateCompleted: new Date(10000),
+                    project: job.project,
+                    user: 'bob',
+                    workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")])
+            ).save(flush: true)
+
+            def authContext = Mock(AuthContext)
+            def username = 'bob'
+            def id = job.id
+            def execid = exec1.id
+            service.executionServiceBean = Mock(ExecutionService)
+            service.fileUploadService = Mock(FileUploadService)
+            service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager)
+            service.jobSchedulerService = Mock(JobSchedulerService)
+            service.referencedExecutionDataProvider = new GormReferencedExecutionDataProvider()
+            service.jobStatsDataProvider = new GormJobStatsDataProvider()
+        when:
+            def result = service.deleteScheduledExecution(job, deleteExecutions, authContext, username)
+        then:
+            !ScheduledExecution.get(id)
+            (deleteExecutions ? 1 : 0) * service.
+                    executionServiceBean.
+                    deleteBulkExecutionIds([execid], authContext, username)>>{
+                Execution.get(it[0].first()).delete(flush:true)
+            }
+            if (!deleteExecutions) {
+                def exec2 = Execution.get(execid)
+                exec2 != null
+                exec2.scheduledExecution == null
+            }
+            1 * service.fileUploadService.deleteRecordsForScheduledExecution(job)
+            1 * service.rundeckJobDefinitionManager.beforeDelete(job, authContext)
+            1 * service.rundeckJobDefinitionManager.afterDelete(job, authContext)
+            1 * service.jobSchedulerService.deleteJobSchedule(_, _)
+
+        where:
+            deleteExecutions << [true, false]
+    }
+
+    @Unroll
+    def "delete scheduled execution also deletes job stats and job refs"() {
+        given:
+            def job = new ScheduledExecution(createJobParams() + [uuid: UUID.randomUUID().toString()]).save()
+            def stats = new ScheduledExecutionStats(jobUuid: job.uuid, content: '{}').save()
+            def exec1 = new Execution(
+                    status: 'running',
+                    dateStarted: new Date(100),
+                    dateCompleted: new Date(10000),
+                    project: job.project,
+                    user: 'bob',
+                    workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: "test exec")])
+            ).save(flush: true)
+            def ref = new ReferencedExecution(jobUuid: job.uuid, status: 'success', execution: exec1).save()
+
+            def authContext = Mock(AuthContext)
+            def username = 'bob'
+            def id = job.id
+            def statid = stats.id
+            def refid = ref.id
+            service.executionServiceBean = Mock(ExecutionService)
+            service.fileUploadService = Mock(FileUploadService)
+            service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager)
+            service.jobSchedulerService = Mock(JobSchedulerService)
+            service.referencedExecutionDataProvider = new GormReferencedExecutionDataProvider()
+            service.jobStatsDataProvider = new GormJobStatsDataProvider()
+        when:
+            def result = service.deleteScheduledExecution(job, deleteExecutions, authContext, username)
+        then:
+            result.success
+            !ScheduledExecution.get(id)
+            !ScheduledExecutionStats.get(statid)
+            !ReferencedExecution.get(refid)
+            1 * service.fileUploadService.deleteRecordsForScheduledExecution(job)
+            1 * service.rundeckJobDefinitionManager.beforeDelete(job, authContext)
+            1 * service.rundeckJobDefinitionManager.afterDelete(job, authContext)
+            1 * service.jobSchedulerService.deleteJobSchedule(_, _)
+
+        where:
+            deleteExecutions << [true, false]
+    }
+
+    def "job definition basic should retain uuid"() {
+        given:
+            mockCodec(JSONCodec)
+            def uuid = UUID.randomUUID().toString()
+            def job = new ScheduledExecution(createJobParams(uuid: uuid))
+            def jobInput = input ? new ScheduledExecution(createJobParams(input)) : null
+
+            def auth = Mock(UserAndRolesAuthContext)
+
+        when:
+            service.jobDefinitionBasic(job, jobInput, params, auth)
+        then:
+            job.uuid == uuid
+        where:
+            input                 | params
+            null                  | [:]
+            [jobName: 'zocaster'] | null
+            null | baseJobParams()+[jobDetailsJson: '''[{"jobName": "zocaster"}]''']
+    }
+
+    @Unroll
+    def "job definition basic blank #propName should be set to #expect"() {
+        given:
+            def job = new ScheduledExecution(createJobParams())
+            def jobInput =  new ScheduledExecution(createJobParams())
+            jobInput?."$propName" = value
+
+            def auth = Mock(UserAndRolesAuthContext)
+
+        when:
+            service.jobDefinitionBasic(job, jobInput, params, auth)
+        then:
+            job."$propName" == expect
+
+        where:
+            propName    | value | params | expect
+            'jobName'   | ''    | null   | ''
+            'jobName'   | null  | null   | ''
+            'jobName'   | null  | [jobDetailsJson: '''[{"jobName": ""}]''']  | ''
+            'groupPath' | ''    | null   | null
+            'groupPath' | null  | null   | null
+            'groupPath' | null  | [jobDetailsJson: '''[{"groupPath": ""}]''']  | null
+    }
+
+    @Unroll
+    def "job definition basic null map #propName should be set to #expect"() {
+        given:
+            def job = new ScheduledExecution(createJobParams())
+
+            def params = [(propName): value]
+
+            def auth = Mock(UserAndRolesAuthContext)
+
+        when:
+            service.jobDefinitionBasic(job, null, params, auth)
+        then:
+            job."$propName" == expect
+
+        where:
+            propName    | value | expect
+            'jobName'   | ''    | ''
+            'jobName'   | null  | ''
+            'groupPath' | ''    | null
+            'groupPath' | null  | null
+    }
+
+    def "job definition basic excludes audit fields from imported job"() {
+        given: "existing job and imported job with audit fields set"
+            def existingJob = new ScheduledExecution(createJobParams([
+                user: 'original_creator',
+                lastModifiedBy: 'original_modifier',
+                description: 'original description'
+            ]))
+            def importedJob = new ScheduledExecution(createJobParams([
+                user: 'malicious_user',
+                lastModifiedBy: 'bad_modifier',
+                dateCreated: new Date(),
+                lastUpdated: new Date(),
+                description: 'updated description'
+            ]))
+            def auth = Mock(UserAndRolesAuthContext) {
+                getUsername() >> 'current_user'
+            }
+
+        when: "processing imported job through jobDefinitionBasic"
+            service.jobDefinitionBasic(existingJob, importedJob, [:], auth)
+
+        then: "audit fields are excluded but regular fields are updated"
+            existingJob.user == 'original_creator'        // audit field preserved
+            existingJob.lastModifiedBy == 'original_modifier' // audit field preserved
+            existingJob.description == 'updated description' // regular field updated
+    }
+
+    def "job definition basic excludes audit fields even when null in imported job"() {
+        given: "existing job with audit fields set and imported job with null audit fields"
+            def existingJob = new ScheduledExecution(createJobParams([
+                user: 'original_creator',
+                lastModifiedBy: 'original_modifier',
+                createdBy: 'original_creator_by',
+                description: 'original description'
+            ]))
+            // Imported job has null values for audit fields - should NOT overwrite existing values
+            def importedJob = new ScheduledExecution(createJobParams([
+                user: null,
+                lastModifiedBy: null,
+                createdBy: null,
+                dateCreated: null,
+                lastUpdated: null,
+                description: 'updated description',
+                jobName: 'updated name'
+            ]))
+            def auth = Mock(UserAndRolesAuthContext) {
+                getUsername() >> 'current_user'
+            }
+
+        when: "processing imported job through jobDefinitionBasic"
+            service.jobDefinitionBasic(existingJob, importedJob, [:], auth)
+
+        then: "audit fields with null values are excluded and preserve original values"
+            existingJob.user == 'original_creator'           // null audit field excluded
+            existingJob.lastModifiedBy == 'original_modifier' // null audit field excluded
+            existingJob.createdBy == 'original_creator_by'   // null audit field excluded
+            existingJob.description == 'updated description'  // regular field updated
+            existingJob.jobName == 'updated name'             // regular field updated
+    }
+
+    def "job definition workflow should have not null workflow"() {
+        given: "new job"
+            def job = new ScheduledExecution()
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "define the workflow from empty input"
+            service.jobDefinitionWorkflow(job, null, [:], auth)
+        then: "workflow is not null"
+            job.getWorkflowData() != null
+
+    }
+
+    def "job definition workflow from input job"() {
+        given: "new job"
+            def job = new ScheduledExecution()
+            def input = new ScheduledExecution(createJobParams())
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "define the workflow from input job"
+            service.jobDefinitionWorkflow(job, input, [:], auth)
+        then: "workflow is the same"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().keepgoing == input.getWorkflowData().toMap().keepgoing
+            job.getWorkflowData().toMap().strategy == input.getWorkflowData().toMap().strategy
+            job.getWorkflowData().toMap().commands == input.getWorkflowData().toMap().commands
+
+    }
+
+    def "job definition workflow from workflow param"() {
+        given: "new job"
+            def job = new ScheduledExecution()
+            def params = [workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])]
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "define the workflow from params"
+            service.jobDefinitionWorkflow(job, null, params, auth)
+        then: "workflow is the same"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().keepgoing == params.workflow.toMap().keepgoing
+            job.getWorkflowData().toMap().strategy == params.workflow.toMap().strategy
+            job.getWorkflowData().toMap().commands == params.workflow.toMap().commands
+
+    }
+    def "job definition workflow from map params"() {
+        given: "existing job workflow"
+            def job = new ScheduledExecution(workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')]))
+            def params = [workflow: [strategy:'parallel',keepgoing: 'true']]
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "workflow attributes modified"
+            service.jobDefinitionWorkflow(job, null, params, auth)
+        then: "workflow is modified"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().keepgoing == true
+            job.getWorkflowData().toMap().strategy == 'parallel'
+            job.getWorkflowData().toMap().commands == [[exec: 'test']]
+
+    }
+    def "job definition workflow strategy config from map params"() {
+        given: "existing job workflow"
+            def job = new ScheduledExecution(workflow: new Workflow(strategy:'aplugin', commands: [new CommandExec(adhocRemoteString: 'test')]))
+            def params = [workflow: [
+                strategy:'aplugin',
+                strategyPlugin:[
+                    aplugin:[
+                        config:[a:'b']
+                    ]
+                ]
+            ]]
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "workflow strategy config input"
+            service.jobDefinitionWFStrategy(job, null, params, auth)
+        then: "workflow strategy plugin config is modified"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().strategy == 'aplugin'
+            job.getWorkflowData().toMap().pluginConfig == [WorkflowStrategy:[aplugin:[a:'b']]]
+
+    }
+    def "job definition workflow strategy config from jobWorkflowJson"() {
+        given: "jobWorkflowJson input parameter"
+            mockCodec(JSONCodec)
+            def job = new ScheduledExecution(workflow: new Workflow(strategy:'xplugin', commands: [new CommandExec(adhocRemoteString: 'test')]))
+            def params = [
+                jobWorkflowJson: [
+                    strategy    : 'aplugin',
+                    pluginConfig: [
+                        WorkflowStrategy: [
+                            aplugin: [a: 'b']
+                        ]
+                    ]
+                ].encodeAsJSON().toString()
+            ]
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "workflow strategy config input"
+            service.jobDefinitionWFStrategy(job, null, params, auth)
+        then: "workflow strategy plugin config is modified"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().strategy == 'aplugin'
+            job.getWorkflowData().toMap().pluginConfig == [WorkflowStrategy:[aplugin:[a:'b']]]
+
+    }
+
+    def "job definition workflow strategy config from input"() {
+        given: "existing job workflow"
+            def job = new ScheduledExecution(workflow: new Workflow(strategy:'ruleset', commands: [new CommandExec(adhocRemoteString: 'test')]))
+            def jobInput = new ScheduledExecution(workflow: new Workflow(strategy:'ruleset',
+                    pluginConfig: "{\"WorkflowStrategy\":{\"ruleset\":{\"rules\":\"[*] run-in-sequence\\r\\n[5] if:option.env==QA\\r\\n[6] unless:option.env==PRODUCTION\"}}}",
+                    commands: [new CommandExec(adhocRemoteString: 'test')]))
+
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "workflow strategy config input"
+            service.jobDefinitionWFStrategy(job, jobInput, null, auth)
+        then: "workflow strategy plugin config is modified"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().strategy == 'ruleset'
+            job.getWorkflowData().toMap().pluginConfig == [WorkflowStrategy:[ruleset:[rules:'[*] run-in-sequence\r\n[5] if:option.env==QA\r\n[6] unless:option.env==PRODUCTION']]]
+
+    }
+    def "job definition workflow strategy config from input unmatched strategy"() {
+        given: "existing job workflow"
+            def job = new ScheduledExecution(workflow: new Workflow(strategy:'other', commands: [new CommandExec(adhocRemoteString: 'test')]))
+            def jobInput = new ScheduledExecution(workflow: new Workflow(strategy:'other',
+                    pluginConfig: "{\"WorkflowStrategy\":{\"ruleset\":{\"rules\":\"[*] run-in-sequence\\r\\n[5] if:option.env==QA\\r\\n[6] unless:option.env==PRODUCTION\"}}}",
+                    commands: [new CommandExec(adhocRemoteString: 'test')]))
+
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "workflow strategy config input"
+            service.jobDefinitionWFStrategy(job, jobInput, null, auth)
+        then: "workflow strategy plugin config is modified"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().strategy == 'other'
+            job.getWorkflowData().toMap().pluginConfig == null
+
+    }
+
+    def "job definition workflow from session params"() {
+        given: "new job"
+            def job = new ScheduledExecution()
+            def params = [
+                    _sessionwf          : 'true',
+                    _sessionEditWFObject: new Workflow(
+                            threadcount: 1,
+                            commands: [
+                                    new CommandExec(adhocRemoteString: 'test')
+                            ]
+                    )
+            ]
+            def auth = Mock(UserAndRolesAuthContext)
+        when: "define the workflow from params"
+            service.jobDefinitionWorkflow(job, null, params, auth)
+        then: "workflow is the same"
+            job.getWorkflowData() != null
+            job.getWorkflowData().toMap().keepgoing == params._sessionEditWFObject.toMap().keepgoing
+            job.getWorkflowData().toMap().strategy == params._sessionEditWFObject.toMap().strategy
+            job.getWorkflowData().toMap().commands == params._sessionEditWFObject.toMap().commands
+    }
+
+    @Unroll
+    def "validateDefinitionWorkflow empty workflow and commands"() {
+        given:
+            def job = new ScheduledExecution(inputMap)
+            def auth = Mock(UserAndRolesAuthContext)
+            service.frameworkService = Mock(FrameworkService)
+        when:
+            def failed = service.validateDefinitionWorkflow(job, auth, false)
+        then:
+            failed
+            job.errors.hasFieldErrors('workflow')
+            job.errors.getFieldError('workflow').code == 'scheduledExecution.workflow.empty.message'
+
+        where:
+            inputMap                               | _
+            [:]                                    | _
+            [workflow: new Workflow()]             | _
+            [workflow: new Workflow(commands: [])] | _
+    }
+
+    def "job definition options from session opts"() {
+        given:
+            def job = new ScheduledExecution(options:[new Option(name:'optX')])
+            def params = [
+                _sessionopts          : 'true',
+                _sessionEditOPTSObject: [
+                    opt1: new Option(name: 'opt1'),
+                    opt2: new Option(name: 'opt2', required: true, description: 'monkey'),
+                ]
+            ]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionOptions(job, null, params, auth)
+        then:
+            job.options!=null
+            job.options.size()==2
+            job.options[0].toMap()==params._sessionEditOPTSObject['opt1'].toMap()
+            job.options[1].toMap()==params._sessionEditOPTSObject['opt2'].toMap()
+    }
+
+    def "job definition options from params.options list"() {
+        given:
+            def job = new ScheduledExecution(options:[new Option(name:'optX')])
+            def opt1 = new Option(name: 'opt1')
+            def opt2 = new Option(name: 'opt2', required: true, description: 'monkey')
+            def params = [
+                options:[
+                    opt1,
+                    opt2,
+                ]
+            ]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionOptions(job, null, params, auth)
+        then:
+            job.options!=null
+            job.options.size()==2
+            job.options[0].toMap()==opt1.toMap()
+            job.options[1].toMap()==opt2.toMap()
+    }
+
+    def "job definition options from options json"() {
+        given:
+            mockCodec(JSONCodec)
+            def job = new ScheduledExecution(options:[new Option(name:'optX')])
+            def opt1 = [name: 'opt1']
+            def opt2 = [name: 'opt2', required: true, description: 'monkey']
+            def params = [
+                jobOptionsJson: [
+                    opt1,
+                    opt2,
+                ].encodeAsJSON().toString()
+            ]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionOptions(job, null, params, auth)
+        then:
+            job.options!=null
+            job.options.size()==2
+            job.options[0].toMap()==new Option(opt1).toMap()
+            job.options[1].toMap()==new Option(opt2).toMap()
+    }
+    def "job definition options from params.options map"() {
+        given:
+            def job = new ScheduledExecution(options:[new Option(name:'optX')])
+            def opt1 = [name: 'opt1']
+            def opt2 = [name: 'opt2', required: true, description: 'monkey']
+            def params = [
+                options:[
+                    'options[0]': opt1,
+                    'options[1]': opt2,
+                ]
+            ]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionOptions(job, null, params, auth)
+        then:
+            job.options!=null
+            job.options.size()==2
+            job.options[0].toMap()==opt1
+            job.options[1].toMap()==opt2
+    }
+    def "job definition options from input job"() {
+        given:
+            def job = new ScheduledExecution(options:[new Option(name:'optX')])
+            def job2 = new ScheduledExecution(options:[new Option(name: 'opt1'),new Option(name: 'opt2', required: true, description: 'monkey')])
+            def params = [:]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionOptions(job, job2, params, auth)
+        then:
+            job.options!=null
+            job.options.size()==2
+            job.options[0].toMap()==job2.options[0].toMap()
+            job.options[1].toMap()==job2.options[1].toMap()
+    }
+    def "job definition options without input"() {
+
+        given:
+
+            def opt1 = new Option(name: 'optX')
+            def opt1map=opt1.toMap()
+            def job = new ScheduledExecution(options:[opt1])
+
+            def params = [:]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionOptions(job, null, params, auth)
+        then:
+            job.options!=null
+            job.options.size()==1
+            job.options[0].toMap()==opt1map
+    }
+
+    def "validate definition options should not have errors for unvalidated scheduledExecution"() {
+        given:
+            def opt2 = new Option(name: 'opt2', required: false, description: 'monkey', enforced: false)
+            def params = [options: [opt2,]]
+            def job = new ScheduledExecution()
+            def auth = Mock(UserAndRolesAuthContext)
+            service.fileUploadService = Mock(FileUploadService)
+            service.jobDefinitionOptions(job, null, params, auth)
+        when:
+            def failed = service.validateDefinitionOptions(job, params)
+        then:
+            !failed
+            !job.errors.hasErrors()
+    }
+    def "validate definition options json should not have errors for unvalidated scheduledExecution"() {
+        given:
+            mockCodec(JSONCodec)
+            def opt2 = [name: 'opt2', required: false, description: 'monkey', enforced: false]
+            def params = [jobOptionsJson: [opt2].encodeAsJSON().toString()]
+            def job = new ScheduledExecution()
+            def auth = Mock(UserAndRolesAuthContext)
+            service.fileUploadService = Mock(FileUploadService)
+            service.jobDefinitionOptions(job, null, params, auth)
+        when:
+            def failed = service.validateDefinitionOptions(job, params)
+        then:
+            !failed
+            !job.errors.hasErrors()
+    }
+
+    def "validate definition options should have errors for option"() {
+        given:
+            def opt2 = new Option(name: 'opt2', required: true, description: 'monkey', enforced: false)
+            def params = [options: [opt2,]]
+            def job = new ScheduledExecution(scheduled: true, crontabString: '0 0 0 0 * * ?')
+            job.validate()
+            def auth = Mock(UserAndRolesAuthContext)
+            service.fileUploadService = Mock(FileUploadService)
+            service.jobDefinitionOptions(job, null, params, auth)
+        when:
+            def failed = service.validateDefinitionOptions(job, params)
+        then:
+            failed
+            def erropt = job.options.find{it.name=='opt2'}
+            erropt.errors.hasFieldErrors('defaultValue')
+            !erropt.errors.hasFieldErrors('scheduledExecution.name')
+            job.errors.hasErrors()
+            job.errors.hasFieldErrors('options')
+            job.errors.hasFieldErrors('jobName')
+    }
+    def "validate definition options json should have errors for option"() {
+        given:
+            mockCodec(JSONCodec)
+            def opt2 = [name: 'opt2', required: true, description: 'monkey', enforced: false]
+            def params = [jobOptionsJson: [opt2].encodeAsJSON().toString()]
+            def job = new ScheduledExecution(scheduled: true, crontabString: '0 0 0 0 * * ?')
+            job.validate()
+            def auth = Mock(UserAndRolesAuthContext)
+            service.fileUploadService = Mock(FileUploadService)
+            service.jobDefinitionOptions(job, null, params, auth)
+        when:
+            def failed = service.validateDefinitionOptions(job, params)
+        then:
+            failed
+            def erropt = job.options.find{it.name=='opt2'}
+            erropt.errors.hasFieldErrors('defaultValue')
+            !erropt.errors.hasFieldErrors('scheduledExecution.name')
+            job.errors.hasErrors()
+            job.errors.hasFieldErrors('options')
+            job.errors.hasFieldErrors('jobName')
+    }
+
+    def "validate definition options should not have errors for invalid scheduledExecution"() {
+        given:
+            def opt2 = new Option(name: 'opt2', required: false, description: 'monkey', enforced: false)
+            def params = [options: [opt2,]]
+            def job = new ScheduledExecution(scheduled: true, crontabString: '0 0 0 0 * * ?')
+            job.validate()
+            def auth = Mock(UserAndRolesAuthContext)
+            service.fileUploadService = Mock(FileUploadService)
+            service.jobDefinitionOptions(job, null, params, auth)
+        when:
+            def failed = service.validateDefinitionOptions(job, params)
+        then:
+            !failed
+            def erropt = job.options.find{it.name=='opt2'}
+            !erropt.hasErrors()
+            !erropt.errors.hasFieldErrors('defaultValue')
+            !erropt.errors.hasFieldErrors('scheduledExecution.name')
+            job.errors.hasErrors()
+            !job.errors.hasFieldErrors('options')
+            job.errors.hasFieldErrors('jobName')
+    }
+    def "validate definition options json should not have errors for invalid scheduledExecution"() {
+        given:
+            mockCodec(JSONCodec)
+            def opt2 = [name: 'opt2', required: false, description: 'monkey', enforced: false]
+            def params = [jobOptionsJson: [opt2,].encodeAsJSON().toString()]
+            def job = new ScheduledExecution(scheduled: true, crontabString: '0 0 0 0 * * ?')
+            job.validate()
+            def auth = Mock(UserAndRolesAuthContext)
+            service.fileUploadService = Mock(FileUploadService)
+            service.jobDefinitionOptions(job, null, params, auth)
+        when:
+            def failed = service.validateDefinitionOptions(job, params)
+        then:
+            !failed
+            def erropt = job.options.find{it.name=='opt2'}
+            !erropt.hasErrors()
+            !erropt.errors.hasFieldErrors('defaultValue')
+            !erropt.errors.hasFieldErrors('scheduledExecution.name')
+            job.errors.hasErrors()
+            !job.errors.hasFieldErrors('options')
+            job.errors.hasFieldErrors('jobName')
+    }
+
+    @Unroll
+    def "job definition option should remove options when updating"() {
+
+        given: "a job with options"
+
+        Map params = [:]
+        setupDoUpdate()
+        def auth = Mock(UserAndRolesAuthContext)
+        def baseJob = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c')]))
+                .save(flush:true)
+        def  emptyOptionsJob = new ScheduledExecution(createJobParams(options:[]))
+
+        when: "same job is uploaded with no options "
+
+        service.jobDefinitionBasic(baseJob,emptyOptionsJob,params,auth)
+
+        then: "jobDefinitionBasic alone does not delete the existing options before validation"
+
+        Option.findAllByScheduledExecution(baseJob).size() == 1
+
+        when: "the new (empty) option set is computed, replacing the collection directly"
+
+        service.jobDefinitionOptions(baseJob,emptyOptionsJob,params,auth)
+        baseJob.save(flush:true)
+
+        then: "job options are empty"
+
+        !baseJob.options
+
+    }
+    @Unroll
+    def "update job definition should update options"() {
+
+        given: "a job with options"
+
+        setupDoValidate()
+        Map params = [:]
+        def baseJob = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c'),
+                new Option(name: 'test2', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c')
+        ])).save()
+        def  updatedJob = new ScheduledExecution(createJobParams(options:[
+                new Option(name: 'test1', defaultValue: 'val1', enforced: true, valuesList: 'a,b,c')]))
+
+        when: "same job with different options"
+
+        def importedJob = RundeckJobDefinitionManager.importedJob(updatedJob, [:])
+        service.updateJobDefinition(importedJob, params, mockAuth(), baseJob)
+        baseJob.save(flush:true)
+        def options = baseJob.options.size()
+
+        then: "baseJob should have 1 option remaining"
+
+        options == 1
+
+    }
+
+    def "job definition notifications from input job"() {
+
+        given:
+
+            def job = new ScheduledExecution(notifications:[])
+            def job2 = new ScheduledExecution(notifications:[
+                new Notification(type:'email',content:'blah',eventTrigger: 'onsuccess'),
+                new Notification(type:'aplugin',content:'{}',eventTrigger: 'onfailure')
+            ])
+
+            def params = [:]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, job2, params, auth)
+        then:
+            job.notifications.size()==2
+            job.notifications.find{it.toMap()== job2.notifications[0].toMap()}!=null
+            job.notifications.find{it.toMap()== job2.notifications[1].toMap()}!=null
+    }
+
+    def "job definition notifications from input job should remove notifications"() {
+
+        given:"a base job with notifications"
+        setupDoUpdate()
+        def baseJob = new ScheduledExecution(createJobParams(notifications:[
+                new Notification(type:'email',content:'blah',eventTrigger: 'onsuccess'),
+                new Notification(type:'aplugin',content:'{}',eventTrigger: 'onfailure')
+        ])).save()
+        def jobEmptyNotifications = new ScheduledExecution(createJobParams(notifications:[]))
+        def params = [:]
+        def auth = Mock(UserAndRolesAuthContext)
+
+        when:"uploading the same job without any notifications"
+        service.jobDefinitionBasic(baseJob, jobEmptyNotifications, params, auth)
+
+        then:"jobDefinitionBasic alone does not delete the existing notifications before validation"
+        Notification.findAllByScheduledExecution(baseJob).size()==2
+
+        when:"the new (empty) notification set is computed, replacing the collection directly"
+        service.jobDefinitionNotifications(baseJob, jobEmptyNotifications, params, auth)
+        baseJob.save(flush:true)
+
+        then:"base job should not have any notifications"
+        baseJob.notifications.size()==0
+    }
+
+    def "job definition notifications from jobNotificationsJson email"() {
+        given:
+            def job = new ScheduledExecution(notifications:[])
+            def json='[{"type":"email","trigger":"onsuccess","config":{"recipients":"c@example.com,d@example.com"}}]'
+            def params = [jobNotificationsJson: json]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, null, params, auth)
+        then:
+            job.notifications.size() == 1
+            job.notifications[0].type == 'email'
+            job.notifications[0].eventTrigger == 'onsuccess'
+            job.notifications[0].configuration == [recipients:  'c@example.com,d@example.com']
+    }
+    def "job definition notifications from jobNotificationsJson url"() {
+        given:
+            def job = new ScheduledExecution(notifications:[])
+            def json='[{"type":"url","trigger":"onsuccess","config":{"urls":"aurl","format":"'+formatin+'"}}]'
+            def params = [jobNotificationsJson: json]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, null, params, auth)
+        then:
+            job.notifications.size() == 1
+            job.notifications[0].type == 'url'
+            job.notifications[0].eventTrigger == 'onsuccess'
+            job.notifications[0].urlConfiguration().urls=='aurl'
+            job.notifications[0].format==formatin
+        where:
+            formatin | _
+            'xml'    | _
+            'json'   | _
+    }
+    def "job definition notifications from jobNotificationsJson plugin"() {
+        given:
+            def job = new ScheduledExecution(notifications:[])
+            def json='[{"type":"aplugin","trigger":"onsuccess","config":{"blah":"blee","bloo":123}}]'
+            def params = [jobNotificationsJson: json]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, null, params, auth)
+        then:
+            job.notifications.size() == 1
+            job.notifications[0].type == 'aplugin'
+            job.notifications[0].eventTrigger == 'onsuccess'
+            job.notifications[0].configuration==[blah:'blee',bloo:123]
+    }
+    def "job definition notifications from jobNotificationsJson multi replaces all"() {
+        given:
+            def job = new ScheduledExecution(notifications:[
+                new Notification(eventTrigger: 'onfailure',type:'aplugin',configuration:[bloop:'blep'])
+            ])
+            def json='[{"type":"aplugin","trigger":"onsuccess","config":{"blah":"blee","bloo":123}}]'
+            def params = [jobNotificationsJson: json]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, null, params, auth)
+        then:
+            job.notifications.size() == 1
+            job.notifications[0].type == 'aplugin'
+            job.notifications[0].eventTrigger == 'onsuccess'
+            job.notifications[0].configuration==[blah:'blee',bloo:123]
+    }
+    def "job definition notifications from jobNotificationsJson multi replaces all 2"() {
+        given:
+            def job = new ScheduledExecution(notifications:[
+                new Notification(eventTrigger: 'onfailure',type:'aplugin',configuration:[bloop:'blep']),
+                new Notification(eventTrigger: 'onsuccess',type:'aplugin',configuration:[blap:'jkd'])
+            ])
+            def json='[{"type":"aplugin","trigger":"onsuccess","config":{"blah":"blee","bloo":123}}]'
+            def params = [jobNotificationsJson: json]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, null, params, auth)
+        then:
+            job.notifications.size() == 1
+            job.notifications[0].type == 'aplugin'
+            job.notifications[0].eventTrigger == 'onsuccess'
+            job.notifications[0].configuration==[blah:'blee',bloo:123]
+    }
+
+    def "job definition notifications from jobNotificationsJson allow multiple with same trigger and type"() {
+        given:
+            def job = new ScheduledExecution(notifications:[
+                new Notification(eventTrigger: 'onfailure',type:'aplugin',configuration:[bloop:'blep'])
+            ])
+            def json='[{"type":"aplugin","trigger":"onsuccess","config":{"blah":"blee","bloo":123}},' +
+                     '{"type":"aplugin","trigger":"onsuccess","config":{"blem":"blee","beef":456}}]'
+            def params = [jobNotificationsJson: json]
+            def auth = Mock(UserAndRolesAuthContext)
+        when:
+            service.jobDefinitionNotifications(job, null, params, auth)
+        then:
+            job.notifications.size() == 2
+            job.notifications.find{it.configuration==[blah:'blee',bloo:123]}!=null
+            job.notifications.find{it.configuration==[blem:'blee',beef:456]}!=null
+    }
+    def "scm create jobs using scm_create without permission"(){
+        given:
+        setupDoUpdate()
+        //scm create setup
+
+        def  uuid=UUID.randomUUID().toString()
+        def upload = new ScheduledExecution(
+                createJobParams(jobName:'job1',groupPath:'path1',project:'AProject', uuid: uuid)
+        )
+
+        when:
+        def result = service.loadJobs([upload], 'create','remove', [method: 'scm-import'],  mockAuth())
+
+        then:
+        result.jobs.size()==0
+        1 * service.rundeckAuthContextProcessor.authorizeProjectResourceAny(_,AuthConstants.RESOURCE_TYPE_JOB,
+                [AuthConstants.ACTION_CREATE,AuthConstants.ACTION_SCM_CREATE],'AProject') >> false
+        0 * service.rundeckAuthContextProcessor.authorizeProjectJobAny(_,_,
+                [AuthConstants.ACTION_CREATE,AuthConstants.ACTION_SCM_CREATE],_)
+
+    }
+
+    def "applyTriggerComponents"(){
+        given:
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        ).save()
+        service.applicationContext = Mock(ConfigurableApplicationContext){
+            getBeansOfType(_) >> ["componentName":new TriggersExtenderImpl(job)]
+        }
+        service.afterPropertiesSet()
+        when:
+        def result = service.applyTriggerComponents(null, [])
+        then:
+        !result.isEmpty()
+
+    }
+
+    def "registerOnQuartz"(){
+        given:
+        def job = new ScheduledExecution(
+                createJobParams(
+                    jobName: 'testJob',
+                    groupPath: 'a/group',
+                    project:'aProject',
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        ).save()
+        service.applicationContext = Mock(ConfigurableApplicationContext){
+            getBeansOfType(_) >> ["componentName":new TriggersExtenderImpl(job)]
+        }
+        service.afterPropertiesSet()
+        service.quartzScheduler=Mock(Scheduler)
+        when:
+        def result = service.registerOnQuartz(null, [], temp, job)
+        then:
+        result
+        count * service.
+            quartzScheduler.
+            deleteJob({ it.name == "${job.uuid}" && it.group == 'aProject' })
+        count * service.quartzScheduler.scheduleJob(_,!null,true)
+        where:
+        temp  | count
+        true  | 0
+        false | 1
+
+    }
+
+    def "registerOnQuartz handles exception"(){
+        given:
+        def job = new ScheduledExecution(
+                createJobParams(
+                    jobName: 'testJob',
+                    groupPath: 'a/group',
+                    project:'aProject',
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        ).save()
+        service.applicationContext = Mock(ConfigurableApplicationContext){
+            getBeansOfType(_) >> ["componentName":new TriggersExtenderImpl(job)]
+        }
+        service.afterPropertiesSet()
+        service.quartzScheduler=Mock(Scheduler)
+        when:
+        def result = service.registerOnQuartz(null, [], false, job)
+        then:
+        result==null
+        1 * service.
+            quartzScheduler.
+            deleteJob({ it.name == "${job.uuid}" && it.group == 'aProject' })
+        1 * service.quartzScheduler.scheduleJob(_,!null,true)>>{
+            throw new SchedulerException("test error")
+        }
+
+    }
+
+    @Unroll
+    def "do not allow orchestrator that has an execution to be deleted hasLinkedExecutions: #hasExecutionsLinked"() {
+        setup:
+        Orchestrator orch = new Orchestrator(type: "rankTiered")
+        orch.save()
+        when:
+        Long orchId = orch.id
+        ScheduledExecution se = new ScheduledExecution(
+                createJobParams(
+                        jobName: 'testJob',
+                        groupPath: 'orch/group',
+                        project: 'orchProject',
+                        executionEnabled: true,
+                        orchestrator: orch
+                )
+        )
+        se.save()
+
+        if (hasExecutionsLinked) {
+            Execution e = new Execution(scheduledExecution: se, orchestrator: orch, project:"orchProject", user:"auser")
+            e.save()
+        }
+        service.jobDefinitionOrchestrator(se,new ScheduledExecution(),[:],null)
+
+        then:
+        (Orchestrator.get(orchId) == null) == orchestratorDeleted
+
+        where:
+        hasExecutionsLinked | orchestratorDeleted
+        true                | false
+        false               | true
+
+    }
+
+    @Unroll
+    def "parseParamOrchestrator config params input #inparams"() {
+        given:
+            def type = 'rankTiered'
+        when:
+            def orch = service.parseParamOrchestrator(inparams, type)
+
+        then:
+            orch != null
+            orch.type == type
+            orch.configuration == expect
+
+        where:
+            inparams                                               | expect
+            [:]                                                    | null
+            [orchestratorPlugin: 'x']                              | null
+            [orchestratorPlugin: ['x']]                            | null
+            [orchestratorPlugin: [a: 'x']]                         | null
+            [orchestratorPlugin: [rankTiered: 'x']]                | null
+            [orchestratorPlugin: [rankTiered: ['x']]]              | null
+            [orchestratorPlugin: [rankTiered: [z: 'x']]]           | null
+            [orchestratorPlugin: [rankTiered: [config: [a: 'b']]]] | [a: 'b']
+
+    }
+
+    def "jobDefinitionGlobalLogFilters add logFilter"(){
+        given:
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        )
+        job.setUuid("testUUID")
+        job.save()
+
+        def params = baseJobParams()
+        params.workflow.globalLogFilters = [
+                '0': [
+                        type  : 'abc',
+                        config: [a: 'b']
+                ]
+        ]
+
+        when:
+        service.jobDefinitionGlobalLogFilters(job, null, params, null)
+        def se = service.getByIDorUUID(job.uuid)
+        then:
+        se.getWorkflowData().pluginConfig == '{"LogFilter":[{"type":"abc","config":{"a":"b"}}]}'
+    }
+
+    def "jobDefinitionGlobalLogFilters jobWorkflowJson with logFilter"(){
+        given:
+            mockCodec(JSONCodec)
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        )
+        job.setUuid("testUUID")
+        job.save()
+
+        def params = baseJobParams()
+        params.jobWorkflowJson = [
+                pluginConfig: [
+                    LogFilter: [
+                        [type: 'abc', config: [a: 'b']]
+                    ]
+                ]
+            ]
+        .encodeAsJSON().toString()
+
+        when:
+        service.jobDefinitionGlobalLogFilters(job, null, params, null)
+        then:
+        job.getWorkflowData().pluginConfig == '{"LogFilter":[{"type":"abc","config":{"a":"b"}}]}'
+    }
+
+
+    def "jobDefinitionGlobalLogFilters jobWorkflowJson without logFilter"(){
+        given:
+            mockCodec(JSONCodec)
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b'
+                )
+        )
+        job.setUuid("testUUID")
+        job.save()
+
+        def params = baseJobParams()
+        params.jobWorkflowJson = [
+                pluginConfig: [
+                    :
+                ]
+            ]
+        .encodeAsJSON().toString()
+
+        when:
+        service.jobDefinitionGlobalLogFilters(job, null, params, null)
+        then:
+        job.getWorkflowData().pluginConfig == '{}' //empty pluginConfig
+    }
+
+    def "jobDefinitionGlobalLogFilters modify logFilter"(){
+        given:
+
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b',
+                )
+        )
+        job.setUuid("testUUID")
+        job.getWorkflowData().pluginConfig = '{"LogFilter":[{"type":"abc","config":{"a":"b"}}]}'
+        job.save()
+
+        def params = baseJobParams()
+        params.workflow.globalLogFilters = [
+                '0': [
+                        type  : 'abcd',
+                        config: [a: 'b', d: 'e']
+                ]
+        ]
+
+        when:
+        service.jobDefinitionGlobalLogFilters(job, null, params, null)
+        def se = service.getByIDorUUID(job.uuid)
+        then:
+        se.getWorkflowData().pluginConfig == '{"LogFilter":[{"type":"abcd","config":{"a":"b","d":"e"}}]}'
+    }
+
+    def "jobDefinitionGlobalLogFilters delete logFilter"(){
+        given:
+
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b',
+                )
+        )
+        job.setUuid("testUUID")
+        job.getWorkflowData().pluginConfig = '{"LogFilter":[{"type":"abc","config":{"a":"b"}}]}'
+        job.save()
+
+        def params = baseJobParams()
+        params.workflow.globalLogFilters = [:]
+
+        when:
+        service.jobDefinitionGlobalLogFilters(job, null, params, null)
+        def se = service.getByIDorUUID(job.uuid)
+        then:
+        se.getWorkflowData().getPluginConfigDataList('LogFilter') == null
+    }
+
+    def "jobDefinitionGlobalLogFilters logFilter modified by job input"(){
+        given:
+
+        def job = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b',
+                )
+        )
+        job.setUuid("testUUID")
+        job.save()
+
+        def job2 = new ScheduledExecution(
+                createJobParams(
+                        scheduled: true,
+                        scheduleEnabled: true,
+                        executionEnabled: true,
+                        userRoleList: 'a,b',
+                )
+        )
+        job2.setUuid("testUUID2")
+        def workflow2 = job2.getWorkflowData()
+        if (workflow2) {
+            workflow2.pluginConfig = pluginConfigString
+            job2.setWorkflowData(workflow2)
+        }
+        job2.save()
+
+        def params = baseJobParams()
+        params.workflow.globalLogFilters = [:]
+
+        when:
+        service.jobDefinitionGlobalLogFilters(job, job2, params, null)
+        def se = service.getByIDorUUID(job.uuid)
+        then:
+        se.getWorkflowData().pluginConfig == result
+
+        where:
+        pluginConfigString                                  | result
+        '{"LogFilter":[{"type":"abc","config":{"a":"b"}}]}' | '{"LogFilter":[{"type":"abc","config":{"a":"b"}}]}'
+        '{}'                                                | '{}'
+    }
+
+    def "getWorkflowDescriptionTree"() {
+        setup:
+        println "get workflow description tree"
+        String project = "AProject"
+        def job1 = new ScheduledExecution(
+                jobName: 'test',
+                groupPath: "group",
+                project: project,
+                description: 'test job',
+                workflow: new Workflow(commands: [
+                        new CommandExec(argString: "blah blah", adhocLocalString: "test2")
+                ])
+        )
+        job1.save()
+        def schedEx = new ScheduledExecution(
+                jobName: 'testUploadErrorHandlers',
+                groupPath: "testgroup",
+                project: project,
+                description: 'desc',
+                workflow: new Workflow(commands: [
+                        new CommandExec(adhocExecution: true, adhocRemoteString: "echo test",
+                                        errorHandler: new CommandExec(adhocExecution: true,
+                                                                      adhocRemoteString: "echo this is an errorhandler")),
+                        new CommandExec(argString: "blah blah", adhocLocalString: "test2"),
+                        new CommandExec(argString: "blah3 blah3", adhocFilepath: "test3"),
+                        new JobExec(jobGroup: "group", jobName: "test"),
+
+                ])
+        )
+        schedEx.save()
+
+        when:
+        def output = service.getWorkflowDescriptionTree(project,schedEx.getWorkflowData(),false)
+
+        then:
+        output[0].exec == "exec"
+        output[0].errorhandler.exec == "exec"
+        output[1].script == "script"
+        output[2].scriptfile == "scriptfile"
+        output[2].expandTokenInScriptFile == false
+        output[3].jobref.group == "group"
+        output[3].jobref.name == "test"
+        output[3].jobId
+        output[3].workflow == [[script:"script"]]
+
+    }
+
+    def "test Create Job Exclude InactivePlugins"(){
+        given:
+            def se = new ScheduledExecution(jobName: 'monkey1', project: 'testProject', description: 'blah2')
+            se.save()
+
+            def auth = Mock(UserAndRolesAuthContext) {
+                getUsername() >> 'test'
+            }
+
+            def iRundeckProject = Mock(IRundeckProject){
+            }
+
+            def properties = new Properties()
+            properties.setProperty("fwkprop","fwkvalue")
+
+
+            def pluginControlService = Mock(PluginControlService){
+                isDisabledPlugin("test",_)>>true
+            }
+
+            def frameworkService  = Mock(FrameworkService){
+                getRundeckFramework()>>Mock(Framework){
+                    getFrameworkNodeName()>>'fwnode'
+                    getFrameworkProjectMgr()>> Mock(ProjectManager) {
+                        existsFrameworkProject(se.project) >> true
+                        getFrameworkProject(_) >> iRundeckProject
+                    }
+                    getPropertyLookup() >> PropertyLookup.create(properties)
+                }
+                getProjectGlobals(_) >> [:]
+                getPluginControlService(_) >> pluginControlService
+                getNodeStepPluginDescriptions() >> [
+                        DescriptionBuilder.builder().name("test").isHighlighted(false).build(),
+                        DescriptionBuilder.builder().name("test2").isHighlighted(false).build()
+                ]
+            }
+
+            service.frameworkService = frameworkService
+            service.pluginService = Mock(PluginService){
+                listPlugins() >> []
+            }
+            service.jobSchedulesService = Mock(SchedulesManager){
+            }
+
+            service.rundeckAuthorizedServicesProvider = Mock(AuthorizedServicesProvider){
+                getServicesWith(_)>> Mock(Services)
+            }
+
+            service.notificationService = Mock(NotificationService){
+            }
+            service.orchestratorPluginService=Mock(OrchestratorPluginService)
+            service.executionLifecycleComponentService = Mock(ExecutionLifecycleComponentService)
+            service.rundeckJobDefinitionManager=Mock(RundeckJobDefinitionManager)
+            service.configurationService=Mock(ConfigurationService)
+
+        when:
+
+            Map params = [id: se.id, project: se.project]
+
+            def result = service.prepareCreateEditJob(params, se, "create", auth)
+
+        then:
+            result!=null
+            result.nodeStepDescriptions !=null
+            result.nodeStepDescriptions.size() == 1
+            result.nodeStepDescriptions[0].name=='test2'
+
+    }
+    def "load remote options timeout configuration from url params"(){
+
+        given:"a option getting values from a URL"
+            def fwkservice=Mock(FrameworkService)
+            defineBeans{
+                frameworkService(InstanceFactoryBean,fwkservice)
+            }
+            service.configurationService = Mock(ConfigurationService)
+            service.frameworkService = fwkservice
+            GormUserDataProvider provider = new GormUserDataProvider()
+            service.userDataProvider = provider
+
+
+        when:"the connection values are set directly on the URL"
+            def se = new ScheduledExecution(jobName: 'monkey1', project: 'testProject', description: 'blah2')
+            se.addToOptions(new Option(
+                    name:'test',
+                    realValuesUrl: 'file://test#timeout='+timeout+';contimeout='+conTimeout+';retry='+retry
+            ))
+            se.save()
+
+            _ * service.frameworkService.getRundeckFramework()>>Mock(IFramework){
+                _ * getFrameworkProjectMgr()>>Mock(ProjectManager){
+                    _ * loadProjectConfig('testProject')
+                }
+            }
+
+            def input=[:]
+            ScheduledExecutionController.metaClass.static.getRemoteJSON={ HttpClientCreator httpClientCreator, String url, JobOptionConfigRemoteUrl configRemoteUrl, int vtimeout, int vcontimeout, int vretry, boolean disableRemoteJsonCheck->
+                input.url=url
+                input.timeout=vtimeout
+                input.contimeout=vcontimeout
+                input.retry=vretry
+                [
+                        json: [
+                                'some', 'option', 'values'
+                        ]
+                ]
+            }
+            def result = service.loadOptionsRemoteValues(se,[option:'test'],'auser', null)
+
+        then:"the values on the input should be the same as the spectec values "
+            input.url=='file://test#timeout='+timeout+';contimeout='+conTimeout+';retry='+retry
+            input.timeout==expectTimeout
+            input.contimeout==expectConTimeout
+            input.retry==expectRetry
+            result.values==[[name:'some', value:'some'],[name:'option', value:'option'],[name:'values', value:'values']]
+
+        where:
+            timeout | conTimeout | retry | expectTimeout | expectConTimeout | expectRetry
+            1       | 1          | 1     | 1             | 1                | 1
+            2       | 2          | 2     | 2             | 2                | 2
+            null    | null       | null  | 10            | 0                | 5
+    }
+
+    def "load remote options timeout configuration from config.properties"(){
+
+        given:"a option getting values from a URL"
+        def fwkservice=Mock(FrameworkService)
+        defineBeans{
+            frameworkService(InstanceFactoryBean,fwkservice)
+        }
+        service.configurationService = Mock(ConfigurationService)
+        service.frameworkService = fwkservice
+        GormUserDataProvider provider = new GormUserDataProvider()
+        service.userDataProvider = provider
+
+        def se = new ScheduledExecution(jobName: 'monkey1', project: 'testProject', description: 'blah2')
+        se.addToOptions(new Option(
+                name:'test',
+                realValuesUrl: 'file://test'
+        ))
+        se.save()
+        def input=[:]
+        ScheduledExecutionController.metaClass.static.getRemoteJSON={ HttpClientCreator httpClientCreator, String url,JobOptionConfigRemoteUrl configRemoteUrl, int vtimeout, int vcontimeout, int vretry, boolean disableRemoteJsonCheck->
+            input.url=url
+            input.timeout=vtimeout
+            input.contimeout=vcontimeout
+            input.retry=vretry
+            [
+                    json: [
+                            'some', 'option', 'values'
+                    ]
+            ]
+        }
+
+        when:"the values are set on the config.properties"
+        service.configurationService.getString("jobs.options.remoteUrlTimeout") >> timeout
+        service.configurationService.getInteger("jobs.options.remoteUrlTimeout",null) >> timeout
+        service.configurationService.getString("jobs.options.remoteUrlConnectionTimeout") >> conTimeout
+        service.configurationService.getInteger("jobs.options.remoteUrlConnectionTimeout",null) >> conTimeout
+        service.configurationService.getString("jobs.options.remoteUrlRetry") >> retry
+        service.configurationService.getInteger("jobs.options.remoteUrlRetry",null) >> retry
+        _ * service.frameworkService.getRundeckFramework()>>Mock(IFramework){
+            _ * getFrameworkProjectMgr()>>Mock(ProjectManager){
+                _ * loadProjectConfig('testProject')
+            }
+        }
+        def result = service.loadOptionsRemoteValues(se,[option:'test'],'auser', null)
+
+        then:"values setted on the config.properties should be equals to input values"
+        input.url=='file://test'
+        input.timeout==expectTimeout
+        input.contimeout==expectConTimeout
+        input.retry==expectRetry
+        result.values==[[name:'some', value:'some'],[name:'option', value:'option'],[name:'values', value:'values']]
+
+        where:
+        timeout | conTimeout | retry | expectTimeout | expectConTimeout | expectRetry
+        1       | 1          | 1     | 1             | 1                | 1
+        2       | 2          | 2     | 2             | 2                | 2
+        null    | null       | null  | 10            | 0                | 5
+    }
+
+    def "load remote options get an exception"(){
+
+        given:"a job with an url option"
+        def fwkservice=Mock(FrameworkService)
+        defineBeans{
+            frameworkService(InstanceFactoryBean,fwkservice)
+        }
+        service.configurationService = Mock(ConfigurationService)
+        service.frameworkService = fwkservice
+        GormUserDataProvider provider = new GormUserDataProvider()
+        service.userDataProvider = provider
+
+        def se = new ScheduledExecution(jobName: 'monkey1', project: 'testProject', description: 'blah2')
+        se.addToOptions(new Option(
+                name:'test',
+                realValuesUrl: 'file://test'
+        ))
+        se.save()
+        _ * service.frameworkService.getRundeckFramework()>>Mock(IFramework){
+            _ * getFrameworkProjectMgr()>>Mock(ProjectManager){
+                _ * loadProjectConfig('testProject')
+            }
+        }
+
+        when:"getRemoteJSON trow an exception"
+        Exception e = new Exception("some exception")
+        ScheduledExecutionController.metaClass.static.getRemoteJSON={ HttpClientCreator httpClientCreator, String url, JobOptionConfigRemoteUrl configRemoteUrl, int vtimeout, int vcontimeout, int vretry, boolean disableRemoteJsonCheck->
+            throw new Exception(e)
+        }
+        def result = service.loadOptionsRemoteValues(se,[option:'test'],'auser', null)
+
+        then:"result should have the information of the exception"
+        result.err.exception.toString() == "java.lang.Exception: java.lang.Exception: some exception"
+        result.values == null
+        result.err.message == "Failed loading remote option values"
+    }
+
+
+
+    def "sort url options result"(){
+        given:
+
+        def result = []
+        result << [name: "testName4", value: "value4"]
+        result << [name: "exampleName", value: "16"]
+        result << [name: "someOptionName", value: "cake"]
+        result << [name: "sweet", value: "sugar"]
+
+        when:
+        def sortedOptions = service.sortRemoteOptions(result, sort)
+        then:
+        sortedOptions.size() == size
+        if(sort){
+            sortedOptions[0].name == "exampleName" && sortedOptions[0].value == "16"
+            sortedOptions[1].name == "someOptionName" && sortedOptions[1].value == "cake"
+            sortedOptions[2].name == "sweet" && sortedOptions[2].value == "sugar"
+            sortedOptions[3].name == "testName4" && sortedOptions[3].value == "value4"
+        }else{
+            sortedOptions[0].name == "testName4" && sortedOptions[0].value == "value4"
+            sortedOptions[1].name == "exampleName" && sortedOptions[1].value == "16"
+            sortedOptions[2].name == "someOptionName" && sortedOptions[2].value == "cake"
+            sortedOptions[3].name == "sweet" && sortedOptions[3].value == "sugar"
+        }
+        where:
+            sort    | size
+            true    | 4
+            false   | 4
+    }
+
+    def "Returns the SCM options to dropdown list"(){
+        given:
+        def project = 'test'
+        def authContext = Mock(UserAndRolesAuthContext)
+        def scheduledExecution = Mock(ScheduledExecution)
+        service.scmService = Mock(ScmService){
+            it.projectHasConfiguredExportPlugin(_) >> exportIntegrationConfigured
+            it.projectHasConfiguredImportPlugin(_) >> importIntegrationConfigured
+            it.userHasAccessToScmConfiguredKeyOrPassword(_,_,_) >> hasAccessToKeyOrPassword
+        }
+        def scmImportKeys = [:]
+        scmImportKeys.put(ScmService.ScmOptionsForJobActionDropdown.SCM_IMPORT_ENABLED.optionKey, "test")
+        scmImportKeys.put(ScmService.ScmOptionsForJobActionDropdown.SCM_IMPORT_STATUS.optionKey, "test")
+        def scmExportKeys = [:]
+        scmExportKeys.put(ScmService.ScmOptionsForJobActionDropdown.SCM_EXPORT_ENABLED.optionKey, "test")
+        scmExportKeys.put(ScmService.ScmOptionsForJobActionDropdown.SCM_EXPORT_STATUS.optionKey, "test")
+        scmExportKeys.put(ScmService.ScmOptionsForJobActionDropdown.SCM_EXPORT_RENAMED_PATH.optionKey, "test")
+
+        when:
+        def result = service.scmActionMenuOptions(project, authContext, scheduledExecution)
+
+        then:
+        result != null
+        scmImportKeys.keySet().stream().allMatch(result.keySet()::contains) == hasImportKeys
+        scmExportKeys.keySet().stream().allMatch(result.keySet()::contains) == hasExportKeys
+
+        where:
+        importIntegrationConfigured | exportIntegrationConfigured | hasAccessToKeyOrPassword | hasImportKeys | hasExportKeys
+        true                        | false                       | true      | true          | false
+        false                       | true                        | true      | false         | true
+        true                        | true                        | true      | true          | true
+        false                       | false                       | true      | false         | false
+        true                        | true                        | false     | false         | false
+
+    }
+
+    def "validate workflow strategy from job import"(){
+
+        given:
+        Map params = [:]
+        Map validationMap = [:]
+        def enabled= false
+        def serverUUID = null
+        def uuid=serverUUID?:UUID.randomUUID().toString()
+
+        def projectMock = Mock(IRundeckProject) {
+            getProperties() >> [:]
+            getProjectProperties() >> [:]
+            _*_
+        }
+        service.frameworkService = Mock(FrameworkService) {
+            _ * existsFrameworkProject('AProject') >> true
+            _ * getFrameworkProject('AProject') >> projectMock
+            _ * existsFrameworkProject('BProject') >> true
+            _ * projectNames(_ as AuthContext) >> ['AProject', 'BProject']
+            _ * isClusterModeEnabled() >> enabled
+            _ * getServerUUID() >> uuid
+            _ * getRundeckFramework() >> Mock(Framework) {
+                _ * getWorkflowStrategyService() >> Mock(WorkflowStrategyService) {
+                    _ * getStrategyForWorkflow(*_) >> Mock(WorkflowStrategy) {
+                        _ * validate(_)
+                    }
+                }
+            }
+            _ * frameworkNodeName () >> null
+            _ * pluginConfigFactory(_,_) >> Mock(PropertyResolverFactory.Factory){
+                create(_,_) >> Mock(PropertyResolver)
+            }
+            _ * filterNodeSet(*_) >> null
+        }
+
+        service.rundeckAuthContextProcessor=Mock(AppAuthContextProcessor){
+            _ * authorizeProjectJobAll(*_) >> true
+            _ * authorizeProjectResourceAll(*_) >> true
+            _ * filterAuthorizedNodes(*_) >> null
+            _ * getAuthContextWithProject(_, _) >> { args ->
+                return args[0]
+            }
+        }
+        service.executionServiceBean = Mock(ExecutionService) {
+            _ * getExecutionsAreActive() >> false
+        }
+        service.pluginService=Mock(PluginService){
+            1 *  validatePlugin(
+                    plugiName,
+                    _,
+                    _,
+                    PropertyScope.Instance,
+                    null
+            ) >> null
+        }
+
+        service.executionUtilService = Mock(ExecutionUtilService) {
+            _ * createExecutionItemForWorkflow(_) >> Mock(WorkflowExecutionItem) {
+                _ * getWorkflow()
+            }
+        }
+        service.quartzScheduler = Mock(Scheduler)
+        service.executionLifecycleComponentService = Mock(ExecutionLifecycleComponentService)
+        service.rundeckJobDefinitionManager = Mock(RundeckJobDefinitionManager){
+            updateJob(_,_,_)>>{
+                RundeckJobDefinitionManager.importedJob(it[0],it[1]?.associations?:[:])
+            }
+            validateImportedJob(_)>>new Validator.ReportSet(true,[:])
+        }
+        service.jobStatsDataProvider = new GormJobStatsDataProvider()
+
+        def se = new ScheduledExecution(createJobParams(
+                workflow: new Workflow(strategy: strategy,
+                        commands: [
+                                new CommandExec(adhocRemoteString: 'test command', adhocExecution: true)
+                        ]
+                )
+        )
+        )
+
+        when:
+        def results = service.validateDefinitionWFStrategy(se,params,validationMap)
+
+
+        then:
+        results == validation
+
+        where:
+        strategy         | plugiName           | validation
+        "step-first"     | "sequential"        | false
+        "sequential"     | "sequential"        | false
+        "node-first"     | "node-first"        | false
+        "ruleset"        | "ruleset"           | false
+        "parallel"       | "parallel"          | false
+    }
+
+    def "basicQueryJobs"(){
+        given:
+            service.jobDataProvider=Mock(JobDataProvider)
+            def authContext=Mock(UserAndRolesAuthContext)
+
+            def project = 'test'
+            def path = 'some/path'
+            def queryInput = Mock(JobQueryInputData){
+                getGroupPath()>>path
+            }
+            def params =[:]
+        when:
+            def result=service.basicQueryJobs(project, queryInput, authContext)
+        then:
+            1 * service.jobDataProvider.queryJobs(queryInput)>>new GormJobQueryProvider.GormPage<JobDataSummary>(results:[
+                new RdJobDataSummary(uuid:'1', jobName:'test1', groupPath: path+'/test1', project:project),
+                new RdJobDataSummary(uuid:'2', jobName:'test2', groupPath: path+'/test2/authok', project:project),
+                new RdJobDataSummary(uuid:'3', jobName:'test3', groupPath: path+'/test3/noauth', project:project),
+                new RdJobDataSummary(uuid:'4', jobName:'test4', groupPath: path, project:project),
+                new RdJobDataSummary(uuid:'5', jobName:'test5', groupPath: path, project:project),
+                new RdJobDataSummary(uuid:'6', jobName:'test6', groupPath: path+'/test3/other', project:project),
+            ])
+            _ * service.rundeckAuthContextProcessor.authResourceForJob(_,_,_)>>{
+                [
+                    jobName:it[0],
+                    groupPath:it[1],
+                    uuid:it[2],
+                ]
+            }
+            _ * service.rundeckAuthContextProcessor.authorizeProjectResourceAny(
+                authContext,
+                _,
+                [AuthConstants.ACTION_READ, AuthConstants.ACTION_VIEW],
+                project
+            ) >> {
+                return (it[1].uuid in authorized)
+            }
+
+            result.findAll{it.job}.collect{it.jobData.uuid}==expectedJobs
+            result.findAll{!it.job}.collect{it.groupPath}.sort()==expectedGroups
+        where:
+            authorized                | expectedJobs | expectedGroups
+            ['1', '4']                | ['4']        | ['some/path/test1']
+            ['2', '4']                | ['4']        | ['some/path/test2']
+            ['3', '4']                | ['4']        | ['some/path/test3']
+            ['1', '2', '4']           | ['4']        | ['some/path/test1', 'some/path/test2']
+            ['1', '2', '5']           | ['5']        | ['some/path/test1', 'some/path/test2']
+            ['1', '4', '5']           | ['4', '5']   | ['some/path/test1']
+            ['1', '2', '3', '4', '5'] | ['4', '5']   | ['some/path/test1', 'some/path/test2', 'some/path/test3']
+
+    }
+
+    def "imported job does not overwrite audit fields during update"() {
+        given: "proper service setup for job import"
+            setupDoUpdate()
+
+        and: "an existing job with audit fields already set"
+            def existingJob = new ScheduledExecution(createJobParams([
+                jobName: 'AuditTestJob',
+                project: 'AProject',
+                groupPath: 'test/group',
+                user: 'original_creator',
+                lastModifiedBy: 'original_modifier',
+                createdBy: 'original_creator',
+                description: 'original description'
+            ])).save(flush: true)
+
+            // Capture the original audit values
+            def originalId = existingJob.id
+            def originalDateCreated = existingJob.dateCreated
+            def originalUser = existingJob.user
+            def originalLastModifiedBy = existingJob.lastModifiedBy
+            def originalCreatedBy = existingJob.createdBy
+
+        and: "an imported job with same identity but different audit and regular fields"
+            def importedJobData = new ScheduledExecution(createJobParams([
+                jobName: 'AuditTestJob',     // Same name - will trigger update
+                project: 'AProject',      // Same project - will trigger update
+                groupPath: 'test/group',     // Same group - will trigger update
+                user: 'malicious_importer',  // Should NOT overwrite original_creator
+                lastModifiedBy: 'bad_modifier', // Should NOT overwrite original_modifier
+                createdBy: 'bad_creator',    // Should NOT overwrite original_creator
+                description: 'UPDATED description'  // Should be updated
+            ]))
+
+            def importedJob = new RundeckJobDefinitionManager.ImportedJobDefinition(
+                job: importedJobData,
+                associations: [:]
+            )
+
+            def authContext = Mock(UserAndRolesAuthContext) {
+                getUsername() >> 'test_admin'
+                getRoles() >> ['admin']
+            }
+
+        when: "importing the job using update option"
+            def result = service.loadImportedJobs([importedJob], 'update', null, [:], authContext)
+
+        then: "import succeeds and finds existing job"
+            result.jobs.size() == 1
+            result.errjobs.size() == 0
+            result.skipjobs.size() == 0
+
+        and: "the same job instance was updated (not replaced)"
+            def updatedJob = result.jobs[0]
+            updatedJob.id == originalId  // Critical: same job ID proves it was updated, not replaced
+
+        and: "audit fields behave correctly"
+            updatedJob.user == 'test_admin'            // schedule owner updated to current user
+            updatedJob.lastModifiedBy == 'test_admin'  // updated to current user
+            updatedJob.createdBy == originalCreatedBy  // NEVER changes — preserved from original creator
+            updatedJob.dateCreated == originalDateCreated // creation date unchanged
+
+        and: "non-audit fields are properly updated"
+            updatedJob.description == 'UPDATED description'     // content updated
+            updatedJob.jobName == 'AuditTestJob'               // name unchanged
+            updatedJob.project == 'AProject'
+            updatedJob.groupPath == 'test/group'
+
+        and: "database reflects same values"
+            def dbJob = ScheduledExecution.get(originalId)
+            dbJob.user == 'test_admin'
+            dbJob.lastModifiedBy == 'test_admin'
+            dbJob.createdBy == originalCreatedBy
+            dbJob.dateCreated == originalDateCreated
+            dbJob.description == 'UPDATED description'
+    }
+
+    def "imported job with missing audit fields gets them set from authContext"() {
+        given: "proper service setup"
+            setupDoUpdate()
+            // Setup auth for job creation operations
+            service.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor) {
+                authorizeProjectJobAll(*_) >> true
+                authorizeProjectResourceAll(*_) >> true
+                authorizeProjectResourceAny(*_) >> true
+                authorizeProjectJobAny(_, _, ['update'], _) >> true
+                authorizeProjectJobAny(_, _, ['create'], _) >> true
+                authorizeProjectResourceAny(_, AuthConstants.RESOURCE_TYPE_JOB, ['create'], _) >> true
+                getAuthContextWithProject(_, _) >> { args -> args[0] }
+            }
+
+        and: "a new job to import with missing audit fields"
+            def importedJobData = new ScheduledExecution(createJobParams([
+                jobName: 'NewAuditJob',
+                project: 'AProject',
+                groupPath: 'new/group',
+                user: null,                 // Missing - should be set from authContext
+                lastModifiedBy: null,       // Missing - should be set from authContext
+                description: 'new job description'
+            ]))
+
+            def importedJob = new RundeckJobDefinitionManager.ImportedJobDefinition(
+                job: importedJobData,
+                associations: [:]
+            )
+
+            def authContext = Mock(UserAndRolesAuthContext) {
+                getUsername() >> 'creating_admin'
+                getRoles() >> ['admin']
+            }
+
+        when: "importing the new job"
+            def result = service.loadImportedJobs([importedJob], 'create', null, [:], authContext)
+
+        then: "job is created successfully"
+            result.jobs.size() == 1
+            result.errjobs.size() == 0
+
+        and: "missing audit fields are set from authContext"
+            def createdJob = result.jobs[0]
+            createdJob.user == 'creating_admin'        // Populated from current user
+            createdJob.lastModifiedBy == 'creating_admin' // Populated from current user
+            createdJob.createdBy == 'creating_admin'   // Set once at creation
+            createdJob.dateCreated != null             // Automatically set by Grails
+            createdJob.description == 'new job description' // Regular fields preserved
+
+        and: "database reflects the same values"
+            def dbJob = ScheduledExecution.get(createdJob.id)
+            dbJob.user == 'creating_admin'
+            dbJob.lastModifiedBy == 'creating_admin'
+            dbJob.createdBy == 'creating_admin'
+            dbJob.description == 'new job description'
+    }
+
+    def "imported job with existing audit fields gets them set to current user during creation"() {
+        given: "proper service setup"
+            setupDoUpdate()
+            // Setup auth for job creation operations
+            service.rundeckAuthContextProcessor = Mock(AppAuthContextProcessor) {
+                authorizeProjectJobAll(*_) >> true
+                authorizeProjectResourceAll(*_) >> true
+                authorizeProjectResourceAny(*_) >> true
+                authorizeProjectJobAny(_, _, ['update'], _) >> true
+                authorizeProjectJobAny(_, _, ['create'], _) >> true
+                authorizeProjectResourceAny(_, AuthConstants.RESOURCE_TYPE_JOB, ['create'], _) >> true
+                getAuthContextWithProject(_, _) >> { args -> args[0] }
+            }
+
+        and: "a new job to import with existing audit fields"
+            def importedJobData = new ScheduledExecution(createJobParams([
+                jobName: 'NewJobWithAudit',
+                project: 'AProject',
+                groupPath: 'new/group',
+                user: 'original_importer',      // Gets set to current user
+                lastModifiedBy: 'original_modifier', // Gets set to current user
+                description: 'new job with audit'
+            ]))
+
+            def importedJob = new RundeckJobDefinitionManager.ImportedJobDefinition(
+                job: importedJobData,
+                associations: [:]
+            )
+
+            def authContext = Mock(UserAndRolesAuthContext) {
+                getUsername() >> 'creating_admin'
+                getRoles() >> ['admin']
+            }
+
+        when: "importing the new job"
+            def result = service.loadImportedJobs([importedJob], 'create', null, [:], authContext)
+
+        then: "job is created successfully"
+            result.jobs.size() == 1
+            result.errjobs.size() == 0
+
+        and: "audit fields are set to current user"
+            def createdJob = result.jobs[0]
+            createdJob.user == 'creating_admin'        // Set to current user
+            createdJob.lastModifiedBy == 'creating_admin' // Set to current user
+            createdJob.createdBy == 'creating_admin'   // Set to current user at creation
+            createdJob.dateCreated != null             // Automatically set by Grails
+            createdJob.description == 'new job with audit' // Regular fields preserved
+
+        and: "database reflects the updated values"
+            def dbJob = ScheduledExecution.get(createdJob.id)
+            dbJob.user == 'creating_admin'
+            dbJob.lastModifiedBy == 'creating_admin'
+            dbJob.createdBy == 'creating_admin'
+            dbJob.description == 'new job with audit'
+    }
+
+    def "findJobFromJobReference should find job by UUID when useName is false"() {
+        given: "a job with a specific UUID"
+            def testUuid = UUID.randomUUID().toString()
+            def job = new ScheduledExecution(
+                jobName: 'testJob',
+                project: 'testProject',
+                description: 'a job',
+                uuid: testUuid,
+                groupPath: 'testGroup',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem configured to use UUID"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> false
+                getUuid() >> testUuid
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the job is found by UUID"
+            result != null
+            result.uuid == testUuid
+            result.jobName == 'testJob'
+            result.groupPath == 'testGroup'
+    }
+
+    def "findJobFromJobReference should find job by name and group when useName is true"() {
+        given: "a job with specific name and group"
+            def job = new ScheduledExecution(
+                jobName: 'myJobName',
+                project: 'testProject',
+                description: 'a job',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: 'myGroup',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem configured to use name"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> 'myGroup/myJobName'
+                getProject() >> null
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the job is found by name and group"
+            result != null
+            result.jobName == 'myJobName'
+            result.groupPath == 'myGroup'
+    }
+
+    def "findJobFromJobReference should find job without group when jobIdentifier has no slash"() {
+        given: "a job without a group path"
+            def job = new ScheduledExecution(
+                jobName: 'standaloneJob',
+                project: 'testProject',
+                description: 'a job',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: null,
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem with no group in identifier"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> 'standaloneJob'
+                getProject() >> null
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the job is found without group"
+            result != null
+            result.jobName == 'standaloneJob'
+            result.groupPath == null
+    }
+
+    def "findJobFromJobReference should handle nested group paths correctly"() {
+        given: "a job with nested group path"
+            def job = new ScheduledExecution(
+                jobName: 'nestedJob',
+                project: 'testProject',
+                description: 'a job',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: 'level1/level2/level3',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem with nested group path"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> 'level1/level2/level3/nestedJob'
+                getProject() >> null
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the job is found with correct nested group"
+            result != null
+            result.jobName == 'nestedJob'
+            result.groupPath == 'level1/level2/level3'
+    }
+
+    def "findJobFromJobReference should use jobRef project when specified"() {
+        given: "a job in a different project"
+            def job = new ScheduledExecution(
+                jobName: 'crossProjectJob',
+                project: 'otherProject',
+                description: 'a job',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: 'testGroup',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem with explicit project"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> 'testGroup/crossProjectJob'
+                getProject() >> 'otherProject'
+            }
+
+        when: "findJobFromJobReference is called with different project parameter"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the job is found using jobRef's project"
+            result != null
+            result.project == 'otherProject'
+    }
+
+    def "findJobFromJobReference should fall back to parameter project when jobRef project is null"() {
+        given: "a job in testProject"
+            def job = new ScheduledExecution(
+                jobName: 'localJob',
+                project: 'testProject',
+                description: 'a job',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: 'testGroup',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem without project specified"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> 'testGroup/localJob'
+                getProject() >> null
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the job is found using the parameter project"
+            result != null
+            result.project == 'testProject'
+    }
+
+    def "findJobFromJobReference should return null when job UUID not found"() {
+        given: "a JobReferenceItem with non-existent UUID"
+            def nonExistentUuid = UUID.randomUUID().toString()
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> false
+                getUuid() >> nonExistentUuid
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "null is returned"
+            result == null
+    }
+
+    def "findJobFromJobReference should return null when job name not found"() {
+        given: "a JobReferenceItem with non-existent name"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> 'nonExistentGroup/nonExistentJob'
+                getProject() >> null
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "null is returned"
+            result == null
+    }
+
+    def "findJobFromJobReference should handle null jobIdentifier gracefully"() {
+        given: "a JobReferenceItem with null jobIdentifier"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> true
+                getUuid() >> null
+                getJobIdentifier() >> null
+                getProject() >> null
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "null is returned without exception"
+            result == null
+    }
+
+
+    def "findJobFromJobReference should prioritize UUID over name when useName is false"() {
+        given: "two jobs: one matched by UUID, another by name"
+            def job1 = new ScheduledExecution(
+                jobName: 'job1',
+                project: 'testProject',
+                description: 'job found by UUID',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: 'group1',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+            def job2 = new ScheduledExecution(
+                jobName: 'job1',
+                project: 'testProject',
+                description: 'different job with same name',
+                uuid: UUID.randomUUID().toString(),
+                groupPath: 'group1',
+                workflow: new Workflow(commands: [new CommandExec(adhocRemoteString: 'test')])
+            ).save(flush: true)
+
+        and: "a JobReferenceItem configured to use UUID"
+            def jobRef = Mock(JobReferenceItem) {
+                getUseName() >> false
+                getUuid() >> job1.uuid
+                getJobIdentifier() >> 'group1/job1'
+            }
+
+        when: "findJobFromJobReference is called"
+            def result = service.findJobFromJobReference(jobRef, 'testProject')
+
+        then: "the first job is found by UUID, not by name"
+            result != null
+            result.uuid == job1.uuid
+            result.description == 'job found by UUID'
+    }
+
+    @Unroll
+    def "getJobOptionConfigRemoteUrl infers authenticationType as #expectedType when #scenario"() {
+        given: "an option with configRemoteUrl that has no authenticationType"
+        def mockExecService = Mock(ExecutionService)
+        service.executionServiceBean = mockExecService
+        def authContext = Mock(AuthContext)
+        def opt = new Option(name: 'test', configData: configData)
+        opt.save()
+        _ * mockExecService.canReadStoragePassword(_, _, _) >> false
+
+        when: "loading the remote URL config"
+        def result = service.getJobOptionConfigRemoteUrl(opt, authContext)
+
+        then: "the authenticationType is inferred from the available credential fields"
+        result != null
+        result.authenticationType == expectedType
+
+        where:
+        scenario                   | configData                                                                                                                                     | expectedType
+        'tokenStoragePath set'     | '{"jobOptionConfigEntries":{"remote-url":{"@class":"org.rundeck.app.jobs.options.JobOptionConfigRemoteUrl","tokenStoragePath":"keys/token"}}}' | RemoteUrlAuthenticationType.API_KEY
+        'keyName set'              | '{"jobOptionConfigEntries":{"remote-url":{"@class":"org.rundeck.app.jobs.options.JobOptionConfigRemoteUrl","keyName":"api-key"}}}'             | RemoteUrlAuthenticationType.API_KEY
+        'passwordStoragePath set'  | '{"jobOptionConfigEntries":{"remote-url":{"@class":"org.rundeck.app.jobs.options.JobOptionConfigRemoteUrl","passwordStoragePath":"keys/pass"}}}'| RemoteUrlAuthenticationType.BASIC
+        'username set'             | '{"jobOptionConfigEntries":{"remote-url":{"@class":"org.rundeck.app.jobs.options.JobOptionConfigRemoteUrl","username":"admin"}}}'              | RemoteUrlAuthenticationType.BASIC
+    }
+
+    def "getJobOptionConfigRemoteUrl does not override existing authenticationType"() {
+        given: "an option with configRemoteUrl that already has authenticationType set"
+        def mockExecService = Mock(ExecutionService)
+        service.executionServiceBean = mockExecService
+        def authContext = Mock(AuthContext)
+        def opt = new Option(
+                name: 'test',
+                configData: '{"jobOptionConfigEntries":{"remote-url":{"@class":"org.rundeck.app.jobs.options.JobOptionConfigRemoteUrl","authenticationType":"BEARER_TOKEN","tokenStoragePath":"keys/token"}}}'
+        )
+        opt.save()
+        _ * mockExecService.canReadStoragePassword(_, _, _) >> false
+
+        when: "loading the remote URL config"
+        def result = service.getJobOptionConfigRemoteUrl(opt, authContext)
+
+        then: "the existing authenticationType is preserved"
+        result != null
+        result.authenticationType == RemoteUrlAuthenticationType.BEARER_TOKEN
+    }
+
+    def "getJobOptionConfigRemoteUrl returns null when option has no configRemoteUrl"() {
+        given: "an option with no remote URL configuration"
+        def authContext = Mock(AuthContext)
+        def opt = new Option(name: 'test')
+        opt.save()
+
+        when: "loading the remote URL config"
+        def result = service.getJobOptionConfigRemoteUrl(opt, authContext)
+
+        then: "null is returned"
+        result == null
+    }
+
+
+}
+

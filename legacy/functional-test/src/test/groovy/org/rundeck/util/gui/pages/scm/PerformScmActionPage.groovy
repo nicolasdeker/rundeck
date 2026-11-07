@@ -1,0 +1,81 @@
+package org.rundeck.util.gui.pages.scm
+
+import org.openqa.selenium.By
+import org.openqa.selenium.NoSuchElementException
+import org.openqa.selenium.StaleElementReferenceException
+import org.openqa.selenium.WebElement
+import org.openqa.selenium.support.ui.ExpectedConditions
+import org.openqa.selenium.support.ui.WebDriverWait
+
+import org.rundeck.util.common.scm.ScmIntegration
+import org.rundeck.util.container.SeleniumContext
+import org.rundeck.util.common.scm.ScmActionId
+import org.rundeck.util.gui.pages.BasePage
+import org.rundeck.util.common.WaitingTime
+
+import java.time.Duration
+
+class PerformScmActionPage extends BasePage {
+
+    String loadPath
+    String project
+    private static final String PERFORM_ACTION_URL_PART = "performAction?actionId="
+    private static final ScmIntegration INTEGRATION_FOR_COMMIT = ScmIntegration.EXPORT
+    private static final ScmIntegration INTEGRATION_FOR_IMPORT = ScmIntegration.IMPORT
+    private static final By INFO_MESSAGE_BOX_LOCATOR = By.cssSelector(".alert.alert-info")
+    private static final By ERROR_MESSAGE_BOX_LOCATOR = By.cssSelector(".alert.alert-danger")
+
+    PerformScmActionPage(SeleniumContext context, String project) {
+        super(context)
+        this.project = project
+        loadPath = "/project/${project}"
+    }
+
+    String commitJobChanges(String jobUuid, String commitMessage, boolean shouldWaitAfterCommit = true){
+        loadPath += "/job/${jobUuid}/scm/${INTEGRATION_FOR_COMMIT.name}/${PERFORM_ACTION_URL_PART}${ScmActionId.JOB_COMMIT.name}"
+        super.go()
+
+        driver.findElement(By.name("pluginProperties.message")).sendKeys(commitMessage)
+        driver.findElement(By.name("submit")).click()
+
+        String resultText = waitForResultMessageBox().getText()
+
+        if(shouldWaitAfterCommit)
+            Thread.sleep(WaitingTime.MODERATE.toMillis())
+
+        return resultText
+    }
+
+    List<String> getChosenTrackedItems(){
+        loadPath += "/scm/${INTEGRATION_FOR_IMPORT.name}/${PERFORM_ACTION_URL_PART}${ScmActionId.JOB_IMPORT.name}"
+        super.go()
+        List<String> trackedItems = []
+        driver.findElements(By.name("chosenTrackedItem")).each {trackedItems.add(it.getAttribute("value"))}
+
+        return trackedItems
+    }
+
+    private WebElement waitForResultMessageBox(){
+        // Wait up to 30 seconds for SCM commit result (Git push can be slow in CI)
+        // Use visibilityOfElementLocated instead of elementToBeClickable since alerts are informational
+        new WebDriverWait(driver, Duration.ofSeconds(30))
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.or(
+                        ExpectedConditions.visibilityOfElementLocated(ERROR_MESSAGE_BOX_LOCATOR),
+                        ExpectedConditions.visibilityOfElementLocated(INFO_MESSAGE_BOX_LOCATOR))
+                )
+
+        try {
+            return driver.findElement(INFO_MESSAGE_BOX_LOCATOR)
+        } catch(NoSuchElementException ignored){
+            return driver.findElement(ERROR_MESSAGE_BOX_LOCATOR)
+        }
+    }
+
+    /**
+     * Cannot go since it doesn't have a defined loadpath until the action method is called
+     */
+    @Override
+    void go() {
+    }
+}

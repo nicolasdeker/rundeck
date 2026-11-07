@@ -1,0 +1,14 @@
+[package]
+name = "rdx-workflow"
+description = "workflow engine: strategies, rule engine, contexts, data/variable expansion, log filters, orchestrators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

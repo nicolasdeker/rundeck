@@ -1,0 +1,3 @@
+# Bundled external plugin versions have moved to gradle.properties.
+# See the *PluginVersion properties (e.g. ansiblePluginVersion, sshjPluginVersion);
+# build.gradle and testbuild.groovy read them from there.

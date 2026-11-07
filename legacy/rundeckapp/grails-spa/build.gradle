@@ -1,0 +1,80 @@
+plugins {
+  id "com.github.node-gradle.node" version "${nodeGradlePluginVersion}"
+  id 'base'
+}
+
+ext.spaBuildDir = "${buildDir}/spa"
+
+configurations{
+  spa
+  lib
+  uiTrellis {
+      canBeConsumed(true)
+  }
+}
+
+dependencies {
+    lib project(path: ':rundeckapp:grails-spa:packages:ui-trellis', configuration: 'lib')
+    uiTrellis project(path: ':rundeckapp:grails-spa:packages:ui-trellis', configuration: 'packages')
+}
+
+node{
+    // Whether to download and install a specific Node.js version or not
+    // If false, it will use the globally installed Node.js
+    download = false
+}
+
+apply from: "../../gradle/node-version.gradle"
+def pinnedNodeBin = project.ext.pinnedNodeBin
+
+
+task noop() {
+  doLast {
+    true
+  }
+}
+
+tasks.register("runNpmBuild", NpmTask) {
+    // dependsOn configurations.uiTrellis
+    dependsOn ':rundeckapp:grails-spa:packages:ui-trellis:runNpmBuild'
+
+    // inputs.files(configurations.uiTrellis.allArtifacts)
+    // inputs.file 'packages/ui-trellis/build/package/rundeck-ui-trellis.tgz'
+    inputs.file 'packages/ui-trellis/package.json'
+    inputs.file 'packages/ui-trellis/package-lock.json'
+    inputs.file 'packages/ui-trellis/babel.config.js'
+    inputs.file 'packages/ui-trellis/vue.config.app.js'
+    inputs.file 'packages/ui-trellis/tsconfig.json'
+    inputs.file 'packages/ui-trellis/.env.development'
+    inputs.file 'packages/ui-trellis/.env.production'
+
+    inputs.dir 'packages/ui-trellis/src/app'
+    inputs.dir 'packages/ui-trellis/src/library'
+
+    outputs.dir(file("$spaBuildDir"))
+    outputs.cacheIf { false }
+
+    def npmCommand = System.env.CI ?
+      'ci:app:build' :
+      'dev:app:build'
+
+    args = ['run', npmCommand]
+
+    execOverrides {
+      it.workingDir = './packages/ui-trellis/src/app'
+      if (pinnedNodeBin != null) {
+          it.environment('PATH', "${pinnedNodeBin}${File.pathSeparator}${System.getenv('PATH')}")
+      }
+      def token = project.findProperty('CLOUDSMITH_NPM_TOKEN') ?: System.getenv('CLOUDSMITH_NPM_TOKEN')
+      if (token) {
+          it.environment('CLOUDSMITH_NPM_TOKEN', token)
+      }
+    }
+}
+
+assemble.dependsOn runNpmBuild
+
+artifacts {
+  spa(file: file(spaBuildDir), name: "${project.name}", type: 'directory', builtBy: runNpmBuild)
+}
+

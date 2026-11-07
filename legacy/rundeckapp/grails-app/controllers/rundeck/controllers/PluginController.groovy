@@ -1,0 +1,771 @@
+package rundeck.controllers
+
+import com.dtolabs.rundeck.app.api.ApiVersions
+import com.dtolabs.rundeck.app.api.plugins.ApiPluginListProvider
+import com.dtolabs.rundeck.app.api.plugins.ApiPluginOutput
+import com.dtolabs.rundeck.app.api.plugins.ApiPluginProviderDetail
+import com.dtolabs.rundeck.app.api.plugins.ApiProviderProp
+import com.dtolabs.rundeck.app.support.PluginResourceReq
+import com.dtolabs.rundeck.core.authorization.AuthContext
+import com.dtolabs.rundeck.core.authorization.UserAndRolesAuthContext
+import com.dtolabs.rundeck.core.config.Features
+import com.dtolabs.rundeck.core.plugins.configuration.PropertyScope
+import com.dtolabs.rundeck.plugins.ServiceNameConstants
+import io.micronaut.http.MediaType
+import io.micronaut.http.annotation.Controller
+import io.micronaut.http.annotation.Get
+import io.swagger.v3.oas.annotations.Hidden
+import io.swagger.v3.oas.annotations.Operation
+import io.swagger.v3.oas.annotations.Parameter
+import io.swagger.v3.oas.annotations.enums.ParameterIn
+import io.swagger.v3.oas.annotations.media.ArraySchema
+import io.swagger.v3.oas.annotations.media.Content
+import io.swagger.v3.oas.annotations.media.Schema
+import io.swagger.v3.oas.annotations.responses.ApiResponse
+import org.rundeck.app.authorization.AppAuthContextProcessor
+import org.rundeck.app.spi.AuthorizedServicesProvider
+import org.rundeck.core.auth.AuthConstants
+import com.dtolabs.rundeck.core.plugins.PluginValidator
+import com.dtolabs.rundeck.core.plugins.configuration.PluginAdapterUtility
+import grails.converters.JSON
+import groovy.transform.CompileStatic
+import org.rundeck.core.auth.access.NotFound
+import org.springframework.web.multipart.MultipartFile
+import org.springframework.web.multipart.MultipartHttpServletRequest
+import org.springframework.web.servlet.support.RequestContextUtils
+import rundeck.services.ApiService
+import rundeck.services.FrameworkService
+import rundeck.services.PluginApiService
+import rundeck.services.PluginService
+import rundeck.services.UiPluginService
+
+import jakarta.servlet.http.HttpServletResponse
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+
+import static org.springframework.http.HttpStatus.NOT_FOUND
+
+@Controller
+class PluginController extends ControllerBase {
+    private static final String RELATIVE_PLUGIN_UPLOAD_DIR = "var/tmp/pluginUpload"
+    private static final SimpleDateFormat PLUGIN_DATE_FMT = new SimpleDateFormat("EEE MMM dd hh:mm:ss Z yyyy")
+    static def allowedMethods = [
+        installPlugin: ['POST'],
+        uploadPlugin: ['POST']
+    ]
+    UiPluginService uiPluginService
+    PluginService pluginService
+    PluginApiService pluginApiService
+    FrameworkService frameworkService
+    AuthorizedServicesProvider rundeckAuthorizedServicesProvider
+    def messageSource
+
+    def pluginIcon(PluginResourceReq resourceReq) {
+        if (resourceReq.hasErrors()) {
+            request.errors = resourceReq.errors
+            response.status = 400
+            return render(view: '/common/error')
+        }
+        def profile = uiPluginService.getProfileFor(resourceReq.service, resourceReq.name)
+        if (!profile.icon) {
+            response.status = 404
+            return render(view: '/404')
+        }
+        resourceReq.path = profile.icon
+        pluginFile(resourceReq)
+    }
+
+    def groupIcon(String iconName) {
+        if (!iconName) {
+            response.status = 400
+            return render(view: '/common/error')
+        }
+        
+        if (!iconName.matches(/^[a-zA-Z0-9_-]+\.(svg|png|jpg|jpeg|gif|ico)$/)) {
+            log.warn("Invalid groupIcon request with potential path traversal: ${iconName}")
+            response.status = 400
+            return render(view: '/common/error')
+        }
+        
+        def iconPath = "/images/plugins/${iconName}"
+        def resource = grailsApplication.mainContext.getResource("classpath:public${iconPath}")
+
+        if (!resource.exists()) {
+            response.status = 404
+            return render(view: '/404')
+        }
+
+        def format = servletContext.getMimeType(iconName)
+        sendResponse(format, resource.inputStream)
+    }
+
+    def pluginFile(PluginResourceReq resourceReq) {
+        if (!resourceReq.path) {
+            resourceReq.errors.rejectValue('path', 'blank')
+        }
+        if (resourceReq.hasErrors()) {
+            request.errors = resourceReq.errors
+            response.status = 400
+            return render(view: '/common/error')
+        }
+        def istream = uiPluginService.openResourceForPlugin(resourceReq.service, resourceReq.name, resourceReq.path)
+        if (null == istream) {
+            response.status = 404
+            return render(view: '/404')
+        }
+
+        def format = servletContext.getMimeType(resourceReq.path)
+
+        sendResponse(format, istream)
+
+    }
+
+    def pluginMessages(PluginResourceReq resourceReq) {
+        if (!resourceReq.path) {
+            resourceReq.errors.rejectValue('path', 'blank')
+        }
+        if (resourceReq.hasErrors()) {
+            request.errors = resourceReq.errors
+            response.status = 400
+            return render(view: '/common/error')
+        }
+
+        List<Locale> locales = [RequestContextUtils.getLocale(request)]
+
+        def stem = resourceReq.path.lastIndexOf(".") >= 0 ? resourceReq.path.substring(
+                0,
+                resourceReq.path.lastIndexOf(".")
+        ) : resourceReq.path
+
+        def suffix = resourceReq.path.lastIndexOf(".") >= 0 ? resourceReq.path.substring(
+                resourceReq.path.lastIndexOf(".")
+        ) : ''
+
+        if (!locales) {
+            locales = [Locale.getDefault(), null]//defaults
+        } else {
+            locales.add(Locale.getDefault())
+            locales.add(null)
+        }
+
+        InputStream istream
+        List<String> langs = locales.collect { Locale locale ->
+            locale ? [
+                    locale.toLanguageTag(),
+                    locale.language
+            ] : null
+        }.flatten()
+
+        for (String lang : langs) {
+            def newpath = stem + (lang ? '_' + lang.replaceAll('-', '_') : '') + suffix
+            istream = uiPluginService.openResourceForPlugin(resourceReq.service, resourceReq.name, newpath)
+            if (istream != null) {
+                break
+            }
+        }
+
+        if (null == istream) {
+            response.status = 404
+            return render(view: '/404')
+        }
+        if (resourceReq.path.endsWith(".properties") && response.format == 'json') {
+            //parse java .properties content and emit as json
+            def jprops = new Properties()
+
+            try {
+                def reader = new InputStreamReader(istream, 'UTF-8')
+                jprops.load(reader)
+            } catch (IOException e) {
+                response.status = 500
+                return respond([status: 500])
+            } finally {
+                istream.close()
+            }
+            return render(contentType: 'application/json', text: new HashMap(jprops) as JSON)
+        }
+
+        def format = servletContext.getMimeType(resourceReq.path)
+
+        sendResponse(format, istream)
+    }
+
+    @Get(uri='/plugin/list', produces = MediaType.APPLICATION_JSON)
+    @Operation(
+        method = 'GET',
+        summary = 'List installed plugins',
+        description = '''Get the list of installed Plugins.
+
+Since: v33
+''',
+        tags = ['Plugins']
+    )
+    @ApiResponse(
+        responseCode = '200',
+        description = 'List of Plugins',
+        content = @Content(
+            mediaType = MediaType.APPLICATION_JSON,
+            array = @ArraySchema(schema = @Schema(implementation = ApiPluginListProvider))
+        )
+    )
+    def listPlugins() {
+        String service = params.service
+        boolean includeGroupMetadata = request.api_version >= ApiVersions.V57
+        boolean includeV40Fields = request.api_version >= ApiVersions.V40
+
+        def providers = []
+        pluginApiService.listPlugins(includeGroupMetadata).each { svc ->
+            if (service && service != svc.service)
+                return
+
+            svc.providers.each { p ->
+                def providerMap = [
+                        service: svc.service,
+                        artifactName: p.pluginName,
+                        name: p.name,
+                        id: p.pluginId,
+                        builtin: p.builtin,
+                        pluginVersion: p.pluginVersion,
+                        title: p.title,
+                        description: p.description,
+                        isHighlighted: p.isHighlighted,
+                        highlightedOrder: p.highlightedOrder,
+                        author: p.pluginAuthor,
+                ]
+
+                if (includeV40Fields) {
+                    providerMap.iconUrl = p.iconUrl
+                    providerMap.providerMetadata = p.providerMetadata
+                }
+
+                if (p.outputs) {
+                    providerMap.outputs = p.outputs.collect { ApiPluginOutput.from(it) }
+                }
+
+                ApiPluginListProvider provider = new ApiPluginListProvider(providerMap)
+
+                providers.add(provider)
+            }
+        }
+        respond(
+                providers,
+                [formats: ['json']]
+        )
+    }
+
+    def listPluginsByService() {
+        boolean includeGroupMetadata = request.api_version >= ApiVersions.V57
+        def services = []
+        pluginApiService.listPlugins(includeGroupMetadata).each { svc ->
+            def providers = []
+            svc.providers.each { p ->
+                def provider = [:]
+                provider.artifactName = p.pluginName
+                provider.name = p.name
+                provider.id = p.pluginId
+                provider.builtin = p.builtin
+                provider.pluginVersion = p.pluginVersion
+                provider.title = p.title
+                provider.description = p.description
+                provider.author = p.pluginAuthor
+                providers.add(provider)
+            }
+            services.add([service: svc.service, providers: providers])
+        }
+        render(services as JSON)
+    }
+
+    @Hidden
+    @Get(uri='/plugin/detail/{service}/{provider}', produces = MediaType.APPLICATION_JSON)
+    /**
+     *  detail about a plugin artifact, provider, and properties
+     * @return
+     */
+    @Operation(
+        method = 'GET',
+        summary = 'Get details about a plugin',
+        description = '''Get detailed information about a plugin provide.
+
+Since: v49''',
+        tags = ['Plugins']
+    )
+    @ApiResponse(
+        responseCode = '200',
+        description = 'Plugin Provider detail',
+        content = @Content(
+            mediaType = MediaType.APPLICATION_JSON,
+            schema = @Schema(implementation = ApiPluginProviderDetail)
+        )
+    )
+    def apiPluginDetail(
+        @Parameter(in = ParameterIn.PATH, required = true) String service,
+        @Parameter(in = ParameterIn.PATH, required = true) String provider
+    ) {
+        if (!apiService.requireApi(request, response, ApiVersions.V49)) {
+            return
+        }
+        UserAndRolesAuthContext auth = null
+        if (params.project) {
+            auth = rundeckAuthContextProcessor.getAuthContextForSubjectAndProject(request.subject, params.project)
+        }
+        ApiPluginProviderDetail detail = getPluginDetail(service, provider, auth, params.project, true)
+        respond(detail)
+    }
+
+    def pluginDetail(String service, String provider) {
+        UserAndRolesAuthContext auth = null
+        if (params.project) {
+            auth = rundeckAuthContextProcessor.getAuthContextForSubjectAndProject(request.subject, params.project)
+        }
+        ApiPluginProviderDetail detail = getPluginDetail(service, provider, auth, params.project, false)
+        respond(detail)
+    }
+
+    /**
+     * Load detail for a plugin provider
+     * @param service
+     * @param provider
+     * @param auth
+     * @param project
+     * @param apiRequest
+     * @return
+     */
+    @CompileStatic
+    protected ApiPluginProviderDetail getPluginDetail(
+        String service,
+        String provider,
+        UserAndRolesAuthContext auth,
+        String project,
+        boolean apiRequest
+    ) {
+        String appVer = servletContext.getAttribute('version.number')
+
+        def desc = null
+        def instance = null
+        if (service == ServiceNameConstants.UI) {
+            desc = pluginService.getPluginDescriptor(provider, uiPluginService.uiPluginProviderService)?.description
+        } else {
+            def pDescriptor = pluginService.getPluginDescriptor(provider, service)
+            instance = pDescriptor?.instance
+            desc = pDescriptor?.description
+        }
+        if (!desc) {
+            throw new NotFound("Plugin", "$service:$provider")
+        }
+        def meta = frameworkService.getRundeckFramework().getPluginManager().getPluginMetadata(service,provider)
+        def detail = new ApiPluginProviderDetail()
+        // Generate SHA-256 hash for plugin ID (replaces Grails codec)
+        String pluginHash = MessageDigest.getInstance("SHA-256")
+            .digest(desc.name.bytes)
+            .encodeHex()
+            .toString()
+            .substring(0,12)
+        detail.id = meta?.pluginId ?: pluginHash
+        detail.name = desc.name
+        detail.title = uiPluginService.getPluginMessage(
+            service,
+            provider,
+            "plugin.title",
+            desc.title,
+            RequestContextUtils.getLocale(request)
+        )
+        detail.description = uiPluginService.getPluginMessage(
+            service,
+            provider,
+            'plugin.description',
+            desc.description,
+            RequestContextUtils.getLocale(request)
+        )
+        if(!apiRequest){
+            detail.desc = detail.description
+            detail.description=null
+        }
+        if(service != ServiceNameConstants.UI) {
+            def profile = uiPluginService.getProfileFor(service, provider)
+            if (profile.icon) {
+                detail.iconUrl = grailsLinkGenerator.link(
+                        controller: 'plugin',
+                        action: 'pluginIcon',
+                        params: [service: service, name: provider]
+                )
+            }
+            if (profile.providerMetadata instanceof Map) {
+                detail.providerMetadata = (Map)profile.providerMetadata
+            }
+        }
+        detail.pluginVersion = meta?.pluginFileVersion ?: appVer
+        if(!apiRequest){
+            detail.ver = detail.pluginVersion
+            detail.pluginVersion=null
+        }
+        detail.rundeckCompatibilityVersion = meta?.rundeckCompatibilityVersion ?: 'unspecified'
+        detail.targetHostCompatibility = meta?.targetHostCompatibility ?: 'all'
+        detail.license = meta?.pluginLicense ?: 'unspecified'
+        detail.sourceLink = meta?.pluginSourceLink
+        detail.thirdPartyDependencies = meta?.pluginThirdPartyDependencies
+
+
+        List<ApiProviderProp> propsList = pluginApiService.pluginPropertiesAsMap(
+            service,
+            provider,
+            desc.properties
+        ).collect { ApiProviderProp.from(it) }
+        detail.props = propsList
+        detail.projectMapping = desc.propertiesMapping
+        detail.fwkMapping = desc.fwkPropertiesMapping
+        if(instance) {
+            //Check for custom config vue component
+            def customConfigProp = PluginAdapterUtility.getCustomConfigAnnotation(instance)
+            if(customConfigProp) detail.vueConfigComponent = customConfigProp.vueConfigurationComponent()
+        }
+        if(project) {
+            def services = rundeckAuthorizedServicesProvider.getServicesWith(auth)
+            def dynamicProps = pluginService.
+                getDynamicProperties(frameworkService.rundeckFramework, service, provider, project, services)
+            if (dynamicProps) {
+                detail.dynamicProps = dynamicProps
+            }
+
+            def dynamicDefaults = pluginService.
+                    getDynamicDefaults(frameworkService.rundeckFramework, service, provider, project, services)
+            if (dynamicDefaults) {
+                detail.dynamicDefaults = dynamicDefaults
+            }
+        }
+
+        return detail
+    }
+
+
+    /**
+     * Validate plugin config input.  JSON body: '{"config": {}}', response:
+     * '{"valid":true/false,"errors":{..}}'
+     * @param service
+     * @param name
+     * @return
+     */
+    def pluginPropertiesValidateAjax(String service, String name) {
+        if (requireAjax(controller: 'menu', action: 'index')) {
+            return
+        }
+        if (requireParams(['service', 'name'])) {
+            return
+        }
+        Map config = [:]
+        if (request.method == 'POST' && request.format == 'json') {
+            // Grails 7: Parse body using Jackson instead of request.JSON
+            def jsonBody = com.dtolabs.rundeck.util.JsonUtil.parseRequestBody(request)
+            config = jsonBody?.config ?: [:]
+        }
+        config = ParamsUtil.cleanMap(config)
+        PropertyScope ignoredScope=null
+        if(params.ignoredScope){
+            try{
+                ignoredScope=PropertyScope.valueOf(params.ignoredScope.toString())
+            } catch (IllegalArgumentException e) {
+                response.status = 400
+                return respond(
+                    [status: 400, formats: ['json']],
+                    (Object) [
+                        error: g.message(
+                            code: 'request.error.invalidrequest.message',
+                            args: [params.ignoredScope]
+                        )
+                    ]
+                )
+            }
+
+        }
+        def validation = pluginService.validatePluginConfig(service, name, config, ignoredScope)
+        if(!validation){
+            response.status=404
+
+            return render(contentType: 'application/json') {
+                valid false
+                delegate.error ('Provider not found for '+service+': '+name)
+            }
+        }
+        def errorsMap = validation.report.errors
+        def decomp = ParamsUtil.decomposeMap(errorsMap)
+//        System.err.println("config: $config, errors: $errorsMap, decomp: $decomp")
+        render(contentType: 'application/json') {
+            valid validation.valid
+            delegate.errors decomp
+        }
+    }
+
+    /**
+     * List the installed plugin descriptions for a selected Service name
+     * @param project
+     * @param service
+     * @return
+     */
+    def pluginServiceDescriptions(String service) {
+        if (requireAjax(controller: 'menu', action: 'index')) {
+            return
+        }
+        if (requireParams(['service'])) {
+            return
+        }
+        Class serviceType
+        try {
+            serviceType = pluginService.getPluginTypeByService(service)
+        } catch (IllegalArgumentException e) {
+            return render(
+                [message: g.message(code: 'request.error.notfound.title')] as JSON,
+                status: NOT_FOUND,
+                contentType: 'application/json'
+            )
+        }
+        def descriptions = pluginService.listPlugins(serviceType)
+        def data = descriptions.values()?.description?.sort { a, b -> a.name <=> b.name }?.collect {desc->
+            def descMap = [
+                name       : desc.name,
+                title      : uiPluginService.getPluginMessage(
+                    service,
+                    desc.name,
+                    'plugin.title',
+                    desc.title ?: desc.name,
+                    RequestContextUtils.getLocale(request)
+                ),
+                description: uiPluginService.getPluginMessage(
+                    service,
+                    desc.name,
+                    'plugin.description',
+                    desc.description,
+                    RequestContextUtils.getLocale(request)
+                )
+            ]
+            def profile = uiPluginService.getProfileFor(service, desc.name)
+            if (profile.icon) {
+                descMap.iconUrl = createLink(
+                    controller: 'plugin',
+                    action: 'pluginIcon',
+                    params: [service: service, name: desc.name]
+                )
+            }
+            if (profile.providerMetadata) {
+                descMap.providerMetadata = profile.providerMetadata
+            }
+            descMap
+        }
+        def singularMessage = message(code: "framework.service.${service}.label", default: service)?.toString()
+        render(contentType: 'application/json') {
+            delegate.service service
+            delegate.descriptions data
+            labels(
+                singular: singularMessage,
+                indexed: message(
+                    code: "framework.service.${service}.label.indexed",
+                    default: singularMessage + ' {0}'
+                ),
+                plural: message(code: "framework.service.${service}.label.plural", default: singularMessage),
+                addButton: message(code: "framework.service.${service}.add.title", default: 'Add ' + singularMessage),
+                )
+        }
+    }
+
+    @CompileStatic
+    private def sendResponse(String contentType, InputStream stream) {
+        try {
+            response.contentType = contentType
+            response.outputStream << stream.bytes
+            response.flushBuffer()
+        } finally {
+            stream.close()
+        }
+    }
+    protected boolean requireAjaxFormToken(){
+        boolean valid = false
+        withForm {
+            g.refreshFormTokensHeader()
+            valid = true
+        }.invalidToken {
+        }
+        if (!valid) {
+            apiService.renderErrorFormat(response, [
+                status: HttpServletResponse.SC_BAD_REQUEST,
+                code: 'request.error.invalidtoken.message',
+            ])
+        }
+        return valid
+    }
+
+    def uploadPlugin() {
+
+        if(featureService.featurePresent(Features.PLUGIN_SECURITY)){
+            renderErrorCodeAsJson("plugin.error.unauthorized.upload")
+            return
+        }
+        if(!requireAjaxFormToken()){
+            return
+        }
+
+        AuthContext authContext = rundeckAuthContextProcessor.getAuthContextForSubject(session.subject)
+        boolean authorized = rundeckAuthContextProcessor.authorizeApplicationResourceAny(
+            authContext,
+            AuthConstants.RESOURCE_TYPE_PLUGIN,
+            [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]
+        )
+        if (!authorized) {
+            renderErrorCodeAsJson("request.error.unauthorized.title")
+            return
+        }
+        if(!(request instanceof MultipartHttpServletRequest && request.getFile('pluginFile'))){
+            renderErrorCodeAsJson("plugin.error.missing.upload.file")
+            return
+        }
+        def file = request.getFile('pluginFile')
+        ensureUploadLocation()
+        File tmpFile
+        try {
+            tmpFile = resolveSafePluginFile(new File(frameworkService.getRundeckFramework().baseDir, RELATIVE_PLUGIN_UPLOAD_DIR), file.originalFilename)
+        } catch (IllegalArgumentException e) {
+            renderErrorCodeAsJson("plugin.error.invalid.filename")
+            return
+        }
+        if(tmpFile.exists()) tmpFile.delete()
+        tmpFile << file.inputStream
+        def errors = validateAndCopyPlugin(file.originalFilename, tmpFile)
+        tmpFile.delete()
+        def msg = [:]
+        if(!errors.isEmpty()) {
+            msg.err = errors.join(", ")
+        } else {
+            msg.msg = "done"
+        }
+
+        render msg as JSON
+    }
+
+    def installPlugin() {
+
+        if(!requireAjaxFormToken()){
+            return
+        }
+
+        if(featureService.featurePresent(Features.PLUGIN_SECURITY)){
+            renderErrorCodeAsJson("plugin.error.unauthorized.upload")
+            return
+        }
+
+        AuthContext authContext = rundeckAuthContextProcessor.getAuthContextForSubject(session.subject)
+        boolean authorized = rundeckAuthContextProcessor.authorizeApplicationResourceAny(
+            authContext,
+            AuthConstants.RESOURCE_TYPE_PLUGIN,
+            [AuthConstants.ACTION_INSTALL, AuthConstants.ACTION_ADMIN]
+        )
+        if (!authorized) {
+            renderErrorCodeAsJson("request.error.unauthorized.title")
+            return
+        }
+        if(!params.pluginUrl) {
+            renderErrorCodeAsJson("plugin.error.missing.url")
+            return
+        }
+        if(!params.pluginUrl.contains("/")) {
+            renderErrorCodeAsJson("plugin.error.invalid.url")
+            return
+        }
+        URI pluginUri
+        try {
+            pluginUri = URI.create(params.pluginUrl)
+        } catch (IllegalArgumentException e) {
+            renderErrorCodeAsJson("plugin.error.invalid.url")
+            return
+        }
+        if (!(pluginUri.scheme?.equalsIgnoreCase("http") || pluginUri.scheme?.equalsIgnoreCase("https"))) {
+            renderErrorCodeAsJson("plugin.error.invalid.url")
+            return
+        }
+        def parts = params.pluginUrl.split("/")
+
+        ensureUploadLocation()
+        File tmpFile
+        try {
+            tmpFile = resolveSafePluginFile(new File(frameworkService.getRundeckFramework().baseDir, RELATIVE_PLUGIN_UPLOAD_DIR), parts.last())
+        } catch (IllegalArgumentException e) {
+            renderErrorCodeAsJson("plugin.error.invalid.filename")
+            return
+        }
+        if(tmpFile.exists()) tmpFile.delete()
+        try {
+            pluginUri.toURL().withInputStream { inputStream ->
+                tmpFile << inputStream
+            }
+        } catch(Exception ex) {
+            def err  = [err: "Failed to fetch plugin from URL. Error: ${ex.message}"]
+            render err as JSON
+            return
+        }
+        def errors = validateAndCopyPlugin(parts.last(),tmpFile)
+        tmpFile.delete()
+        def msg = [:]
+        if(!errors.isEmpty()) {
+            msg.err = errors.join(", ")
+        } else {
+            msg.msg = "done"
+        }
+        render msg as JSON
+    }
+
+    private def validateAndCopyPlugin(String pluginName, File tmpPluginFile) {
+        def errors = []
+        if(!PluginValidator.validate(tmpPluginFile)) {
+            errors.add("plugin.error.invalid.plugin")
+        } else {
+            File newPlugin
+            try {
+                newPlugin = resolveSafePluginFile(frameworkService.getRundeckFramework().libextDir, pluginName)
+            } catch (IllegalArgumentException e) {
+                errors.add("plugin.error.invalid.filename")
+                return errors
+            }
+            if(newPlugin.exists()) {
+                newPlugin.delete()
+            }
+            tmpPluginFile.withInputStream { inStream ->
+                newPlugin << inStream
+            }
+            flash.installSuccess = true
+        }
+        return errors
+    }
+
+    /**
+     * Resolves a plugin file name against a base directory, rejecting names that contain
+     * path separators or {@code ..} segments, or that would otherwise resolve outside
+     * {@code baseDir} once normalized.
+     *
+     * @param baseDir the directory the resolved file must live in
+     * @param name the untrusted plugin file name
+     * @return the resolved {@link File} within {@code baseDir}
+     * @throws IllegalArgumentException if {@code name} is blank or would escape {@code baseDir}
+     */
+    @CompileStatic
+    private File resolveSafePluginFile(File baseDir, String name) {
+        if (!name || name.contains('/') || name.contains('\\') || name.contains('..')) {
+            throw new IllegalArgumentException("Invalid plugin file name: ${name}")
+        }
+        File resolved = new File(baseDir, name)
+        if (resolved.isDirectory()) {
+            throw new IllegalArgumentException("Invalid plugin file name: ${name}")
+        }
+        return resolved
+    }
+
+    private String renderErrorCodeAsJson(String errCode) {
+        def err  = [err: messageSource.getMessage(errCode,null,RequestContextUtils.getLocale(request))]
+        render err as JSON
+    }
+
+    private def ensureUploadLocation() {
+        File uploadDir = new File(frameworkService.getRundeckFramework().baseDir,RELATIVE_PLUGIN_UPLOAD_DIR)
+        if(!uploadDir.exists()) {
+            uploadDir.mkdirs()
+        }
+    }
+
+    private long toEpoch(String dateString) {
+        PLUGIN_DATE_FMT.parse(dateString).time
+    }
+}

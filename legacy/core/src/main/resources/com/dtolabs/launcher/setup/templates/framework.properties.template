@@ -1,0 +1,51 @@
+# framework.properties -
+#
+
+# ----------------------------------------------------------------
+# Server connection information
+# ----------------------------------------------------------------
+
+framework.server.name = @framework.server.name@
+framework.server.hostname = @framework.server.hostname@
+framework.server.port = @framework.server.port@
+framework.server.url = @framework.rundeck.url@
+
+# ----------------------------------------------------------------
+# Installation locations
+# ----------------------------------------------------------------
+
+rdeck.base=@rdeck.base@
+
+framework.projects.dir=@rdeck.base@/projects
+framework.etc.dir=@framework.etc.dir@
+framework.var.dir=@framework.var.dir@
+framework.tmp.dir=@framework.var.dir@/tmp
+framework.logs.dir=@framework.var.dir@/logs
+framework.libext.dir=@rdeck.base@/libext
+
+# ----------------------------------------------------------------
+# SSH defaults for node executor and file copier
+# ----------------------------------------------------------------
+
+framework.ssh.keypath = @framework.ssh.keypath@
+framework.ssh.user = @framework.ssh.user@
+
+# ssh connection timeout after a specified number of milliseconds.
+# "0" value means wait forever.
+framework.ssh.timeout = 0
+
+# ----------------------------------------------------------------
+# Auto generated server UUID: @rundeck.server.uuid@
+# ----------------------------------------------------------------
+rundeck.server.uuid = @rundeck.server.uuid@
+
+# ----------------------------------------------------------------
+# System-wide global variables.
+# ----------------------------------------------------------------
+
+# Expands to ${globals.var1}
+#framework.globals.var1 = value1
+
+# Expands to ${globals.var2}
+#framework.globals.var2 = value2
+

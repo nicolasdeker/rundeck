@@ -1,0 +1,132 @@
+package org.rundeck.tests.functional.selenium.jobs
+
+import org.rundeck.util.annotations.ExcludePro
+import org.rundeck.util.annotations.SeleniumCoreTest
+import org.rundeck.util.annotations.UiModeFlag
+import org.rundeck.util.annotations.UiModeStatus
+import org.rundeck.util.container.SeleniumBase
+import org.rundeck.util.gui.UiModes
+import org.rundeck.util.gui.pages.execution.ExecutionShowPage
+import org.rundeck.util.gui.pages.execution.HtmlRenderedOutputPage
+import org.rundeck.util.gui.pages.jobs.JobCreatePage
+import org.rundeck.util.gui.pages.jobs.JobShowPage
+import org.rundeck.util.gui.pages.jobs.JobTab
+import org.rundeck.util.gui.pages.login.LoginPage
+
+@SeleniumCoreTest
+@UiModeFlag(featureName = "job-tabs", status = UiModeStatus.PROMOTED)
+class JobTabsSpec extends SeleniumBase {
+
+    static final UI_MODES = UiModes.defaultAndLegacy()
+    static final String PROJECT_NAME = 'job_nodes_tab'
+
+    def setupSpec() {
+        startEnvironment()
+    }
+
+    void setup() {
+        def loginPage = go(LoginPage)
+        loginPage.login(TEST_USER, TEST_PASS)
+        setupProject(PROJECT_NAME)
+    }
+
+    def cleanup() {
+        deleteProject(PROJECT_NAME)
+    }
+
+    @ExcludePro
+    void "job nodes tab"() {
+        when:
+        final String option = 'nodes'
+        def jobShowPage = page(JobShowPage)
+        def executionShowPage = page(ExecutionShowPage)
+        def jobCreatePage = go(JobCreatePage, PROJECT_NAME, [legacyUi: legacyUi])
+        jobCreatePage.jobNameInput.sendKeys("test-output-tab")
+        jobCreatePage.tab(JobTab.WORKFLOW).click()
+        if(legacyUi) {
+            jobCreatePage.addSimpleCommandStep('echo "hello world"', 0)
+        } else {
+            jobCreatePage.addSimpleCommandStepNextUi('echo "hello world"', 0)
+        }
+        jobCreatePage.createJobButton.click()
+        jobShowPage.jobActionDropdownButton.click()
+        jobShowPage.waitForElementToBeClickable(jobShowPage.editJobLink)
+        jobShowPage.editJobLink.click()
+        jobCreatePage.tab(JobTab.OTHER).click()
+        jobCreatePage.defaultTabNodes.click()
+        jobCreatePage.updateBtn.click()
+        jobShowPage.runJobBtn.click()
+        def nodeViewContainer = executionShowPage.nodeFlowState
+        then:
+        currentUrl.endsWith(option)
+        executionShowPage.viewButtonOutput.getAttribute("style") == ""
+        nodeViewContainer.isDisplayed()
+        executionShowPage.waitForElementAttributeToChange(executionShowPage.executionStateDisplayLabel, 'data-execstate', 'SUCCEEDED')
+        where:
+        [legacyUi] << UI_MODES
+    }
+
+    @ExcludePro
+    void "job log output tab"() {
+        when:
+        def jobShowPage = page(JobShowPage)
+        def executionShowPage = page(ExecutionShowPage)
+        def jobCreatePage = go(JobCreatePage, PROJECT_NAME, [legacyUi: legacyUi])
+        jobCreatePage.jobNameInput.sendKeys("test-output-tab")
+        jobCreatePage.tab(JobTab.WORKFLOW).click()
+        if(legacyUi) {
+            jobCreatePage.addSimpleCommandStep('echo "hello world"', 0)
+        } else {
+            jobCreatePage.addSimpleCommandStepNextUi('echo "hello world"', 0)
+        }
+        jobCreatePage.createJobButton.click()
+        jobShowPage.jobActionDropdownButton.click()
+        jobShowPage.waitForElementToBeClickable(jobShowPage.editJobLink)
+        jobShowPage.editJobLink.click()
+        jobCreatePage.tab(JobTab.OTHER).click()
+        jobCreatePage.defaultTabOutput.click()
+        jobCreatePage.updateBtn.click()
+        jobShowPage.runJobBtn.click()
+        def nodeViewContainer = executionShowPage.nodeFlowState
+        then:
+        currentUrl.endsWith("output")
+        executionShowPage.viewButtonOutput.getAttribute("style") == "display: none;"
+        !nodeViewContainer.isDisplayed()
+        executionShowPage.waitForElementAttributeToChange(executionShowPage.executionStateDisplayLabel, 'data-execstate', 'SUCCEEDED')
+        where:
+        [legacyUi] << UI_MODES
+    }
+
+    @ExcludePro
+    void "job log html tab"() {
+        when:
+        def commandArg = "hello world"
+        def command = "echo"
+        def fullCommand = "${command} ${commandArg}"
+        def jobShowPage = page(JobShowPage)
+        def executionShowPage = page(ExecutionShowPage)
+        def htmlOutputPage = page HtmlRenderedOutputPage
+        def jobCreatePage = go(JobCreatePage, PROJECT_NAME, [legacyUi: legacyUi])
+        jobCreatePage.jobNameInput.sendKeys("test-html-output")
+        jobCreatePage.tab(JobTab.WORKFLOW).click()
+        if(legacyUi) {
+            jobCreatePage.addSimpleCommandStep(fullCommand, 0)
+        } else {
+            jobCreatePage.addSimpleCommandStepNextUi(fullCommand, 0)
+        }
+        jobCreatePage.createJobButton.click()
+        jobShowPage.jobActionDropdownButton.click()
+        jobShowPage.waitForElementToBeClickable(jobShowPage.editJobLink)
+        jobShowPage.editJobLink.click()
+        jobCreatePage.tab(JobTab.OTHER).click()
+        jobCreatePage.defaultTabHtml.click()
+        jobCreatePage.updateBtn.click()
+        jobShowPage.runJobBtn.click()
+        executionShowPage.waitForElementVisible(htmlOutputPage.logLevelNormalBy)
+        then:
+        htmlOutputPage.logLevelNormalLogLine.text == commandArg
+        currentUrl.endsWith("convertContent=on&loglevels=on&ansicolor=on&reload=true")
+        where:
+        [legacyUi] << UI_MODES
+    }
+}

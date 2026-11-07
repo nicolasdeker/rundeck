@@ -1,0 +1,254 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "ignorePaths": ["**/node_modules/**", "**/bower_components/**", "**/vendor/**", "**/examples/**"],
+  "minimumReleaseAge": "4 days",
+  "commitMessagePrefix": "[RUN-0000]",
+  "dependencyDashboard": true,
+  "fetchChangeLogs": "off",
+  "rebaseWhen": "conflicted",
+  "hostRules": [
+    {
+      "description": "Concentrating almost all Gradle lookups onto Maven Central (see registryUrls scoping below) increased request density enough to trip its rate limiter (429s). Throttle our own concurrency here instead of bursting and eating retry/backoff costs.",
+      "matchHost": "repo1.maven.org",
+      "concurrentRequestLimit": 4,
+      "maxRequestsPerSecond": 5
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "dependencyDashboardApproval": false,
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "Defer major updates to manual selection from the Dependency Dashboard",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Group noisy Google Cloud client library revision bumps",
+      "matchPackageNames": ["/^com\\.google\\.apis:/", "/^com\\.google\\.cloud:/"],
+      "groupName": "google cloud clients"
+    },
+    {
+      "description": "google-cloud-container versions above 2.82.0 require protobuf-java 4.x, but protobufVersion is globally forced to 3.25.9 in build.gradle for CVE-2024-7254. Bumping past 2.82.0 causes NoClassDefFoundError (missing RuntimeVersion$RuntimeDomain) in GcpGkeResourceModelSpec - already reverted once in 2c6b381cbf and re-broke this branch when Renovate re-proposed it. Block until protobufVersion itself is bumped as its own validated change.",
+      "matchPackageNames": ["com.google.cloud:google-cloud-container"],
+      "enabled": false
+    },
+    {
+      "description": "Group routine Gradle minor/patch dependency bumps",
+      "matchManagers": ["gradle"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "gradle minor/patch dependencies"
+    },
+    {
+      "description": "Grails minors have a history of real behavioral changes despite semver, and grails-plugin-spring-security-core must move in lockstep with it — pull both out of the auto-grouped minor/patch bucket for manual review. Groovy is included here too: Grails dictates which Groovy line it's built against, and bumping groovyVersion independently caused classpath skew that broke the forked :rundeckapp:assetCompile JVM (rundeck#10448, ExceptionInInitializerError in GroovySystem.<clinit>). log4j2, asm, kotlin-stdlib, and ant joined the group in RUN-4809: Grails' base BOM manages all four as *strict* dependency-management constraints that plain resolutionStrategy.force can't override, so build.gradle force-overrides them via explicit dependencyManagement entries instead (documented inline there). Guava is BOM-managed the same way but has no dependencyManagement override, so it can't move independently at all: :enterprise exportedLibs follows guavaVersion while :rundeckapp's bootWar stays on the grails-base-bom version, and the WAR ends up with two guava (and two transitive jspecify) jars, failing verifyBuild's stem-uniqueness check. Whoever reviews a Grails bump here should also confirm those overrides still clear whatever floor the new grails-base-bom asserts, and that guavaVersion still matches it.",
+      "matchPackageNames": ["/^org\\.apache\\.grails:/", "/^org\\.apache\\.groovy:/", "/^org\\.apache\\.logging\\.log4j:/", "/^org\\.ow2\\.asm:/", "org.jetbrains.kotlin:kotlin-stdlib", "/^org\\.apache\\.ant:/", "com.google.guava:guava"],
+      "groupName": "grails framework (manual review required)",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Spock's version suffix (e.g. -groovy-5.0) encodes the Groovy variant it's compiled against; that must move in lockstep with our own groovyVersion pin, not silently ride along on a 'minor' semver bump",
+      "matchPackageNames": ["/^org\\.spockframework:/"],
+      "groupName": "spock framework (manual review - groovy variant coupling)",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "jetty.version only forces jetty-util in core/build.gradle; every other Jetty artifact stays pinned wherever Spring Boot's BOM manages it. A 'minor' bump here (e.g. 12.0.x -> 12.1.x) can cross Jetty's own release-line boundary and produce a mixed-version classpath — must be reviewed and moved in lockstep with springBootVersion",
+      "matchPackageNames": ["/^org\\.eclipse\\.jetty/"],
+      "groupName": "jetty (manual review - Spring Boot BOM coupling)",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "bcprov-jdk18on shares the bouncyCastleVersion property with bcpkix/bcutil/bcmail/bctls-jdk18on (git-plugin, license-cli, rundeckpro-license, etc.), and those siblings don't always cut a patch release together — 1.85.2 was published for bcprov-jdk18on alone, which broke git-plugin's bcpkix-jdk18on resolution when Renovate bumped the shared property (PR #4922). Needs its own groupName, not just dependencyDashboardApproval: without one it stayed lumped into the 'gradle minor/patch dependencies' group below and rode along anyway (re-broke #4922 a second time). Gate on Dependency Dashboard approval rather than disabling outright, so this keeps surfacing instead of being silently forgotten; before approving, confirm bcpkix/bcutil/bcmail/bctls-jdk18on have all published the same version on Maven Central.",
+      "matchPackageNames": ["org.bouncycastle:bcprov-jdk18on"],
+      "groupName": "bouncy castle bcprov (manual review - patch cadence mismatch with siblings)",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Keep the Jira REST client app/core artifacts in lockstep",
+      "matchPackageNames": ["/^com\\.atlassian\\.jira:jira-rest-java-client-/"],
+      "groupName": "atlassian jira rest client"
+    },
+    {
+      "description": "Group low-risk GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Never batch our own runner/sidecar artifact with unrelated updates",
+      "matchPackageNames": ["com.rundeck.sidecar:pd-runner-api"],
+      "groupName": null,
+      "automerge": false
+    },
+    {
+      "description": "Block packages Eng has flagged as too disruptive to auto-update",
+      "matchPackageNames": [
+        "jquery",
+        "/^@types\\/jquery$/",
+        "vue-eslint-parser",
+        "/^@vue\\/cli-/",
+        "storybook",
+        "/^@storybook\\//",
+        "vue-i18n",
+        "typescript",
+        "/^@typescript/",
+        "typescript-eslint",
+        "sass",
+        "sass-loader",
+        "/^com\\.h2database:/"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Label every npm dep bump in ui-trellis so a GitHub Action can check whether it's also vendored into rundeckpro-ui-components and mirror the update there once this PR merges. The actual 'is this shared' decision is made downstream against rundeckpro-ui-components/package.json (single source of truth), not maintained here as a name list — see rundeckpro's sync-renovate-dependency.yml workflow.",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["rundeckapp/grails-spa/packages/ui-trellis/package.json"],
+      "addLabels": ["sync-rundeckpro"]
+    },
+    {
+      "description": "Group ESLint ecosystem updates",
+      "matchPackageNames": ["/eslint/"],
+      "groupName": "eslint packages"
+    },
+    {
+      "description": "Group Jest ecosystem updates",
+      "matchPackageNames": ["jest", "ts-jest", "@types/jest"],
+      "groupName": "jest packages"
+    },
+    {
+      "description": "Group PrimeVue ecosystem updates",
+      "matchPackageNames": ["primevue", "primeicons", "@primeuix/themes"],
+      "groupName": "primevue packages"
+    },
+    {
+      "description": "Enable npm engine version updates (disabled by default in Renovate)",
+      "matchDepTypes": ["engines"],
+      "enabled": true
+    },
+    {
+      "description": "ui-trellis npm packages: security updates only. rundeckpro consumes ui-trellis as a published tarball, so routine (non-vulnerability) bumps here are disabled to avoid drift that rundeckpro's own renovate config isn't watching for; vulnerabilityAlerts stays enabled above so CVE fixes still get raised. Placed after the generic 'Enable npm engine version updates' rule above (not before it) because Renovate merges matching packageRules in declaration order, so this rule needs to come later to actually win and keep ui-trellis's npm engine bumps disabled too.",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["rundeckapp/grails-spa/packages/ui-trellis/package.json"],
+      "matchPackageNames": ["*"],
+      "enabled": false
+    },
+    {
+      "description": "Group Node.js version (.nvmrc) with the npm engine pin so they update together. Gated behind Dependency Dashboard approval: node/npm must move in lockstep across the rundeck and rundeckpro repos (Renovate cannot open a single cross-repo PR), so auto-created PRs can never merge unilaterally and only burn CI. Approve the checkbox on BOTH repos' dashboards in the same session, merge rundeck first, then rundeckpro.",
+      "matchManagers": ["nvm", "npm"],
+      "matchDepNames": ["node", "npm"],
+      "groupName": "node and npm engine versions",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Default registry for the vast majority of Gradle dependencies (Spring, Netty, Jackson, JUnit, etc.) instead of checking every globally-declared repo (m2proxy, PackageCloud, Sonatype, Grails, Gradle Plugin Portal, ...) for every dependency. Only ~9% of our gradle deps are actually Grails/Groovy-namespaced, so grails.org is scoped separately below rather than checked for everything.",
+      "matchManagers": ["gradle"],
+      "registryUrls": [
+        "https://repo1.maven.org/maven2/"
+      ]
+    },
+    {
+      "description": "Grails/Groovy-namespaced artifacts also need the Grails Maven repo",
+      "matchPackageNames": ["/^org\\.apache\\.grails:/", "/^org\\.grails\\.plugins:/", "/^org\\.apache\\.groovy:/"],
+      "registryUrls": [
+        "https://repo1.maven.org/maven2/",
+        "https://repo.grails.org/grails/core/"
+      ]
+    },
+    {
+      "description": "Gradle plugin marker artifacts resolve via the Gradle Plugin Portal, not plain Maven Central",
+      "matchManagers": ["gradle"],
+      "matchDepTypes": ["plugin"],
+      "registryUrls": [
+        "https://plugins.gradle.org/m2/",
+        "https://repo1.maven.org/maven2/"
+      ]
+    },
+    {
+      "description": "PagerDuty-internal runner/sidecar artifacts only exist on our PackageCloud feeds",
+      "matchPackageNames": ["/^com\\.rundeck\\.sidecar:/", "/^com\\.rundeck\\.runner:/"],
+      "registryUrls": [
+        "https://packagecloud.io/pagerduty/rundeckpro/maven2/",
+        "https://packagecloud.io/pagerduty/rundeckpro-test/maven2/",
+        "https://repo1.maven.org/maven2/"
+      ]
+    },
+    {
+      "description": "org.rundeck artifacts also need the Sonatype Central snapshots feed and PackageCloud (plugins no longer publish to Maven Central)",
+      "matchPackageNames": ["/^org\\.rundeck[.:]/"],
+      "registryUrls": [
+        "https://packagecloud.io/pagerduty/rundeck-plugins/maven2/",
+        "https://repo1.maven.org/maven2/",
+        "https://central.sonatype.com/repository/maven-snapshots/",
+        "https://repo.grails.org/grails/core/"
+      ]
+    },
+    {
+      "description": "Atlassian artifacts (Jira REST client, commonmark) need the internal Atlassian Maven proxy",
+      "matchPackageNames": ["/^com\\.atlassian[.:]/"],
+      "registryUrls": [
+        "https://m2proxy.atlassian.com/repository/public/",
+        "https://repo1.maven.org/maven2/"
+      ]
+    },
+    {
+      "description": "Pin every container image (Dockerfiles, compose, CircleCI executors, annotated refs) to tag@sha256 so the same commit always pulls the same image and a re-pointed upstream tag cannot reach CI or shipped images without a reviewed PR",
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
+      "description": "CI/test-only images: every non-major update (digest refresh, patch, minor) goes into one grouped weekly PR with human review. No automerge: CI does not need to chase the latest upstream image",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["digest", "pinDigest", "patch", "minor"],
+      "groupName": "docker images (ci)",
+      "schedule": ["before 6am on monday"],
+      "automerge": false
+    },
+    {
+      "description": "Base images of images shipped to customers: their own grouped weekly PR, never automerged, so a re-pointed upstream digest cannot reach a shipped image without human review",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["digest", "pinDigest", "patch", "minor"],
+      "matchFileNames": ["docker/ubuntu-base/**"],
+      "groupName": "docker images (shipped)",
+      "schedule": ["before 6am on monday"],
+      "automerge": false,
+      "addLabels": ["shipped-image"]
+    },
+    {
+      "description": "Documented exceptions: legacy Dockerfiles on EOL bases that CI does not use stay untouched (no pin, no updates)",
+      "matchDatasources": ["docker"],
+      "matchFileNames": ["docker/centos7systemd/**", "docker/debinstall/**", "docker/installcommon/**", "docker/package/**", "docker/rpminstall/**", "docker/yuminstall/**", "docker/yuminstall-centos7/**", "test/docker/dockers/testnode/**", "test/docker/dockers/hostnode/**", "test/docker/dockers/ubuntudeb/**"],
+      "enabled": false
+    },
+    {
+      "description": "Documented exceptions: internal images built in the same pipeline are never pinned or updated by Renovate",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["rundeck/ubuntu-base", "rdtest", "rundeckansible", "rundeck/testdeck", "local/c7-systemd", "/^rd.*-util$/"],
+      "enabled": false
+    },
+    {
+      "description": "Documented exceptions: SNAPSHOT tags are per-pipeline builds of our own images",
+      "matchDatasources": ["docker"],
+      "matchCurrentValue": "/SNAPSHOT/",
+      "enabled": false
+    },
+    {
+      "description": "rundeck/node-demo only publishes 'latest', which has no release timestamp; without this its digest refreshes would wait on minimumReleaseAge forever",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["rundeck/node-demo"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Image refs the built-in managers cannot see (Groovy, Gradle, shell, Makefile, compose build args). Annotate the line above the ref with '# renovate: datasource=docker depName=<image>' (or '//' in Groovy/Gradle); the ref must be '<image>:<tag>@sha256:<digest>'",
+      "managerFilePatterns": ["/\\.(groovy|gradle|sh|ya?ml)$/", "/(^|/)Makefile$/"],
+      "matchStrings": [
+        "(?:#|//)\\s*renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s*\\n[^\\n]*?:(?<currentValue>[^\\s@\"'}:]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,254 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*
+* NodeStepPluginAdapter.java
+* 
+* User: Greg Schueler <a href="mailto:greg@dtosolutions.com">greg@dtosolutions.com</a>
+* Created: 11/12/12 5:39 PM
+* 
+*/
+package com.dtolabs.rundeck.core.execution.workflow.steps.node;
+
+import com.dtolabs.rundeck.core.Constants;
+import com.dtolabs.rundeck.core.common.INodeEntry;
+import com.dtolabs.rundeck.core.data.SharedDataContextUtils;
+import com.dtolabs.rundeck.core.data.UnexpandableBehavior;
+import com.dtolabs.rundeck.core.dispatcher.ContextView;
+import com.dtolabs.rundeck.core.execution.ConfiguredStepExecutionItem;
+import com.dtolabs.rundeck.core.execution.StepExecutionItem;
+import com.dtolabs.rundeck.core.execution.workflow.StepExecutionContext;
+import com.dtolabs.rundeck.core.execution.workflow.steps.CustomFieldsAdapter;
+import com.dtolabs.rundeck.core.execution.workflow.steps.PluginStepContextImpl;
+import com.dtolabs.rundeck.core.execution.workflow.steps.StepFailureReason;
+import com.dtolabs.rundeck.core.execution.workflow.steps.UnexpandableBehaviorSupport;
+import com.dtolabs.rundeck.core.plugins.configuration.*;
+import com.dtolabs.rundeck.core.utils.Converter;
+import com.dtolabs.rundeck.plugins.ServiceNameConstants;
+import com.dtolabs.rundeck.plugins.step.NodeStepPlugin;
+import com.dtolabs.rundeck.plugins.step.PluginStepContext;
+import com.dtolabs.rundeck.plugins.util.DescriptionBuilder;
+import lombok.Getter;
+import org.rundeck.app.spi.Services;
+import org.rundeck.core.execution.ExecCommand;
+import org.rundeck.core.execution.ScriptCommand;
+import org.rundeck.core.execution.ScriptFileCommand;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+
+
+/**
+ * NodeStepPluginAdapter implements NodeStepExecutor, and makes use of a {@link NodeStepPlugin} instance to perform the
+ * execution.
+ *
+ * @author Greg Schueler <a href="mailto:greg@dtosolutions.com">greg@dtosolutions.com</a>
+ */
+public class NodeStepPluginAdapter implements NodeStepExecutor, Describable, DynamicProperties {
+    public static final String DEPRECATED_CONFIGURATION_MODE = "NodeStepPluginAdapter.DeprecatedConfigurationMode";
+    public static final String SKIP = "skip";
+    protected static Logger  log = LoggerFactory.getLogger(NodeStepPluginAdapter.class.getName());
+    @Getter private String serviceName;
+    private boolean blankIfUnexpanded;
+    @Getter private NodeStepPlugin plugin;
+
+    @Override
+    public Description getDescription() {
+        if (plugin instanceof Describable) {
+            final Describable desc = (Describable) plugin;
+            return desc.getDescription();
+        } else {
+            return PluginAdapterUtility.buildDescription(plugin, DescriptionBuilder.builder());
+        }
+    }
+
+    @Override
+    public Map<String, Object> dynamicProperties(Map<String, Object> projectAndFrameworkValues, Services services){
+        if(plugin instanceof DynamicProperties){
+            return ((DynamicProperties)plugin).dynamicProperties(projectAndFrameworkValues, services);
+        }
+
+        return null;
+    }
+
+    @Override
+    public Map<String, Object> dynamicDefaults(Map<String, Object> projectAndFrameworkValues, Services services){
+        if(plugin instanceof DynamicProperties){
+            return ((DynamicProperties)plugin).dynamicDefaults(projectAndFrameworkValues, services);
+        }
+
+        return null;
+    }
+
+    public NodeStepPluginAdapter(final NodeStepPlugin plugin) {
+        this(ServiceNameConstants.WorkflowNodeStep, plugin, true);
+    }
+
+    public NodeStepPluginAdapter(
+            final String serviceName,
+            final NodeStepPlugin plugin,
+            final boolean blankIfUnexpanded
+    )
+    {
+        this.serviceName = serviceName;
+        this.plugin = plugin;
+        this.blankIfUnexpanded = blankIfUnexpanded;
+    }
+
+    public static boolean canAdaptType(Class<?> testType){
+        return NodeStepPlugin.class.isAssignableFrom(testType);
+    }
+
+    public static class ConvertToNodeStepExecutor
+            implements Converter<NodeStepPlugin, NodeStepExecutor>
+    {
+        String serviceName;
+        boolean blankIfUnexpanded ;
+
+        public ConvertToNodeStepExecutor(final String serviceName, boolean blankIfUnexpanded) {
+            this.serviceName = serviceName;
+            this.blankIfUnexpanded = blankIfUnexpanded;
+        }
+
+        public ConvertToNodeStepExecutor() {
+            this(ServiceNameConstants.WorkflowNodeStep, true);
+        }
+
+        public NodeStepExecutor convert(final NodeStepPlugin plugin, final boolean blankIfUnexpanded) {
+            return new NodeStepPluginAdapter(serviceName, plugin, blankIfUnexpanded);
+        }
+
+        @Override
+        public NodeStepExecutor convert(NodeStepPlugin plugin) {
+            return new NodeStepPluginAdapter(serviceName, plugin, blankIfUnexpanded);
+        }
+    }
+
+    public static final ConvertToNodeStepExecutor CONVERT_TO_NODE_STEP_EXECUTOR = new ConvertToNodeStepExecutor();
+
+    @Override
+    public NodeStepResult executeNodeStep(final StepExecutionContext context,
+                                          final NodeStepExecutionItem item,
+                                          final INodeEntry node)
+        throws NodeStepException {
+
+        final String providerName = item.getNodeStepType();
+        final PluginStepContext pluginContext = PluginStepContextImpl.from(context);
+        Map<String, Object> config;
+        final Map<String, Object> instanceConfiguration = createConfig(context, item, node);
+        final Description description = getDescription();
+
+        if (skipDeprecatedConfiguration(description)) {
+            //configuration mode that does not supply config map, and relies on preconfigured plugin instance or
+            // Configurable behavior.
+            config = null;
+        } else {
+            //deprecated configuration mode:
+            // the plugin may already be configured, however the configuration data is reloaded/applied
+            // in order to define the configuration Map that is passed as parameter to the plugin.
+            final PropertyResolver resolver = PropertyResolverFactory.createStepPluginRuntimeResolver(
+                    context,
+                    instanceConfiguration,
+                    getServiceName(),
+                    providerName
+            );
+            config = PluginAdapterUtility.configureProperties(
+                    resolver,
+                    getDescription(),
+                    plugin,
+                    PropertyScope.InstanceOnly
+            );
+        }
+
+        try {
+            plugin.executeNodeStep(pluginContext, config, node);
+        } catch (NodeStepException e) {
+            log.error("Error executing node step.", e);
+            return new NodeStepResultImpl(e,
+                    e.getFailureReason(),
+                    e.getMessage(),
+                    e.getFailureData(),
+                    node);
+        } catch (Throwable e) {
+            log.error("Uncaught throwable executing node step.", e);
+            final StringWriter stringWriter = new StringWriter();
+            e.printStackTrace(new PrintWriter(stringWriter));
+            context.getExecutionListener().log(Constants.DEBUG_LEVEL,
+                    "Failed executing node plugin ["+providerName+"] on node " + node.getNodename() + ": "
+                            + stringWriter.toString());
+            return new NodeStepResultImpl(e,
+                                          StepFailureReason.PluginFailed,
+                                          e.getMessage(),
+                                          node);
+        }
+        // Captured after executeNodeStep() returns successfully, not before, mirroring
+        // StepPluginAdapter. context.getOutputContext() is already scoped to this node by the
+        // dispatcher (SequentialNodeDispatcher/ParallelNodeDispatcher build a per-node
+        // ExecutionContext whose output context defaults to ContextView.nodeStep(stepNum,
+        // node.getNodename())), so no explicit node-scoping is needed here: each node's captured
+        // value lands in its own slot, and a later node-step conditional evaluated on this same
+        // node will resolve back to this value without any node-name syntax.
+        PluginOutputCapture.captureOutputMetadataValues(context.getOutputContext(), description, plugin, config);
+        return new NodeStepResultImpl(node);
+    }
+
+    private static boolean skipDeprecatedConfiguration(final Description description) {
+        return description.getMetadata() != null &&
+               SKIP.equals(description.getMetadata().get(DEPRECATED_CONFIGURATION_MODE));
+    }
+
+    public Map<String, Object> createConfig( StepExecutionContext context,
+                                            NodeStepExecutionItem item,
+                                            INodeEntry node){
+        Map<String, Object> instanceConfiguration = getStepConfiguration(item);
+        Description description = getDescription();
+        Map<String, UnexpandableBehavior> behaviorMap =
+                UnexpandableBehaviorSupport.buildBehaviorMap(
+                        description, blankIfUnexpanded, instanceConfiguration);
+        if (null != instanceConfiguration) {
+            CustomFieldsAdapter customFieldsAdapter = CustomFieldsAdapter.create(description);
+            if(!Arrays.asList(ScriptFileCommand.SCRIPT_FILE_COMMAND_TYPE, ScriptCommand.SCRIPT_COMMAND_TYPE, ExecCommand.EXEC_COMMAND_TYPE).contains((item.getNodeStepType()))) //Those types are handled by its plugins
+            {
+                instanceConfiguration = SharedDataContextUtils.replaceDataReferencesWithBehavior(
+                        instanceConfiguration,
+                        ContextView.node(node.getNodename()),
+                        ContextView::nodeStep,
+                        null,
+                        context.getSharedDataContext(),
+                        false,
+                        behaviorMap,
+                        customFieldsAdapter::convertInput,
+                        customFieldsAdapter::convertOutput
+                );
+            }
+        }
+        return instanceConfiguration;
+    }
+
+    public Map<String, Object> getStepConfiguration(StepExecutionItem item) {
+        if (item instanceof ConfiguredStepExecutionItem) {
+            return ((ConfiguredStepExecutionItem) item).getStepConfiguration();
+        } else {
+            return null;
+        }
+    }
+
+}

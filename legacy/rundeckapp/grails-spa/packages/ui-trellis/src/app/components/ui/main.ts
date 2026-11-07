@@ -1,0 +1,92 @@
+import { createApp, Component } from "vue";
+import * as uiv from "uiv";
+import VueCookies from "vue-cookies";
+
+import { getRundeckContext } from "../../../library";
+import { UiMessage } from "../../../library/stores/UIStore";
+import UiSocket from "../../../library/components/utils/UiSocket.vue";
+import {
+  initI18n,
+  commonAddUiMessages,
+  type LocalizedMessages,
+} from "../../utilities/i18n";
+import { configurePrimeVue } from "../../../library/utilities/primeVueConfig";
+
+const rootStore = getRundeckContext().rootStore;
+const EventBus = getRundeckContext().eventBus;
+const closest = function (
+  elem: Element,
+  className: string,
+): HTMLElement | null {
+  let parent = elem.parentElement;
+  while (parent) {
+    if (parent.classList.contains(className)) {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+  return null;
+};
+window.addEventListener("DOMContentLoaded", () => {
+  const elm = document.getElementsByClassName("vue-ui-socket");
+  for (const elmElement of elm) {
+    if (closest(elmElement, "vue-ui-socket-deferred")) {
+      continue;
+    }
+    const eventName = elmElement.getAttribute("vue-socket-on");
+    if (eventName) {
+      window.addEventListener(eventName, (evt1) =>
+        initUiComponentsOnEvent(evt1),
+      );
+    } else {
+      initUiComponents(elmElement);
+    }
+  }
+});
+
+function initUiComponentsOnEvent(evt: Event) {
+  const elm = document.getElementsByClassName("vue-ui-socket");
+  for (const elmElement of elm) {
+    const eventName = elmElement.getAttribute("vue-socket-on");
+    if (eventName === evt.type) {
+      initUiComponents(elmElement);
+    }
+  }
+}
+
+function initUiComponents(elmElement: any) {
+  const i18n = initI18n();
+  const vue = createApp({
+    components: { UiSocket },
+    provide: {
+      rootStore,
+    },
+    data() {
+      return {
+        EventBus,
+      };
+    },
+  });
+  vue.use(VueCookies);
+  vue.use(i18n);
+  vue.use(uiv);
+
+  // widgets mounted into these sockets render after the page's one-shot tooltip
+  // initialiser has run, so they need a directive of their own to explain themselves
+  configurePrimeVue(vue, { includeTooltip: true });
+
+  vue.provide("registerComponent", (name: string, comp: Component) => {
+    vue.component(name, comp);
+  });
+  vue.provide(
+    "addUiMessages",
+    async (messages: UiMessage[] | LocalizedMessages) =>
+      commonAddUiMessages(i18n, messages),
+  );
+  try {
+    vue.mount(elmElement);
+  } catch (e) {
+    console.error("Error mounting vue app", (e as Error).message, e);
+  }
+  rootStore.ui.registerComponent = vue.component;
+}

@@ -1,0 +1,17 @@
+.ace_text.ace_editor {
+  .ace_gutter {
+    z-index: 0;
+  }
+}
+
+.resizable {
+  width: 100%;
+  position: relative;
+}
+
+.resizable .ace_editor {
+  width: 100%;
+  height: 320px;
+  resize: vertical;
+  overflow: auto;
+}

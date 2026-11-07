@@ -1,0 +1,50 @@
+/*
+ * Copyright 2019 Rundeck, Inc. (http://rundeck.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.core.jobs;
+
+import com.dtolabs.rundeck.core.execution.workflow.StepExecutionContext;
+import com.dtolabs.rundeck.core.execution.workflow.WorkflowExecutionItem;
+
+/**
+ * Status result returned from execution lifecycle event handlers
+ */
+public interface ExecutionLifecycleStatus extends LifecycleStatus{
+    /**
+     * @return StepExecutionContext of the event to use if isUseNewValues is true
+     */
+    default StepExecutionContext getExecutionContext(){ return null; }
+
+
+    /**
+     * Indicates whether workflow data values should be updated for this lifecycle status.
+     *
+     * @return {@code true} if workflow data values should be updated; {@code false} otherwise
+     */
+    default boolean isUpdateWorkflowDataValues() {
+        return false;
+    }
+
+
+    /**
+     * Returns the workflow associated with this execution lifecycle status.
+     *
+     * @return the workflow as an {@link WorkflowExecutionItem} instance
+     */
+    default WorkflowExecutionItem getWorkflow() {
+        return null;
+    }
+}

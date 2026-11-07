@@ -1,0 +1,95 @@
+package com.dtolabs.rundeck.core.jobs;
+
+import com.dtolabs.rundeck.core.execution.StepExecutionItem;
+import com.dtolabs.rundeck.core.execution.workflow.WorkflowExecutionItem;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+
+@Data
+@EqualsAndHashCode(callSuper = false)
+public class JobReferenceItem extends JobRefCommandBase {
+    private final String label;
+    private final String jobIdentifier;
+    private final String[] args;
+    private final boolean nodeStep;
+    private final StepExecutionItem failureHandler;
+    private final boolean keepgoingOnSuccess;
+    private final Boolean nodeKeepgoing;
+    private final String nodeFilter;
+    private final Integer nodeThreadcount;
+    private final String nodeRankAttribute;
+    private final Boolean nodeRankOrderAscending;
+    private final Boolean nodeIntersect;
+    private final String project;
+    private final Boolean failOnDisable;
+    private final Boolean importOptions;
+    private final String uuid;
+    private final Boolean useName;
+    private final Boolean ignoreNotifications;
+    private final Boolean childNodes;
+    private final WorkflowExecutionItem workflow;
+
+
+    @Override
+    public Boolean isFailOnDisable() {
+        return getFailOnDisable();
+    }
+
+    @Override
+    public Boolean isImportOptions() {
+        return getImportOptions();
+    }
+
+    @Override
+    public Boolean isUseName() {
+        return getUseName();
+    }
+
+    @Override
+    public Boolean isIgnoreNotifications() {
+        return getIgnoreNotifications();
+    }
+
+    @Override
+    public Boolean isChildNodes() {
+        return getChildNodes();
+    }
+
+    @Override
+    public String toString() {
+        return "JobReferenceItem{" +
+                (label != null ? "label='" + label + ", " : "") +
+                "jobIdentifier='" + jobIdentifier + '\'' +
+                (project != null ? ", project='" + project + '\'' : "") +
+                ", nodeStep=" + nodeStep +
+                "}";
+    }
+
+    public static JobReferenceItem cloneWithNewWorkflow(
+            final JobReferenceItem original,
+            final WorkflowExecutionItem workflow
+    ) {
+        return new JobReferenceItem(
+                original.getLabel(),
+                original.getJobIdentifier(),
+                original.getArgs(),
+                original.isNodeStep(),
+                original.getFailureHandler(),
+                original.isKeepgoingOnSuccess(),
+                original.getNodeKeepgoing(),
+                original.getNodeFilter(),
+                original.getNodeThreadcount(),
+                original.getNodeRankAttribute(),
+                original.getNodeRankOrderAscending(),
+                original.getNodeIntersect(),
+                original.getProject(),
+                original.getFailOnDisable(),
+                original.getImportOptions(),
+                original.getUuid(),
+                original.getUseName(),
+                original.getIgnoreNotifications(),
+                original.getChildNodes(),
+                workflow
+        );
+    }
+}

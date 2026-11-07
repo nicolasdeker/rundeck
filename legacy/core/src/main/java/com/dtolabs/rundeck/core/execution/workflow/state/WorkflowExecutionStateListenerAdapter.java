@@ -1,0 +1,295 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.dtolabs.rundeck.core.execution.workflow.state;
+
+import com.dtolabs.rundeck.core.common.INodeEntry;
+import com.dtolabs.rundeck.core.execution.ExecutionContext;
+import com.dtolabs.rundeck.core.execution.StatusResult;
+import com.dtolabs.rundeck.core.execution.StepExecutionItem;
+import com.dtolabs.rundeck.core.execution.dispatch.INodeEntryComparator;
+import com.dtolabs.rundeck.core.execution.workflow.*;
+import com.dtolabs.rundeck.core.execution.workflow.steps.NodeDispatchStepExecutor;
+import com.dtolabs.rundeck.core.execution.workflow.steps.StepExecutionResult;
+import com.dtolabs.rundeck.core.execution.workflow.steps.StepExecutor;
+import com.dtolabs.rundeck.core.execution.workflow.steps.node.NodeStepExecutionItem;
+import com.dtolabs.rundeck.core.execution.workflow.steps.node.NodeStepResult;
+import com.dtolabs.rundeck.core.utils.Pair;
+
+import java.util.*;
+
+/**
+ * Adapts events from a {@link WorkflowExecutionListener} and sends changes to a list of {@link WorkflowStateListener}s.
+ */
+public class WorkflowExecutionStateListenerAdapter implements WorkflowExecutionListener {
+    List<WorkflowStateListener> listeners;
+    StepContextWorkflowExecutionListener<INodeEntry, StepContextId> stepContext;
+
+
+    public WorkflowExecutionStateListenerAdapter() {
+        this(new ArrayList<>());
+    }
+
+    public WorkflowExecutionStateListenerAdapter(List<WorkflowStateListener> listeners) {
+        this.listeners = listeners;
+        stepContext = new StepContextWorkflowExecutionListener<>();
+    }
+
+    public void addWorkflowStateListener(WorkflowStateListener listener) {
+        listeners.add(listener);
+    }
+
+    private void notifyAllWorkflowState(ExecutionState executionState, Date timestamp, List<String> nodenames) {
+        for (WorkflowStateListener listener : listeners) {
+            listener.workflowExecutionStateChanged(executionState, timestamp, nodenames);
+        }
+    }
+
+    private void notifyAllSubWorkflowState(StepIdentifier identifier, ExecutionState executionState, Date timestamp,
+            List<String> nodenames) {
+
+        for (WorkflowStateListener listener : listeners) {
+            listener.subWorkflowExecutionStateChanged(identifier,executionState, timestamp, nodenames);
+        }
+    }
+
+
+    private void notifyAllStepState(StepIdentifier identifier, StepStateChange stepStateChange, Date timestamp) {
+        for (WorkflowStateListener listener : listeners) {
+            listener.stepStateChanged(identifier, stepStateChange, timestamp);
+        }
+    }
+
+    public void beginWorkflowExecution(StepExecutionContext executionContext, WorkflowExecutionItem item) {
+        StepContextId currentStep = stepContext.getCurrentStep();
+        INodeEntry currentNode = stepContext.getCurrentNode();
+        if(null!= currentNode && null != currentStep) {
+            //if already node context, begin a parameterized sub workflow
+            //change step context to include node name parameter for the step id
+            HashMap<String, String> params = new HashMap<>();
+            params.put("node", currentNode.getNodename());
+            stepContext.beginStepContext(StateUtils.stepContextId(currentStep.getStep(),
+                    !currentStep.getAspect().isMain(),params));
+        }
+        stepContext.beginContext();
+        List<Pair<StepContextId, INodeEntry>> currentContext = stepContext.getCurrentContextPairs();
+        List<String> names = getNodeNames(executionContext);
+        if(null==currentContext ){
+            notifyAllWorkflowState(ExecutionState.RUNNING, new Date(), names);
+        }else{
+            notifyAllSubWorkflowState(createIdentifier(), ExecutionState.RUNNING, new Date(), names);
+        }
+    }
+
+    private List<String> getNodeNames(StepExecutionContext executionContext) {
+        List<INodeEntry> orderedNodes = INodeEntryComparator.rankOrderedNodes(executionContext.getNodes(),
+                executionContext.getNodeRankAttribute(),
+                executionContext.isNodeRankOrderAscending());
+        List<String> names = new ArrayList<>();
+        for (INodeEntry orderedNode : orderedNodes) {
+            names.add(orderedNode.getNodename());
+        }
+        return names;
+    }
+
+    public void finishWorkflowExecution(WorkflowExecutionResult result, StepExecutionContext executionContext,
+            WorkflowExecutionItem item) {
+        List<Pair<StepContextId, INodeEntry>> currentContext = stepContext.getCurrentContextPairs();
+        if (null == currentContext || currentContext.size() < 1) {
+            notifyAllWorkflowState(
+                    null != result && result.isSuccess() ? ExecutionState.SUCCEEDED : ExecutionState.FAILED,
+                    new Date(), null);
+        }else{
+            notifyAllSubWorkflowState(createIdentifier(),
+                    null != result && result.isSuccess() ? ExecutionState.SUCCEEDED : ExecutionState.FAILED,
+                    new Date(), null);
+        }
+        stepContext.finishContext();
+    }
+    private StepIdentifier createIdentifier() {
+        return StateUtils.stepIdentifier(stepContext.getCurrentContext());
+    }
+
+    private StepStateChange createStepStateChange(ExecutionState executionState) {
+        return createStepStateChange(executionState, null);
+    }
+    private StepStateChange createStepStateChange(ExecutionState executionState, Map metadata) {
+        INodeEntry currentNode = stepContext.getCurrentNode();
+
+        return StateUtils.stepStateChange(StateUtils.stepState(executionState,metadata), null != currentNode ? currentNode
+                .getNodename() : null);
+    }
+    private StepStateChange createStepStateChange(StepExecutionResult result){
+        INodeEntry currentNode = stepContext.getCurrentNode();
+        return createStepStateChange(result, currentNode);
+    }
+
+    private StepStateChange createStepStateChange(StepExecutionResult result, INodeEntry currentNode) {
+        return StateUtils.stepStateChange(
+                StateUtils.stepState(
+                        resultState(result),
+                        resultMetadata(result),
+                        resultMessage(result)
+                ),
+                null != currentNode ? currentNode.getNodename() : null);
+    }
+
+    private String resultMessage(StepExecutionResult result) {
+        return null!=result?result.getFailureMessage():null;
+    }
+
+    private ExecutionState resultState(StepExecutionResult result) {
+        return (null!=result && result.isSuccess()) ? ExecutionState.SUCCEEDED :
+                ExecutionState.FAILED;
+    }
+
+    private Map<String, Object> resultMetadata(StepExecutionResult result) {
+        if (null != result && result.isSuccess()) {
+            return null;
+        }
+        HashMap<String, Object> map = new HashMap<>();
+        if (null != result && null != result.getFailureData()) {
+            map.putAll(result.getFailureData());
+        }
+        map.put(
+            "failureReason",
+            null != result && result.getFailureReason() != null ? result.getFailureReason().toString() : "Unknown"
+        );
+        return map;
+    }
+
+    public void beginWorkflowItem(int step, StepExecutionItem item) {
+        HasParentStepContext parented = asHierarchical(item);
+        if (parented != null) {
+            List<Integer> parentPath = parented.getParentStepPath();
+            if (parentPath != null && !parentPath.isEmpty()) {
+                // Push all levels of the parent path onto the context stack for multi-level nesting
+                for (Integer parentStepNum : parentPath) {
+                    stepContext.beginStepContext(StateUtils.stepContextId(parentStepNum, false));
+                    stepContext.beginContext();
+                }
+                stepContext.beginStepContext(StateUtils.stepContextId(parented.getSubStepNumber(), false));
+            } else {
+                // Single-level conditional substep (original behavior)
+                stepContext.beginStepContext(StateUtils.stepContextId(parented.getParentStepNumber(), false));
+                stepContext.beginContext();
+                stepContext.beginStepContext(StateUtils.stepContextId(parented.getSubStepNumber(), false));
+            }
+        } else {
+            stepContext.beginStepContext(StateUtils.stepContextId(resolveStepNumber(step, item), false));
+        }
+        notifyAllStepState(createIdentifier(), createStepStateChange(ExecutionState.RUNNING), new Date());
+    }
+
+    @Override
+    public void beginWorkflowItemErrorHandler(int step, StepExecutionItem item) {
+        HasParentStepContext parented = asHierarchical(item);
+        if (parented != null) {
+            stepContext.beginStepContext(StateUtils.stepContextId(parented.getSubStepNumber(), true));
+        } else {
+            stepContext.beginStepContext(StateUtils.stepContextId(resolveStepNumber(step, item), true));
+        }
+        HashMap<String,String> ehMap= new HashMap<>();
+        ehMap.put("handlerTriggered", "true");
+        notifyAllStepState(createIdentifier(), createStepStateChange(ExecutionState.RUNNING_HANDLER, ehMap),
+                new Date());
+    }
+
+    public void finishWorkflowItem(int step, StepExecutionItem item, StepExecutionResult result) {
+        boolean isNodeStep = NodeDispatchStepExecutor.STEP_EXECUTION_TYPE.equals(item.getType())
+                             || NodeStepExecutionItem.isNodeStep(item);
+        if (!isNodeStep) {
+            notifyAllStepState(createIdentifier(), createStepStateChange(result), new Date());
+        }
+        stepContext.finishStepContext();
+        HasParentStepContext parented = asHierarchical(item);
+        if (parented != null) {
+            List<Integer> parentPath = parented.getParentStepPath();
+            if (parentPath != null && !parentPath.isEmpty()) {
+                // Pop all levels of the parent path from the context stack for multi-level nesting
+                for (int i = 0; i < parentPath.size(); i++) {
+                    stepContext.finishContext();
+                    stepContext.finishStepContext();
+                }
+            } else {
+                // Single-level conditional substep (original behavior)
+                stepContext.finishContext();
+                stepContext.finishStepContext();
+            }
+        }
+    }
+
+    /**
+     * Returns the logical step number for a flat (non-hierarchical) step. Prefers
+     * {@link HasParentStepContext#getLogicalStepNumber()} when positive so state
+     * updates are routed to the correct logical slot in the state tree even when the
+     * flat engine index diverges after conditional sub-step expansion.
+     */
+    private static int resolveStepNumber(int flatStep, StepExecutionItem item) {
+        if (item instanceof HasParentStepContext) {
+            int logical = ((HasParentStepContext) item).getLogicalStepNumber();
+            if (logical > 0) {
+                return logical;
+            }
+        }
+        return flatStep;
+    }
+
+    private static HasParentStepContext asHierarchical(StepExecutionItem item) {
+        if (!(item instanceof HasParentStepContext)) {
+            return null;
+        }
+        HasParentStepContext parented = (HasParentStepContext) item;
+        if (parented.getParentStepNumber() <= 0 || parented.getSubStepNumber() <= 0) {
+            return null;
+        }
+        return parented;
+    }
+
+    @Override
+    public void finishWorkflowItemErrorHandler(int step, StepExecutionItem item, StepExecutionResult result) {
+        //dont notify
+    }
+
+    public void beginExecuteNodeStep(ExecutionContext context, NodeStepExecutionItem item, INodeEntry node) {
+        //if node step item is not state transitionable, ignore it
+        stepContext.beginNodeContext(node);
+        StepIdentifier identifier = createIdentifier();
+        notifyAllStepState(identifier,
+                createStepStateChange(
+                        StateUtils.last(identifier).getAspect().isMain()
+                                ? ExecutionState.RUNNING
+                                : ExecutionState.RUNNING_HANDLER
+                ),
+                new Date()
+        );
+
+    }
+
+    public void beginStepExecution(StepExecutor executor,StepExecutionContext context, StepExecutionItem item) {
+    }
+
+    public void finishStepExecution(StepExecutor executor, StatusResult result, StepExecutionContext context, StepExecutionItem item) {
+    }
+
+    public void finishExecuteNodeStep(NodeStepResult result, ExecutionContext context, StepExecutionItem item,
+            INodeEntry node) {
+        //if node step item is not state transitionable, ignore it
+        notifyAllStepState(createIdentifier(), createStepStateChange(result), new Date());
+        stepContext.finishNodeContext();
+    }
+
+}
