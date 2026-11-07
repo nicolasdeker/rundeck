@@ -1,99 +1,64 @@
-# Project Conventions
+# rdx — Rundeck rebuilt in Rust (identical backend contracts, new UI, cloud-only operation)
 
-## Documentation
+This repository is a fork of `rundeck/rundeck`. The mission is to re-implement Rundeck in Rust with **identical
+external backend behavior** (API, file formats, plugin contracts, data) and a **brand-new web UI**. The full
+mission brief is `MISSION.md`. **Read it at the start of every session, then `PLAN.md`, then the last 80 lines of
+`JOURNAL.md`.** The owner supervises from a phone only (GitHub app + Claude app); nobody answers questions mid-run.
 
-Detailed conventions and guidance organized by topic:
+## Layout
 
-### Architecture & Setup
-- **`.claude/docs/architecture.md`** — Project structure, module organization, technology stack
-- **`.claude/docs/build-commands.md`** — All build, test, and plugin commands with examples
-- **`.claude/docs/file-locations.md`** — Where to find controllers, services, components, etc.
+- `legacy/` — the original Java/Groovy sources, pinned at upstream tag `v6.3.0` (commit `6ac5d092`). Read-only
+  reference and black-box oracle (image `rundeck/rundeck:6.3.0`). Never edit it (exception: `legacy/README-LEGACY.md`).
+- `crates/` — the Rust workspace (`rdx-*` crates). `Cargo.toml` at the root is the workspace.
+- `ui/` — the new frontend (Vue 3 + TypeScript + Vite + PrimeVue 4 + Tailwind 4), built with `pnpm`, embedded in the binary.
+- `specs/` — behavior specs written from the legacy code (`specs/<area>.md`, `specs/ui-journeys.md`), **before** the code.
+- `docs/adr/` — Architecture Decision Records. `docs/COMPAT.md` — every externally visible deviation.
+  `docs/ui-review/<phase>/` — screenshots for the owner.
+- `PLAN.md` — phases, checklists, `← CURRENT` item. `PARITY.md` — contract matrix. `JOURNAL.md` — append-only session
+  log. `DECISIONS-PENDING.md` — defaults taken (mirrored as GitHub issues labeled `decision`). `BLOCKED/` — one file per
+  blocked item (mirrored as issues labeled `blocked`).
+- `scripts/` — `cloud-setup.sh` (the cloud environment's setup script), `oracle.sh` (legacy Rundeck via Docker),
+  `parity.sh` (upstream functional suite against the Rust binary), `bench/`.
 
-### Development
-- **`.claude/docs/development-guidelines.md`** — Code standards, Groovy conventions, Git workflows
-- **`.claude/docs/code-formatting.md`** — Code formatting rules, Spotless configuration
-- **`.claude/docs/plugin-development.md`** — Plugin creation, CI, publishing
+## Working rules (short form — MISSION.md is authoritative)
 
-### Testing
-- **`.claude/docs/testing-guidelines.md`** — Complete testing guide (unit, API, functional, integration)
-- **`.claude/docs/jest-testing-guidelines.md`** — Frontend testing (Jest + Vue), Priority 1 & 2 rules
-- **`.claude/docs/selenium-best-practices.md`** — E2E testing, Page Object patterns, wait strategies
+1. **Backend: parity before improvement.** External behavior matches legacy unless an ADR + `docs/COMPAT.md` entry says otherwise.
+   **Frontend: rebuilt**, same user journeys, same deep links, nothing copied from the legacy UI as-is.
+2. **Spec → tests → code.** No Rust module without its `specs/<area>.md` and ported tests; no UI page without its journey + Playwright test.
+3. **Oracle, not opinion.** "Done" = the matching upstream functional tests pass against `rdx` (`scripts/parity.sh <filter>`)
+   or the Playwright journey passes, and `PARITY.md` cites the run.
+4. **Never fake green.** No skipped/deleted oracle tests, no stub endpoints returning 200, no `#[ignore]`/`test.skip` without a `BLOCKED/` file.
+5. **Main is always green.** `make check` before every commit. Small conventional commits, pushed to `main` after each
+   (`git push origin HEAD:main`). No force-push of `main`, no branches other than `main` and `autopilot-lock`.
+6. **One run at a time.** Take the `autopilot-lock` branch at session start (skip the run if its tip says `lock …` and is
+   younger than 3 h), release it at the end (`unlocked …` commit, force-pushed). Tags only via REST. See MISSION §7.
+7. **Decide, record, continue.** Ambiguity → the parity-preserving option, an ADR or a `DECISIONS-PENDING.md` entry
+   + `decision` issue, move on. Never ask.
+8. **Stuck rule.** 3 failed attempts on one item → `BLOCKED/<id>.md` + `blocked` issue, take the next item.
+9. **Context hygiene.** Never read large legacy files whole; grep, then read ranges. `legacy-analyst` subagent for
+   exploration, `parity-reviewer` before closing an area or a phase gate.
+10. **GitHub through REST only.** `gh api repos/nicolasdeker/rundeck/...`; `gh issue`/`gh pr` (GraphQL) are rejected here.
+11. **No `unsafe`.** Workspace-wide `#![forbid(unsafe_code)]`.
+12. **Every session ends with**: tests green, commit pushed to `main`, `JOURNAL.md` entry (done / evidence / next / risks),
+    `PLAN.md` updated, lock released.
 
-### API & Agent
-- **`.claude/docs/api-guidelines.md`** — OpenAPI specs, DTOs, i18n
-- **`.claude/docs/agent-conventions.md`** — Agent behavior patterns, artifact paths, verification requirements
+## Commands
 
-## Code Conventions
+- `make check` — fast gate (fmt, clippy `-D warnings`, nextest, deny, audit, `pnpm lint`, `pnpm test`).
+- `make oracle-up` / `make oracle-down` — legacy Rundeck 6.3.0 in Docker (`scripts/oracle.sh`).
+- `make parity FILTER=<ApiSpecName>` — upstream Spock API tests against the Rust server.
+- `make e2e` — Playwright journeys + screenshots into `docs/ui-review/`. `make bench`, `make fuzz TARGET=<name>`.
 
-### Compilation Mode
-Use `@CompileStatic` on all classes (or `@GrailsCompileStatic` for Grails artifacts). Use `@CompileDynamic` only on specific methods requiring dynamic typing.
+## Conventions
 
-### Documentation
-All new/modified code requires Javadoc or Groovydoc comments.
+- Rust 2024 edition, stable toolchain pinned in `rust-toolchain.toml`. `cargo fmt` + `clippy::pedantic` (allow-list in `Cargo.toml`).
+- Crate prefix `rdx-`. Binary `rdx`. Legacy config keys kept verbatim (`rundeck-config.properties`, `framework.properties`).
+- Errors: `thiserror` in libraries, `anyhow` only in the binary. No `unwrap()`/`expect()` outside tests.
+- Public items documented. Parsers get property tests (`proptest`) and a fuzz target.
+- UI: `<script setup lang="ts">`, strict TS, no `any`, components ≤ 300 lines, i18n keys only (no hardcoded strings),
+  `v-html` only through DOMPurify.
+- Commit messages: `<type>(<area>): <summary>` — `feat|fix|spec|test|chore|docs|adr|perf|sec|ui`. Mention the parity spec or journey covered.
 
-### Property Access
-Groovy auto-generates getters/setters — do NOT implement them explicitly unless custom logic is needed.
+## Compaction note
 
-### Security
-Avoid command injection, XSS, SQL injection. Use parameterized queries and escape user input.
-
-### Simplicity
-Only make changes that are directly requested or clearly necessary. Don't add features, refactor code, or make "improvements" beyond what was asked.
-
-## Dependency Management
-
-- All dependency versions defined in root `gradle.properties`
-- Reference in `build.gradle` using `${propertyName}` syntax
-- Never hardcode version numbers in build files
-
-## Git & PR Conventions
-
-### PR Title
-Format: `[RUN-XXXX] Description` when linked to an issue (recommended), or a clear description.
-
-### PR Body
-Always use this repo's PR template (`.github/pull_request_template.md`) as the PR body — read it and fill in every section (change type, solution, alternatives, context, release notes). Tools like `create_pull_request` do NOT auto-populate it.
-
-## Rules
-
-Context-aware rules that load automatically based on file patterns:
-
-- **`.claude/rules/selenium.md`** — Selenium test requirements
-- **`.claude/rules/jest.md`** — Jest test compliance (references `jest-testing-guidelines.md`)
-- **`.claude/rules/vue.md`** — Vue component standards (Options API, scoped styles, component placement)
-- **`.claude/rules/database-migrations.md`** — Database migration rules (Liquibase, multi-DB support)
-- **`.claude/rules/okhttp-client-response.md`** — OkHttp response cleanup in functional/Selenium tests
-- **`.claude/rules/npm-dependencies.md`** — Exact npm version pinning (no `^`/`~`, `save-prefix=""` when a registry is configured) for supply-chain hardening
-- **`.claude/rules/complexity.md`** — Cyclomatic complexity ≤ 25 for new/modified code only (informative; `./gradlew codenarcComplexity`, ESLint `complexity` rule)
-
-## Skills
-
-Available skills for common workflows:
-
-**Development:**
-- **`create-code`** — Generate Java/Groovy/TypeScript code following Rundeck standards
-- **`create-api-endpoint`** — Create REST API endpoints with OpenAPI annotations and versioning
-- **`create-test`** — Create backend tests (Spock unit, API, functional)
-- **`write-jest-tests`** — Create frontend tests (Jest + Vue Test Utils)
-- **`create-plugin`** — Create Rundeck plugins with proper build configuration
-- **`i18n-vue-template`** — Internationalize Vue component templates (replace hardcoded strings with `$t()`)
-
-**Documentation:**
-- **`generate-entity-context`** — Generate standardized CONTEXT.md files for features
-
-**Workflows:**
-- **`cve-remediation`** — Verify and fix security vulnerabilities (CVEs)
-- **`backport-pr`** — Cherry-pick a merged PR onto a release/maintenance branch
-- **`onboard-contributor`** — Guide a new contributor through the repo setup and conventions
-
-Use the Skill tool to invoke: `Skill(skill_name="skill-name")`
-
-## Critical Rules
-
-1. **Always verify build succeeds locally** before considering work complete: `./gradlew build -x check` (4-8 min)
-2. **Never modify database migrations** without explicit approval (see `.claude/rules/database-migrations.md`)
-3. **Always verify work** — don't claim completion without running verification commands
-
-## Compaction Note
-
-When compacting, preserve the documentation structure above and the critical rules.
+When compacting, keep: the layout, the 12 working rules, the current `PLAN.md` item, and the last `JOURNAL.md` entry.
