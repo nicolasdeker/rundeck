@@ -1,0 +1,24 @@
+// central-mirror.gradle — Gradle init script used when running the legacy functional-test suite from the cloud
+// environment (scripts/parity.sh, scripts/cloud-setup.sh install it into ~/.gradle/init.d/).
+// The cloud sessions share an egress IP that Maven Central rate-limits (HTTP 429 Too Many Requests); Google's
+// read-only mirror of Maven Central serves the same artifacts without that limit. This never edits legacy/.
+def MIRROR = 'https://maven-central.storage-download.googleapis.com/maven2/'
+def CENTRAL = ['https://repo1.maven.org/maven2', 'https://repo.maven.apache.org/maven2']
+def redirect = { repos ->
+    repos.all { repo ->
+        if (repo instanceof MavenArtifactRepository) {
+            def u = repo.url.toString()
+            if (CENTRAL.any { u.startsWith(it) }) {
+                repo.url = MIRROR
+            }
+        }
+    }
+}
+settingsEvaluated { settings ->
+    redirect(settings.pluginManagement.repositories)
+    redirect(settings.buildscript.repositories)
+}
+allprojects {
+    redirect(buildscript.repositories)
+    redirect(repositories)
+}

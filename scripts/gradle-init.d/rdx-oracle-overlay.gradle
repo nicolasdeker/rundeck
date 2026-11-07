@@ -1,0 +1,24 @@
+// rdx-oracle-overlay.gradle — Gradle init script for the legacy functional-test suite in the cloud sandbox.
+// When the environment variable RDX_ORACLE_COMPOSE_OVERLAY names a directory (scripts/oracle/compose-overlay), it is
+// added as a test resources directory of :functional-test, so docker/compose/oss/docker-compose.rdx-cloud.yml lands
+// next to the upstream compose file in build/resources/test, and the compose-based API/Selenium test tasks are pointed
+// at it through the COMPOSE_PATH system property (BaseContainer reads it from the classpath). legacy/ is never edited;
+// scripts/parity.sh sets the variable only when the host has no IPv6 (see the overlay file for why).
+def overlay = System.getenv('RDX_ORACLE_COMPOSE_OVERLAY')
+if (overlay) {
+    def overlayDir = new File(overlay)
+    allprojects {
+        afterEvaluate { p ->
+            if (p.path == ':functional-test' && overlayDir.isDirectory()) {
+                p.sourceSets.test.resources.srcDir(overlayDir)
+                ['apiTest', 'apiTestNodeExecutorSecureInput', 'seleniumCoreTest', 'alphaUiSeleniumCoreTest'].each { name ->
+                    def t = p.tasks.findByName(name)
+                    if (t != null) {
+                        t.systemProperty('COMPOSE_PATH', 'docker/compose/oss/docker-compose.rdx-cloud.yml')
+                        t.doFirst { p.logger.lifecycle("rdx: oracle compose overlay active (${overlayDir}) -> docker/compose/oss/docker-compose.rdx-cloud.yml") }
+                    }
+                }
+            }
+        }
+    }
+}

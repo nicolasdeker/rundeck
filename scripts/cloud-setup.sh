@@ -39,11 +39,16 @@ budget 120 "$(declare -f log pull); pull postgres:16" &
 # 3) Rust toolchain + prebuilt cargo tools (cargo-binstall avoids compiling the tools).
 # shellcheck disable=SC1091
 source "$HOME/.cargo/env" 2>/dev/null || true
-budget 240 '
-  rustup show >/dev/null 2>&1 || true                      # installs the toolchain pinned by rust-toolchain.toml
-  rustup component add clippy rustfmt llvm-tools-preview >/dev/null 2>&1 || true
+budget 600 '
+  # The toolchain pinned by rust-toolchain.toml (1.97.0, minimal profile + the three components); `rustup show` alone
+  # would download it on the first cargo call of every session instead of once into the snapshot.
+  rustup toolchain install 1.97.0 --profile minimal -c clippy -c rustfmt -c llvm-tools-preview >/dev/null 2>&1 || true
+  rustup show >/dev/null 2>&1 || true
   command -v cargo-binstall >/dev/null || curl -fsSL https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash >/dev/null 2>&1
+  # binstall fetches prebuilt binaries (GitHub release assets are blocked by the proxy for some crates, quickinstall
+  # works for most); whatever is still missing is built from source with --locked (nextest refuses unlocked builds).
   cargo binstall --no-confirm cargo-nextest cargo-deny cargo-audit cargo-llvm-cov cargo-cyclonedx >/dev/null 2>&1 || true
+  for t in cargo-nextest cargo-deny cargo-audit; do command -v $t >/dev/null || cargo install --locked $t >/dev/null 2>&1 || true; done
   [ -f Cargo.lock ] && cargo fetch >/dev/null 2>&1 || true
 ' &
 
@@ -55,6 +60,8 @@ budget 240 '
 ' &
 
 # 5) Gradle warm-up for the legacy functional tests (downloads wrapper + dependencies once, compiles the specs).
+#    Maven Central rate-limits the shared egress IP (429): the init script redirects it to Google's mirror.
+mkdir -p "$HOME/.gradle/init.d" && cp scripts/gradle-init.d/*.gradle "$HOME/.gradle/init.d/" 2>/dev/null || true
 budget 280 '[ -x legacy/gradlew ] && cd legacy && for i in 1 2 3; do JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew -q --no-daemon -Dorg.gradle.internal.repository.max.retries=8 -Dorg.gradle.internal.repository.initial.backoff=3000 :functional-test:compileTestGroovy >/dev/null 2>&1 && break; sleep 30; done' &
 
 wait
