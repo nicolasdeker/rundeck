@@ -88,7 +88,11 @@ test.describe('login shell navigation', () => {
     await page.goto('/user/login')
     await page.locator('button[type="submit"]').click()
     await expect(page).toHaveURL(/\/user\/login$/)
-    await expect(page.getByRole('alert')).toBeVisible()
+    const alert = page.getByRole('alert')
+    await expect(alert).toBeVisible()
+    // PrimeVue animates the message in; axe must measure the final colors, not a frame of the
+    // enter transition (CI run 42397663318 measured 4.34:1 mid-transition on a slower runner).
+    await expect(alert).not.toHaveClass(/p-message-enter/)
     await expectNoSeriousAxeViolations(page)
   })
 })

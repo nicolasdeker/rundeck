@@ -31,6 +31,8 @@ export default defineConfig({
     screenshot: 'off',
     video: 'off',
     locale: 'en-US',
+    // Deterministic rendering for axe and screenshots: no CSS transitions/animations in flight.
+    reducedMotion: 'reduce',
   },
   projects: [
     {
