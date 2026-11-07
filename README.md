@@ -15,7 +15,7 @@ contract matrix with oracle evidence) and `JOURNAL.md` (append-only session log)
 autonomously by scheduled Claude Code sessions; `MISSION.md` is the contract, `KICKOFF.md` the owner's runbook.
 
 <!-- PROGRESS:BEGIN -->
-**Progress: parity 0.0% (0/548 PARITY.md rows done or deviated; 0 partial, 0 blocked, 548 missing) · phase 0: 7/10 items · phases closed: 0/8 · areas: B 0/59 BP 0/15 P 0/33 D 0/23 W 0/171 J 0/73 S 0/35 R 0/119 F 0/20** (updated by `scripts/progress.sh` at the end of every run)
+**Progress: parity 0.0% (0/548 PARITY.md rows done or deviated; 0 partial, 0 blocked, 548 missing) · phase 0: 9/10 items · phases closed: 0/8 · areas: B 0/59 BP 0/15 P 0/33 D 0/23 W 0/171 J 0/73 S 0/35 R 0/119 F 0/20** (updated by `scripts/progress.sh` at the end of every run)
 <!-- PROGRESS:END -->
 
 ## Layout

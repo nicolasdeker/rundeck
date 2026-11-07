@@ -24,3 +24,19 @@
 #   ref    = "docs/adr/0003-system-info-runtime.md"
 
 schema = 1
+
+# The two SCM specs fail on the legacy oracle itself (gitea fixture refuses the repository creation) in both Phase 0
+# baseline runs — see PARITY.md "Oracle baseline" and BLOCKED/oracle-scm-gitea-fixture.md.
+[[skip]]
+spec   = "org.rundeck.tests.functional.api.scm.ScmPluginSetupSpec"
+test   = "*"
+status = "blocked"
+reason = "fails at initialization on rundeck/rundeck:6.3.0 itself: GiteaApiRemoteRepo cannot create repoExample in the gitea fixture"
+ref    = "BLOCKED/oracle-scm-gitea-fixture.md"
+
+[[skip]]
+spec   = "org.rundeck.tests.functional.api.scm.ScmPluginJobDiffSpec"
+test   = "*"
+status = "blocked"
+reason = "fails at initialization on rundeck/rundeck:6.3.0 itself: GiteaApiRemoteRepo cannot create repoExample4 in the gitea fixture"
+ref    = "BLOCKED/oracle-scm-gitea-fixture.md"

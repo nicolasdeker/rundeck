@@ -651,4 +651,24 @@ One row per named sub-item of MISSION.md §1.3 (plus the three §1.1 cross-cutti
 
 ## Oracle baseline (legacy 6.3.0)
 
-pending: filled by the Phase 0 baseline run
+The upstream `apiTest` suite run unchanged against the published image `rundeck/rundeck:6.3.0` (MISSION §6 Phase 0,
+"prove the oracle"). Tests that fail **on legacy itself** are excluded from every rdx gate and listed here; they are
+excused for the `rdx` target through `tests/parity-skips.toml` (status `blocked`, ref `BLOCKED/oracle-scm-gitea-fixture.md`).
+
+| run | where | specs | tests | passed | failed | evidence |
+|---|---|---|---|---|---|---|
+| 2026-11-07 in-session, sequential (all specs, one fixture) | cloud sandbox, commit b15b55f, compose overlay (D-005) | 63 | 326 | 324 | 2 | `tests/baselines/2026-11-07-legacy-6.3.0-in-session.json` |
+| 2026-11-07 CI `parity.yml`, per-package matrix (18 legs) | GitHub Actions run [42397663285](https://github.com/nicolasdeker/rundeck/actions/runs/42397663285), commit 0e44364 | 62 | 321 | 314 | 7 | `tests/baselines/2026-11-07-legacy-6.3.0-ci-run-42397663285.json`, artifact `parity-report` |
+
+Failing on legacy (excluded from gates):
+
+| spec | test | both runs? | cause (as observed) | handling |
+|---|---|---|---|---|
+| `scm.ScmPluginSetupSpec` | `initializationError` | yes | `GiteaApiRemoteRepo.groovy:60-79`: the gitea fixture (`gitea/gitea:28.0.0`, `gitea/start.sh`) refuses the repository creation `repoExample` | `BLOCKED/oracle-scm-gitea-fixture.md`; rows `R-0xx /project/$project/scm/*` stay `missing` |
+| `scm.ScmPluginJobDiffSpec` | `initializationError` | yes | same fixture, repository `repoExample4` | same |
+| `job.HistorySpec` | 5 tests (`/api/project/test/history`) | CI matrix only | `api.error.project.missing: test` — the spec relies on project `test` created by other specs; green when the whole suite runs sequentially (in-session run) | not a legacy failure: the `job` matrix leg must become self-sufficient (PLAN P1-00) |
+
+Not covered by either run: `util/WaitUtilsSpec` (5 tests, `@APITest`, outside `api/**`) is run in-session but not by the
+CI matrix (PLAN P1-00); `ExecutionOutputSpec` (`@APIExecOutputTest`), `SecureInputSpec` (`apiTestNodeExecutorSecureInput`),
+`JdbcRolesApiSpec` (`jdbcTest`) and `LdapRolesApiSpec` (`ldapTest`) belong to other Gradle tasks (Phases 3–4).
+Baseline green specs: 61 of 63. These numbers are the denominator of every future `rdx` parity run.

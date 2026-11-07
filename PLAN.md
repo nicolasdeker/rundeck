@@ -13,13 +13,14 @@ screenshots updated, tag `phase-N` via REST, journal summary).
 - [x] P0-05 CI: `ci.yml`, `parity.yml`, `nightly.yml`, `release.yml`; `scripts/oracle.sh`, `scripts/parity.sh`, `scripts/parity-report.py`, `scripts/bench/`, `tests/parity-skips.toml`
 - [x] P0-06 `PARITY.md` inventory (548 rows, `scripts/inventory/`) (routes, service types, plugins, domain classes, formats, behavior, journeys) + `specs/ui-journeys.md` + `specs/README.md`
 - [x] P0-07 ADR-0001..0009 + `docs/COMPAT.md` (commit: adr, 21 COMPAT rows, 87 verified legacy citations)
-- [ ] P0-08 Oracle proven: `legacy/functional-test` `apiTest` against `rundeck/rundeck:6.3.0` in-session and in `parity.yml`; baseline recorded in `PARITY.md`
-- [ ] P0-09 Scheduled tasks `rdx-autopilot` and `rdx-review` created; owner actions journaled
-- [ ] P0-10 Exit gate: `ci.yml` green on `main`, journal summary, tag `phase-0`
+- [x] P0-08 Oracle proven (in-session 324/326, CI matrix 314/321 — PARITY.md "Oracle baseline", `tests/baselines/`): `legacy/functional-test` `apiTest` against `rundeck/rundeck:6.3.0` in-session and in `parity.yml`; baseline recorded in `PARITY.md`
+- [x] P0-09 Scheduled tasks `rdx-autopilot` (Sonnet) and `rdx-review` (strongest model) created on env `RDX`; owner actions journaled
+- [ ] P0-10 Exit gate: `ci.yml` green on `main` (done: runs 42397986727, 42398432212), `parity-reviewer` on the Phase 0 deliverables (fake-green check of PARITY.md/COMPAT.md/CI), fixes, then tag `phase-0` via REST and journal summary ← CURRENT
 
 ## Phase 1 — Foundations (backend + UI foundation)
 
-- [ ] P1-01 `specs/config.md` + `rdx-config`: `rundeck-config.properties`, `framework.properties`, `project.properties`, env overrides, typed config (legacy `PropertyLookup`, `Framework` init) ← CURRENT-NEXT
+- [ ] P1-00 `parity.yml`: make each matrix leg self-sufficient (the `job` leg's `HistorySpec` needs project `test`, created by other specs: run the creating spec first or create the project in `scripts/parity.sh`), run `util/WaitUtilsSpec` too, and investigate `BLOCKED/oracle-scm-gitea-fixture.md` (capture the gitea response)
+- [ ] P1-01 `specs/config.md` + `rdx-config`: `rundeck-config.properties`, `framework.properties`, `project.properties`, env overrides, typed config (legacy `PropertyLookup`, `Framework` init)
 - [ ] P1-02 `specs/db-schema.md` + `rdx-db`: legacy Postgres schema captured from a 6.3.0-initialized DB, `rdx_migrations`, SQLite/MySQL/Postgres pools, repositories Project/User/AuthToken/StoredEvent
 - [ ] P1-03 `specs/api-envelope.md` + `rdx-api` skeleton: version negotiation 14–60, error envelope JSON/XML, content negotiation, `/api/*/system/info`, 501 `api.error.not-implemented` for everything else
 - [ ] P1-04 `specs/authn.md` + `rdx-authn`: `realm.properties` (all formats), tokens (hashed at rest, roles, expiry), sessions, `/j_security_check`, preauth headers
