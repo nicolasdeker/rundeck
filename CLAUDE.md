@@ -17,9 +17,10 @@ mission brief is `MISSION.md`. **Read it at the start of every session, then `PL
 - `PLAN.md` — phases, checklists, `← CURRENT` item. `PARITY.md` — contract matrix. `JOURNAL.md` — append-only session
   log. `DECISIONS-PENDING.md` — defaults taken (mirrored as GitHub issues labeled `decision`). `BLOCKED/` — one file per
   blocked item (mirrored as issues labeled `blocked`).
-- `scripts/` — `prompts/{bootstrap,run,review}.md` (session prompts used by the autopilot), `cloud-setup.sh` (cloud
-  environment setup script), `oracle.sh` (legacy Rundeck via Docker), `parity.sh` (upstream functional suite against the
-  Rust binary), `bench/`. `.github/workflows/autopilot.yml` — the unattended loop (API-billed, spend-capped).
+- `scripts/` — `family-window.sh` (calendar guard: may a run start now?), `prompts/{bootstrap,run,review}.md` (session
+  prompts of the scheduled tasks), `cloud-setup.sh` (cloud environment setup script), `oracle.sh` (legacy Rundeck via
+  Docker), `parity.sh` (upstream functional suite against the Rust binary), `bench/`.
+  `.github/workflows/autopilot.yml` — opt-in API-billed alternative to the scheduled tasks (inert by default).
 
 ## Working rules (short form — MISSION.md is authoritative)
 
@@ -31,8 +32,9 @@ mission brief is `MISSION.md`. **Read it at the start of every session, then `PL
 4. **Never fake green.** No skipped/deleted oracle tests, no stub endpoints returning 200, no `#[ignore]`/`test.skip` without a `BLOCKED/` file.
 5. **Main is always green.** `make check` before every commit. Small conventional commits, pushed to `main` after each
    (`git push origin HEAD:main`). No force-push of `main`, no branches other than `main` and `autopilot-lock`.
-6. **One run at a time.** Take the `autopilot-lock` branch at session start (skip the run if its tip says `lock …` and is
-   younger than 3 h), release it at the end (`unlocked …` commit, force-pushed). Tags only via REST. See MISSION §7.
+6. **Family hours first, then one run at a time.** A scheduled run starts with `bash scripts/family-window.sh` and stops
+   if it says blocked (never bypass it). Then take the `autopilot-lock` branch (skip the run if its tip says `lock …` and
+   is younger than 3 h), release it at the end (`unlocked …` commit, force-pushed). Tags only via REST. See MISSION §7.
 7. **Decide, record, continue.** Ambiguity → the parity-preserving option, an ADR or a `DECISIONS-PENDING.md` entry
    + `decision` issue, move on. Never ask.
 8. **Stuck rule.** 3 failed attempts on one item → `BLOCKED/<id>.md` + `blocked` issue, take the next item.
@@ -40,8 +42,8 @@ mission brief is `MISSION.md`. **Read it at the start of every session, then `PL
    exploration, `parity-reviewer` before closing an area or a phase gate.
 10. **GitHub through REST only.** `gh api repos/nicolasdeker/rundeck/...`; `gh issue`/`gh pr` (GraphQL) are rejected here.
 11. **No `unsafe`.** Workspace-wide `#![forbid(unsafe_code)]`.
-12. **Every session ends with**: tests green, commit pushed to `main`, `JOURNAL.md` entry (done / evidence / next / risks),
-    `PLAN.md` updated, lock released.
+12. **Every session ends within the guard's time budget with**: tests green, commit pushed to `main`, `JOURNAL.md` entry
+    (done / evidence / next / risks), `PLAN.md` updated, lock released.
 
 ## Commands
 

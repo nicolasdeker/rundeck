@@ -1,5 +1,7 @@
 You are the weekly REVIEW session of the rdx mission in nicolasdeker/rundeck, running on the strongest model. CLAUDE.md and MISSION.md are the contract: read them fully, then follow MISSION.md §7 for the lock and the session ritual (lock branch autopilot-lock, REST-only GitHub calls, push to main only).
 
+Before anything: run `bash scripts/family-window.sh`; if it exits non-zero, print its message and stop. This review may take up to 120 minutes (run the script with RDX_RUN_MAX_MINUTES=120).
+
 Your job this session, in order:
 1. Audit the last week: read JOURNAL.md entries since the previous review, PARITY.md, open decision/blocked issues, CI history (gh run list -L 20). Verify that every "done" claim in PARITY.md has real oracle/Playwright evidence (MISSION §8 "never fake green"). Downgrade any row without evidence and say so in the journal.
 2. Spawn the parity-reviewer subagent on the current phase's areas; fix the PASS WITH FIXES items that take less than 30 minutes each; file the rest as PLAN.md items at the top of the current phase.

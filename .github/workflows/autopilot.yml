@@ -1,4 +1,5 @@
-# Autopilot — unattended Claude Code sessions on API billing (Mode A in KICKOFF.md).
+# Autopilot on API billing — OPT-IN alternative (Mode B in KICKOFF.md). Inert until the repository variable
+# AUTOPILOT_ENABLED is set to true and the secrets exist; the default operating mode is the cloud scheduled task.
 # Every run: one `claude -p` session with a hard per-run spend cap, then the result is posted to the tracking issue.
 # Pause: set the repository variable AUTOPILOT_ENABLED=false. Stop for good: the agent writes DONE at the repo root.
 name: autopilot
@@ -44,7 +45,7 @@ jobs:
       - name: Gate (pause switch, DONE marker, mode)
         id: gate
         run: |
-          if [ "${{ vars.AUTOPILOT_ENABLED || 'true' }}" != "true" ]; then echo "go=false" >> "$GITHUB_OUTPUT"; echo "paused by AUTOPILOT_ENABLED"; exit 0; fi
+          if [ "${{ vars.AUTOPILOT_ENABLED || 'false' }}" != "true" ]; then echo "go=false" >> "$GITHUB_OUTPUT"; echo "inactive: set the repository variable AUTOPILOT_ENABLED=true to opt in"; exit 0; fi
           mode="${{ inputs.mode || 'run' }}"
           [ "${{ github.event.schedule }}" = "7 2 * * 0" ] && mode=review
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
