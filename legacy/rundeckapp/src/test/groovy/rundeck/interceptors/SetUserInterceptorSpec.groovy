@@ -1,0 +1,541 @@
+package rundeck.interceptors
+
+import com.dtolabs.rundeck.app.config.RundeckConfig
+import com.dtolabs.rundeck.core.authentication.Group
+import com.dtolabs.rundeck.core.authentication.Username
+import org.rundeck.app.auth.RequiredRoleProvider
+import org.rundeck.app.data.model.v1.authtoken.AuthTokenMode
+import grails.testing.gorm.DataTest
+import grails.testing.web.interceptor.InterceptorUnitTest
+import org.rundeck.app.access.InterceptorHelper
+import org.rundeck.app.data.model.v1.authtoken.AuthTokenType
+import org.rundeck.app.data.model.v1.authtoken.AuthenticationToken
+import org.rundeck.app.data.providers.GormTokenDataProvider
+import rundeck.AuthToken
+import rundeck.ConfigTagLib
+import rundeck.User
+import rundeck.UtilityTagLib
+import rundeck.codecs.HTMLAttributeCodec
+import rundeck.codecs.HTMLContentCodec
+import rundeck.codecs.URIComponentCodec
+import rundeck.controllers.ApiController
+import rundeck.services.ApiService
+import rundeck.services.ConfigurationService
+import rundeck.services.UserService
+import spock.lang.Specification
+import spock.lang.Unroll
+
+import jakarta.servlet.ServletContext
+
+class SetUserInterceptorSpec extends Specification implements InterceptorUnitTest<SetUserInterceptor>, DataTest {
+
+    void setupSpec() {
+        mockDomain User
+        mockDomain AuthToken
+    }
+    def setup() {
+    }
+
+    def cleanup() {
+
+    }
+
+    void "Test setUser interceptor matching"() {
+        when:"A request matches the interceptor"
+            withRequest(controller:"setUser")
+
+        then:"The interceptor does match"
+            interceptor.doesMatch()
+    }
+
+    void "CreateAuth subject with roles supplied from user group plugin"() {
+        given:
+        def userServiceMock = Mock(UserService) {
+            getUserGroupSourcePluginRoles(username) >> { roles }
+        }
+
+        defineBeans {
+            userService(userServiceMock)
+        }
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_,_) >> false
+        }
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString(_,_) >> ""
+            getString(_) >> ""
+        }
+        when:
+        interceptor.userService = userServiceMock
+        request.remoteUser = username
+        request.userPrincipal = new Username(username)
+        boolean allowed = interceptor.before()
+
+        then:
+        allowed
+        request.subject.principals.find { it instanceof Username }?.name == username
+        request.subject.principals.findAll { it instanceof Group }.collect { it.name } == roles
+        0 * userServiceMock.findOrCreateUser(_)
+        0 * userServiceMock.parseKeyValuePref(_)
+
+        where:
+        username   | roles
+        "testUser" | []
+        "testUser" | ["one","two","three"]
+    }
+
+    def "Require role for login if set in properties"() {
+        setup:
+        defineBeans {
+            rundeckConfig(RundeckConfig)
+            configurationService(ConfigurationService) {
+                grailsApplication = grailsApplication
+            }
+
+        }
+        GroovyMock(ConfigurationService, global: true)
+
+        mockCodec(URIComponentCodec)
+        mockCodec(HTMLContentCodec)
+        mockCodec(HTMLAttributeCodec)
+        mockTagLib(UtilityTagLib)
+        mockTagLib(ConfigTagLib)
+
+        def userServiceMock = Mock(UserService) {
+            getUserGroupSourcePluginRoles(username) >> { groups }
+        }
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_,_) >> false
+        }
+
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString("security.requiredRole","")>>requiredRole
+            getString(_,_)>>""
+            getString(_)>>""
+        }
+
+        when:
+        interceptor.userService = userServiceMock
+
+        interceptor.request.userPrincipal = new Username(username)
+        interceptor.request.remoteUser = username
+        boolean allowed = interceptor.before()
+
+        then:
+        allowed == expected
+        flash.loginErrorCode==code
+        0 * userServiceMock.findOrCreateUser(_)
+        0 * userServiceMock.parseKeyValuePref(_)
+
+        where:
+        requiredRole | username | groups            | expected | code
+        "enter"      | "auser"  | ["grp1"]          | false    | 'user.not.allowed'
+        "enter"      | "auser"  | ["grp1", "enter"] | true     | null
+        ""           | "auser"  | ["grp1"]          | true     | null
+
+
+    }
+
+    def "Require a list of roles for login if set in properties"() {
+        setup:
+        defineBeans {
+            rundeckConfig(RundeckConfig)
+            testRequiredRoleProvider(TestRequireRoleProvider) {
+                requiredRoles = testRequiredRoles
+            }
+            configurationService(ConfigurationService) {
+                grailsApplication = grailsApplication
+            }
+        }
+
+        GroovyMock(ConfigurationService, global: true)
+
+        mockCodec(URIComponentCodec)
+        mockCodec(HTMLContentCodec)
+        mockCodec(HTMLAttributeCodec)
+        mockTagLib(UtilityTagLib)
+        mockTagLib(ConfigTagLib)
+
+        def userServiceMock = Mock(UserService) {
+            getUserGroupSourcePluginRoles("User") >> { groups }
+        }
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_,_) >> false
+        }
+
+        interceptor.configurationService = Mock(ConfigurationService) {
+             getString("security.requiredRole","")>>commaSeparatedUserRoles
+        }
+
+        when:
+        interceptor.userService = userServiceMock
+
+        interceptor.request.userPrincipal = new Username("User")
+        interceptor.request.remoteUser = "User"
+        boolean allowed = interceptor.before()
+        0 * userServiceMock.findOrCreateUser(_)
+        0 * userServiceMock.parseKeyValuePref(_)
+
+        then:
+        allowed == userAllowed
+        flash.loginErrorCode==code
+
+        where:
+        commaSeparatedUserRoles | groups           | userAllowed | testRequiredRoles | code
+        "admin"                 |["admin", "user"] | true        | []                | null
+        "user"                  |["admin", "user"] | true        | []                | null
+        "user    "              |["admin", "user"] | true        | []                | null
+        "    user    "          |["admin", "user"] | true        | []                | null
+        "admin, user"           |["admin"]         | true        | []                | null
+        "admin,user"            |["admin", "user"] | true        | []                | null
+        ""                      |["extra", "user"] | true        | ["extra"]         | null
+        ""                      |["admin", "user"] | false       | ["extra"]         | 'user.not.allowed'
+        "admin,user,other"      |["allowed"]       | false       | []              | 'user.not.allowed'
+        "admin,user"            |["anyOfThem"]     | false       | []              | 'user.not.allowed'
+
+    }
+
+    @Unroll
+    def "lookupToken"() {
+
+        setup:
+        User u1 = new User(login: "admin")
+        u1.id = 1L  // Explicitly set ID for Groovy 4 compatibility
+        User u2 = new User(login: "whk")
+        u2.id = 2L  // Explicitly set ID for Groovy 4 compatibility
+        AuthToken userTk1 = new AuthToken(token: "123",user:u1,authRoles:"admin",type: null)
+        AuthToken userTk2 = new AuthToken(token: "456", user:u1, authRoles:"admin", type: AuthTokenType.USER, tokenMode: AuthTokenMode.LEGACY)
+        AuthToken userTk3 = new AuthToken(token: "ABC", user:u1, authRoles:"admin", type: AuthTokenType.USER, tokenMode: AuthTokenMode.SECURED)
+        AuthToken userTk4 = new AuthToken(token: "DEF", user:u1, authRoles:"admin", type: AuthTokenType.USER, tokenMode: null)
+        AuthToken runnerTk1 = new AuthToken(token: "RN1", user:u1, authRoles:"admin", type: AuthTokenType.RUNNER, tokenMode: AuthTokenMode.SECURED)
+        AuthToken whkTk = new AuthToken(token: "789", user:u2, authRoles:"admin", type:AuthTokenType.WEBHOOK, tokenMode: AuthTokenMode.LEGACY)
+        u1.save()
+        u2.save()
+        userTk1.save()
+        userTk2.save()
+        userTk3.save()
+        userTk4.save()
+        runnerTk1.save()
+        whkTk.save()
+        def svCtx = Mock(ServletContext)
+        request.setAttribute(SetUserInterceptor.RUNNER_RQ_ATTRIB, runnerRq)
+        def apiService = new ApiService()
+        apiService.tokenDataProvider = new GormTokenDataProvider()
+
+        when:
+        interceptor.apiService = apiService
+        AuthenticationToken foundToken = interceptor.lookupToken(tk,svCtx,webhookToken)
+        String result = foundToken?.getOwnerName()
+
+        then:
+        result == expected
+
+        where:
+        tk    | webhookToken | runnerRq | expected
+        "123" | true         | false    | null
+        "123" | false        | false    | "admin"
+        "456" | true         | false    | null
+        "456" | false        | false    | "admin"
+        "ABC" | true         | false    | null
+        "ABC" | false        | false    | "admin"
+        "DEF" | true         | false    | null
+        "DEF" | false        | false    | "admin"
+        "789" | true         | false    | "whk"
+        "789" | false        | false    | null
+        "RN1" | false        | false    | null
+        "RN1" | false        | null     | null
+        "RN1" | false        | true     | "admin"
+    }
+
+    @Unroll
+    def "lookupTokenRoles"() {
+
+        given:
+        User u1 = new User(login: "admin")
+
+        AuthToken userTk3 = new AuthToken(token: tk, user:u1, authRoles:authRoles, type: AuthTokenType.USER, tokenMode: AuthTokenMode.SECURED)
+        u1.save()
+        userTk3.save()
+        def svCtx = Mock(ServletContext)
+        def apiService = new ApiService()
+        apiService.tokenDataProvider = new GormTokenDataProvider()
+
+        when:
+        interceptor.apiService = apiService
+        Set<String> foundRoles = interceptor.lookupTokenRoles(userTk3,svCtx)
+
+        then:
+        foundRoles == expected
+
+        where:
+        tk    | authRoles       | expected
+        "123" | "admin"         | ['admin'].toSet()
+        "456" |  null           |  null
+        "ABC" | "webhook,role1" | ['webhook','role1'].toSet()
+    }
+
+    def "request without remote auth info will be invalid"(){
+        given:
+            defineBeans {
+                rundeckConfig(RundeckConfig)
+                configurationService(ConfigurationService) {
+                    grailsApplication = grailsApplication
+                }
+            }
+            request.api_version=12
+            interceptor.interceptorHelper=Mock(InterceptorHelper)
+        when:
+            def result=interceptor.before()
+        then:
+            result
+            request.invalidApiAuthentication
+    }
+
+    def "api token request authenticates even if session user is already set"() {
+        given:
+        User user = new User(login: "admin")
+        AuthToken token = new AuthToken(
+                token: "valid-token",
+                user: user,
+                authRoles: "admin",
+                type: AuthTokenType.USER,
+                tokenMode: AuthTokenMode.LEGACY
+        )
+        user.save()
+        token.save()
+
+        def apiService = new ApiService()
+        apiService.tokenDataProvider = new GormTokenDataProvider()
+        interceptor.apiService = apiService
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_, _) >> false
+        }
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString(_, _) >> ""
+        }
+
+        request.api_version = 44
+        request.addHeader('X-RunDeck-Auth-Token', "valid-token")
+        session.user = "stale-user"
+
+        when:
+        boolean result = interceptor.before()
+
+        then:
+        result
+        !request.invalidApiAuthentication
+        request.authenticatedUser == "admin"
+        session.user == "admin"
+        request.subject.principals.find { it instanceof Username }?.name == "admin"
+    }
+
+    def "skip requiredRoles check if the call is performed by the runner"() {
+        setup:
+        defineBeans {
+            rundeckConfig(RundeckConfig)
+            configurationService(ConfigurationService) {
+                grailsApplication = grailsApplication
+            }
+
+        }
+        GroovyMock(ConfigurationService, global: true)
+
+        User u1 = new User(login: "_runner")
+        AuthToken userTk1 = new AuthToken(token: "123",user:u1,authRoles:"_runner",type: AuthTokenType.RUNNER)
+        u1.save()
+        userTk1.save()
+
+        def svCtx = Mock(ServletContext)
+        request.setAttribute(SetUserInterceptor.RUNNER_RQ_ATTRIB, true)
+        def apiService = new ApiService()
+        apiService.tokenDataProvider = new GormTokenDataProvider()
+
+        mockCodec(URIComponentCodec)
+        mockCodec(HTMLContentCodec)
+        mockCodec(HTMLAttributeCodec)
+        mockTagLib(UtilityTagLib)
+        mockTagLib(ConfigTagLib)
+
+        def username = "_runner"
+        def role = "_runner"
+
+        def userServiceMock = Mock(UserService) {
+            getUserGroupSourcePluginRoles(username) >> { [role] }
+        }
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_,_) >> false
+        }
+
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString("security.requiredRole","")>>"enter,admin"
+            getString(_,_)>>""
+            getString(_)>>""
+            getBoolean(_,_)>>true
+        }
+
+        when:
+
+        interceptor.apiService = apiService
+        interceptor.userService = userServiceMock
+
+        interceptor.params.authtoken = "123"
+        interceptor.request.api_version = 41
+        boolean allowed = interceptor.before()
+        0 * userServiceMock.findOrCreateUser(_)
+        0 * userServiceMock.parseKeyValuePref(_)
+
+        then:
+        allowed
+
+
+    }
+
+    def "api token via query param is honored and logs deprecation warning when enabled"() {
+        given:
+        User user = new User(login: "admin")
+        AuthToken token = new AuthToken(
+                token: "valid-token",
+                user: user,
+                authRoles: "admin",
+                type: AuthTokenType.USER,
+                tokenMode: AuthTokenMode.LEGACY
+        )
+        user.save()
+        token.save()
+
+        def apiService = new ApiService()
+        apiService.tokenDataProvider = new GormTokenDataProvider()
+        interceptor.apiService = apiService
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_, _) >> false
+        }
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString(_, _) >> ""
+            getBoolean(_, _) >> true
+        }
+
+        request.api_version = 44
+        interceptor.params.authtoken = "valid-token"
+
+        def logOutput = new StringWriter()
+        def ctx = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false)
+        def config = ctx.getConfiguration()
+        def appender = org.apache.logging.log4j.core.appender.WriterAppender.newBuilder()
+                .setConfiguration(config)
+                .setName("SetUserInterceptorTestCapture")
+                .setTarget(logOutput)
+                .setLayout(org.apache.logging.log4j.core.layout.PatternLayout.newBuilder().withPattern("[%level] %msg%n").withConfiguration(config).build())
+                .build()
+        appender.start()
+        config.getRootLogger().addAppender(appender, org.apache.logging.log4j.Level.WARN, null)
+        ctx.updateLoggers()
+
+        when:
+        boolean result = interceptor.before()
+
+        then:
+        result
+        !request.invalidApiAuthentication
+        request.authenticatedUser == "admin"
+        session.user == "admin"
+        logOutput.toString().contains("deprecated")
+
+        cleanup:
+        config.getRootLogger().removeAppender("SetUserInterceptorTestCapture")
+        appender.stop()
+        ctx.updateLoggers()
+    }
+
+    def "api token via query param is ignored and falls back to header when disabled"() {
+        given:
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_, _) >> false
+        }
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString(_, _) >> ""
+            getBoolean(_, _) >> false
+        }
+
+        request.api_version = 44
+        interceptor.params.authtoken = "valid-token"
+
+        when:
+        boolean result = interceptor.before()
+
+        then:
+        result
+        request.invalidApiAuthentication
+        request.authenticatedUser == null
+        session.user == null
+    }
+
+    def "webhook requests honor authtoken path token regardless of query-param auth flag"() {
+        given:
+        User user = new User(login: "admin")
+        AuthToken token = new AuthToken(
+                token: "valid-token",
+                user: user,
+                authRoles: "admin",
+                type: AuthTokenType.WEBHOOK,
+                tokenMode: AuthTokenMode.LEGACY
+        )
+        user.save()
+        token.save()
+
+        def apiService = new ApiService()
+        apiService.tokenDataProvider = new GormTokenDataProvider()
+        interceptor.apiService = apiService
+        interceptor.interceptorHelper = Mock(InterceptorHelper) {
+            matchesAllowedAsset(_, _) >> false
+        }
+        interceptor.configurationService = Mock(ConfigurationService) {
+            getString(_, _) >> ""
+            getBoolean(_, _) >> false
+        }
+
+        // withRequest(controller:,action:) only feeds the doesMatch() URL matcher, not the plain
+        // controllerName/actionName properties SetUserInterceptor.before() reads directly, so those
+        // request attributes must be set explicitly to exercise the webhookType branch.
+        withRequest(controller: "webhook", action: "post")
+        request.setAttribute("org.grails.CONTROLLER_NAME_ATTRIBUTE", "webhook")
+        request.setAttribute("org.grails.ACTION_NAME_ATTRIBUTE", "post")
+        request.api_version = 44
+        interceptor.params.authtoken = "valid-token"
+
+        def logOutput = new StringWriter()
+        def ctx = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false)
+        def config = ctx.getConfiguration()
+        def appender = org.apache.logging.log4j.core.appender.WriterAppender.newBuilder()
+                .setConfiguration(config)
+                .setName("SetUserInterceptorWebhookTestCapture")
+                .setTarget(logOutput)
+                .setLayout(org.apache.logging.log4j.core.layout.PatternLayout.newBuilder().withPattern("[%level] %msg%n").withConfiguration(config).build())
+                .build()
+        appender.start()
+        config.getRootLogger().addAppender(appender, org.apache.logging.log4j.Level.WARN, null)
+        ctx.updateLoggers()
+
+        when:
+        boolean result = interceptor.before()
+
+        then:
+        result
+        !request.invalidApiAuthentication
+        request.authenticatedUser == "admin"
+        session.user == "admin"
+        !logOutput.toString().contains("deprecated")
+
+        cleanup:
+        config.getRootLogger().removeAppender("SetUserInterceptorWebhookTestCapture")
+        appender.stop()
+        ctx.updateLoggers()
+    }
+
+    static class TestRequireRoleProvider implements RequiredRoleProvider {
+        List<String> requiredRoles = []
+
+        @Override
+        List<String> getRequiredRoles() {
+            return requiredRoles
+        }
+    }
+}

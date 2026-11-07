@@ -1,0 +1,431 @@
+package org.rundeck.util.gui.pages
+
+import groovy.transform.CompileStatic
+import org.openqa.selenium.By
+import org.openqa.selenium.Dimension
+import org.openqa.selenium.JavascriptExecutor
+import org.openqa.selenium.NoSuchElementException
+import org.openqa.selenium.StaleElementReferenceException
+import org.openqa.selenium.WebDriver
+import org.openqa.selenium.WebElement
+import org.openqa.selenium.support.ui.ExpectedConditions
+import org.openqa.selenium.support.ui.WebDriverWait
+import org.rundeck.util.container.SeleniumContext
+
+import java.time.Duration
+import java.util.concurrent.TimeoutException
+
+/**
+ * Base type for page object model
+ */
+@CompileStatic
+abstract class BasePage {
+    final SeleniumContext context
+    By modalField = By.cssSelector(".modal.fade.in")
+    By modalInBy = By.cssSelector(".modal.in")
+
+    /**
+     * Create a new page
+     * @param context
+     */
+    BasePage(final SeleniumContext context) {
+        this.context = context
+        this.context.driver.manage().window().setSize(new Dimension(1200, 1050))
+        this.context.driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10))
+    }
+
+    /** Mutable map of page flags (e.g. nextUi, betaUi) that affect selectors/behavior.
+     *  Read on each access — supports toggling mid-test without navigation. */
+    protected final Map<String, Object> pageFlags = [:]
+
+    /** Fluent: set a flag and return this for chaining. Can be called before go() or mid-test. */
+    BasePage withFlag(String key, Object value) {
+        pageFlags[key] = value
+        return this
+    }
+
+    /** Check if a boolean flag is enabled (default false) */
+    boolean isFlagEnabled(String key) {
+        (pageFlags[key] as Boolean) ?: false
+    }
+
+    /** Get flag value with optional default */
+    <T> T getFlag(String key, T defaultValue = null) {
+        (pageFlags.containsKey(key) ? pageFlags[key] : defaultValue) as T
+    }
+
+    /** Fluent: enable nextUi mode. Shorthand for withFlag('nextUi', true) */
+    BasePage withNextUi(boolean enabled = true) {
+        return withFlag('nextUi', enabled)
+    }
+
+    /** Fluent: enable legacyUi mode. Shorthand for withFlag('legacyUi', true) */
+    BasePage withLegacyUi(boolean enabled = true) {
+        return withFlag('legacyUi', enabled)
+    }
+
+    abstract String getLoadPath()
+    /**
+     * Go to the page and validate
+     */
+    void go() {
+        if (loadPath && !loadPath.empty) {
+            implicitlyWait 2000
+            driver.get(context.client.baseUrl + loadPath)
+            validatePage()
+        }
+    }
+
+    void go(String loadPath) {
+        if (loadPath && !loadPath.empty) {
+            implicitlyWait 2000
+            driver.get(context.client.baseUrl + loadPath)
+            validatePage(loadPath)
+        }
+    }
+    /**
+     * Validate the page is loaded
+     */
+    void validatePage() {
+        if (loadPath && !loadPath.empty) {
+            waitForUrlToContain(loadPath)
+        }
+    }
+
+    /**
+     * Validate the page is loaded by checking the URL contains the specified path
+     * @param loadPath The path that should be present in the current URL
+     */
+    void validatePage(String loadPath) {
+        if (loadPath && !loadPath.empty) {
+            waitForUrlToContain(loadPath)
+        }
+    }
+
+    void refresh() {
+        driver.navigate().refresh()
+    }
+
+    WebElement waitForElementVisible(WebElement locator) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.visibilityOf(locator))
+    }
+
+    WebElement waitForElementVisible(By locator) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.visibilityOfElementLocated(locator))
+    }
+
+    void waitForNumberOfElementsToBeOne(By locator) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.numberOfElementsToBe(locator, 1))
+    }
+
+    /**
+     * Waits until the element located by {@code locator} is present and clickable.
+     * Uses {@link ExpectedConditions#elementToBeClickable(By)} so the wait is actually evaluated
+     * (unlike returning a condition object from a raw closure).
+     */
+    void waitForElementToBeClickable(By locator) {
+        new WebDriverWait(driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.elementToBeClickable(locator))
+    }
+
+    /** @see #waitForElementToBeClickable(By) */
+    void waitForElementToBeClickable(WebElement locator) {
+        new WebDriverWait(driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.elementToBeClickable(locator))
+    }
+
+    void waitForTextToBePresentInElement(WebElement locator, String text) {
+        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(30))
+        wait.until { ExpectedConditions.textToBePresentInElement(locator, text) }
+    }
+
+    /**
+     * Wait for element to have non-empty text content.
+     * Re-finds the element on each check to avoid stale element references.
+     *
+     * @param locator The By locator to find the element
+     */
+    void waitForTextToBeNonEmpty(By locator) {
+        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(30))
+        wait.until { WebDriver d ->
+            def element = d.findElement(locator)
+            def text = element.getText()
+            text != null && !text.trim().isEmpty()
+        }
+    }
+
+    /**
+     * Wait for element to have non-empty text content and return the text.
+     * This method atomically waits and retrieves the text, handling stale element
+     * references by re-finding the element immediately before reading the text.
+     * This prevents StaleElementReferenceException that can occur when the DOM
+     * updates between waiting and reading the text.
+     *
+     * @param locator The By locator to find the element
+     * @return The non-empty text content of the element
+     */
+    String waitForTextToBeNonEmptyAndGet(By locator) {
+        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(30))
+        // Wait for element to have non-empty text, then immediately retrieve it
+        // Use a wait that ignores StaleElementReferenceException to handle DOM updates
+        return wait.ignoring(StaleElementReferenceException.class)
+                .until { WebDriver d ->
+                    def element = d.findElement(locator)
+                    def text = element.getText()
+                    if (text != null && !text.trim().isEmpty()) {
+                        return text
+                    }
+                    return null
+                }
+    }
+
+    /**
+     * Waits for the specified text to be present within the element located by the given selector.
+     *
+     * @param selector The selector used to locate the element.
+     * @param text The text to wait for within the element.
+     * @param seconds The amount of time to wait.
+     */
+    String waitForTextToBePresentBySelector(By selector, String text ,int seconds) {
+        WebDriverWait wait = new WebDriverWait(driver,Duration.ofSeconds(seconds))
+        wait.until(ExpectedConditions.textToBe(selector, text))
+    }
+
+    boolean waitForElementAttributeToChange(WebElement locator, String attribute, String valueCompare) {
+        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(30))
+        wait.until {
+            WebDriver d ->
+                def elementLocator = locator.getAttribute(attribute)
+                elementLocator == valueCompare
+        }
+    }
+
+    void implicitlyWait(int milliSeconds) {
+        context.driver.manage().timeouts().implicitlyWait(Duration.ofMillis(milliSeconds))
+    }
+
+    void waitForNumberOfElementsToBe(By locator, Integer number) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.numberOfElementsToBe(locator, number))
+    }
+
+    void waitForNumberOfElementsToBeMoreThan(By locator, Integer number) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.numberOfElementsToBeMoreThan(locator, number))
+    }
+
+    /**
+     * Best-effort wait for more than the given number of elements matching locator.
+     * Returns quietly (false) if the condition is not met within duration, rather than throwing.
+     * Useful for observing a transient state (e.g. a loading indicator) that may appear and
+     * disappear faster than the caller can otherwise reliably catch, before waiting for it to clear.
+     */
+    boolean waitForNumberOfElementsToBeMoreThanIgnoringTimeout(By locator, Integer number, Duration duration = Duration.ofSeconds(3)) {
+        try {
+            new WebDriverWait(context.driver, duration)
+                    .until(ExpectedConditions.numberOfElementsToBeMoreThan(locator, number))
+            return true
+        } catch (org.openqa.selenium.TimeoutException ignored) {
+            return false
+        }
+    }
+
+    WebElement waitIgnoringForElementVisible(WebElement locator) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.visibilityOf(locator))
+    }
+
+    WebElement waitIgnoringForElementToBeClickable(WebElement locator, Duration duration = Duration.ofSeconds(30)) {
+        new WebDriverWait(context.driver, duration)
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.elementToBeClickable(locator))
+    }
+
+    WebElement waitIgnoringForElementToBeClickable(By locator, Duration duration = Duration.ofSeconds(30)) {
+        new WebDriverWait(context.driver, duration)
+                .ignoring(StaleElementReferenceException.class)
+                .until(ExpectedConditions.elementToBeClickable(locator))
+    }
+
+    /**
+     * Check if an element is displayed, with retry logic to handle StaleElementReferenceException.
+     * Returns true if element is displayed, false if not displayed or not found.
+     * @param locator The By locator to find the element
+     * @param duration Optional timeout duration (default 1 second - this is a quick check)
+     * @return true if element is displayed, false otherwise
+     */
+    boolean isElementDisplayedIgnoringStale(By locator, Duration duration = Duration.ofSeconds(1)) {
+        try {
+            new WebDriverWait(context.driver, duration)
+                    .ignoring(StaleElementReferenceException.class)
+                    .until { driver ->
+                        try {
+                            WebElement element = driver.findElement(locator)
+                            return element != null && element.isDisplayed()
+                        } catch (org.openqa.selenium.NoSuchElementException ignored) {
+                            return false
+                        } catch (StaleElementReferenceException ignored) {
+                            return null // Will cause the wait to continue
+                        }
+                    }
+            return true
+        } catch (org.openqa.selenium.TimeoutException ignored) {
+            return false
+        }
+    }
+
+    boolean waitForUrlToContain(String text) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.urlContains(text))
+    }
+
+    /**
+     * Wait for the current URL to not contain the specified text
+     * @param text The text that should not be present in the URL
+     * @return true if the URL does not contain the text within the timeout period
+     */
+    boolean waitForUrlToNotContain(String text) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.not(ExpectedConditions.urlContains(text)))
+    }
+
+    /**
+     * Waits for a typical post-logout landing URL when {@link #waitForUrlToNotContain(String)} cannot
+     * be keyed off the pre-logout path (see {@link org.rundeck.util.gui.pages.TopMenuPage#logOut()}).
+     */
+    void waitForLogoutLandingUrl() {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30)).until(
+                ExpectedConditions.or(
+                        ExpectedConditions.urlContains('/user/loggedout'),
+                        ExpectedConditions.urlContains('/user/login')))
+    }
+
+    boolean waitForAttributeContains(WebElement locator, String attribute, String value) {
+        new WebDriverWait(context.driver, Duration.ofSeconds(30))
+                .until(ExpectedConditions.attributeContains(locator, attribute, value))
+    }
+
+    def waitForModal(int expected, By modalFieldCssSelector = modalField) {
+        new WebDriverWait(driver, Duration.ofSeconds(30)).until (
+                ExpectedConditions.numberOfElementsToBe(
+                        modalFieldCssSelector, expected )
+        )
+    }
+
+    WebElement byAndWait(By locator) {
+        waitForElementVisible locator
+        el locator
+    }
+
+    WebElement byAndWaitClickable(By locator) {
+        waitForElementToBeClickable locator
+        el locator
+    }
+
+    /**
+     * Safely clicks an element by re-finding it immediately before clicking.
+     * This prevents StaleElementReferenceException by ensuring we always use
+     * a fresh element reference.
+     *
+     * @param locator The By locator to find and click the element
+     */
+    void clickElementSafely(By locator) {
+        waitForElementToBeClickable(locator)
+        try {
+            el(locator).click()
+        } catch (StaleElementReferenceException | NoSuchElementException e) {
+            // Re-find and click if element became stale or was momentarily absent
+            waitForElementToBeClickable(locator)
+            el(locator).click()
+        }
+    }
+
+    WebDriver getDriver() {
+        context.driver
+    }
+
+    void executeScript(String script) {
+        ((JavascriptExecutor) context.driver).executeScript(script)
+    }
+
+    void executeScript(String script, WebElement element) {
+        ((JavascriptExecutor) context.driver).executeScript(script, element)
+    }
+
+    WebElement el(By by) {
+        context.driver.findElement(by)
+    }
+
+    List<WebElement> els(By by) {
+        context.driver.findElements(by)
+    }
+
+    WebElement getLink(String text){
+        el By.partialLinkText(text)
+    }
+
+    /**
+     * It waits for the link text to exist a number of times
+     * @param linkText
+     * @param times , number of times the partial link text should be present, defaults to 1
+     * @return
+     */
+    def expectPartialLinkToExist(String linkText, int times = 1){
+        new WebDriverWait(driver, Duration.ofSeconds(20))
+                .until(ExpectedConditions.numberOfElementsToBe(By.partialLinkText(linkText), times))
+    }
+
+    /**
+     * Verifies that the partial text is present in the page
+     * @param partialText the text to search for
+     * @return
+     */
+    boolean expectPartialTextToExist(String partialText) {
+        els(By.xpath("//*[contains(text(), '${partialText}')]"))?.isEmpty() == false
+    }
+
+    /**
+     * Verifies that a link <a href="...">${exactLinkText}</a> is present
+     * @param exactLinkText the text to search for
+     * @return
+     */
+    boolean expectLinkTextToExist(String exactLinkText) {
+        els(By.linkText(exactLinkText))?.isEmpty() == false
+    }
+
+    WebElement getElementByCss(String css){
+        el By.cssSelector(css)
+    }
+
+    def currentUrl() {
+        driver.getCurrentUrl()
+    }
+
+    void redirectTo(String path) {
+        driver.get(path)
+    }
+
+    def waitForElementIsInvisible(WebElement element) {
+        new WebDriverWait(driver, Duration.ofSeconds(30)).until { WebDriver d ->
+            ExpectedConditions.invisibilityOf(element)
+        }
+    }
+
+    List<WebElement> findElementsByXpath(String xpath){
+        return driver.findElements(By.xpath(xpath))
+    }
+
+    /**
+     * Get elements with data-prop-name. Helpful for getting dynamically populated inputs
+     * @param value of the data-prop-name that should be retrieved
+     * @param child element that should be retrieved. Defaults to input[type='text']
+     * @return webElement
+     */
+    WebElement getElementByDataPropName(String value, String childElement = "input[type='text']") {
+        el By.cssSelector("[data-prop-name='${value}'] ${childElement}")
+    }
+}

@@ -1,0 +1,110 @@
+buildscript {
+    repositories {
+        mavenLocal()
+        mavenCentral()
+        maven { url "https://repo.grails.org/grails/core" }
+    }
+    configurations.all {
+        resolutionStrategy {
+            // CVE-2026-64607: httpclient5 connection-pool exhaustion DoS, fixed in 5.6.3. Pulled onto
+            // this buildscript classpath via grails-gradle-plugins -> grails-shell-cli -> spring-boot-cli.
+            // Build-tooling only (never shipped), forced to stop the Snyk finding.
+            force "org.apache.httpcomponents.client5:httpclient5:${httpClient5Version}"
+        }
+    }
+    dependencies {
+        classpath platform("org.apache.grails:grails-bom:$grailsVersion")
+        classpath "org.apache.grails:grails-gradle-plugins:$grailsVersion"
+    }
+}
+
+plugins {
+    id "org.springframework.boot" version "${springBootVersion}"
+}
+
+apply plugin:"eclipse"
+apply plugin:"idea"
+// Pre-register sourcesJar before the grails-plugin applies: it synchronously checks for this
+// task inside its own apply() and logs "A sourcesJar task was not found, creating one." if missing.
+tasks.register('sourcesJar', Jar) {
+    archiveClassifier.set('sources')
+    from sourceSets.main.allSource
+}
+apply plugin:"org.apache.grails.gradle.grails-plugin"
+apply plugin:"org.apache.grails.gradle.grails-gsp"
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+    maven { url "https://repo.grails.org/grails/core" }
+}
+configurations{
+    //define libs needed to be bundled into the WEB-INF/lib dir of the war
+    exportedLibs
+    developmentOnly
+    runtimeClasspath {
+        extendsFrom developmentOnly
+    }
+    all {
+        exclude group: 'org.springframework.boot', module: 'spring-boot-starter-logging'
+        exclude group: 'ch.qos.logback', module: 'logback-classic'
+        exclude group: 'ch.qos.logback', module: 'logback-core'
+    }
+}
+
+apply from: "../gradle/java-version.gradle"
+
+dependencies {
+    implementation project(":core")
+
+    implementation "org.springframework.boot:spring-boot-starter-log4j2"
+    implementation "org.springframework.boot:spring-boot-autoconfigure"
+    implementation "jakarta.annotation:jakarta.annotation-api:${jakartaAnnotationVersion}"
+    implementation "org.apache.grails:grails-core"
+    implementation "org.springframework.boot:spring-boot-starter-actuator"
+    implementation "org.apache.grails:grails-web-boot"
+    implementation "org.apache.grails:grails-logging"
+    implementation "org.apache.grails:grails-rest-transforms"
+    implementation "org.apache.grails:grails-databinding"
+    implementation "org.apache.grails:grails-core"
+    implementation "org.apache.grails:grails-services"
+    implementation "org.apache.grails:grails-url-mappings"
+    implementation "org.apache.grails:grails-interceptors"
+    implementation "org.apache.grails:grails-cache"
+    implementation "org.apache.grails:grails-async"
+    implementation "org.apache.grails:grails-scaffolding"
+    implementation "org.apache.grails:grails-gsp"
+    implementation "org.apache.grails:grails-data-hibernate5"
+    compileOnly "io.micronaut:micronaut-inject-groovy:${micronautVersion}"
+    console "org.apache.grails:grails-console"
+    profile "org.grails.profiles:web-plugin"
+    testImplementation "org.apache.grails:grails-testing-support-datamapping"
+    testImplementation "org.mockito:mockito-core"
+    testImplementation "org.apache.grails:grails-testing-support-web"
+}
+
+bootRun {
+    ignoreExitValue true
+    jvmArgs(
+        '-Dspring.output.ansi.enabled=always',
+        '-noverify',
+        '-XX:TieredStopAtLevel=1',
+        '-Xmx1024m')
+    sourceResources sourceSets.main
+    String springProfilesActive = 'spring.profiles.active'
+    systemProperty springProfilesActive, System.getProperty(springProfilesActive)
+}
+
+bootJar.enabled = false
+
+tasks.withType(Test) {
+    useJUnitPlatform()
+}
+
+// enable if you wish to package this plugin as a standalone application
+bootJar.enabled = false
+
+jar {
+    enabled = true
+    archiveClassifier = '' //use empty string
+}

@@ -1,0 +1,204 @@
+plugins {
+    id 'groovy'
+    id "com.adarshr.test-logger" version "4.0.0"
+}
+
+apply from: "../gradle/java-version.gradle"
+apply from: "../gradle/ui-mode-flags-report.gradle"
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+testlogger {
+    slowThreshold 10000
+}
+
+project.evaluationDependsOn(":rundeckapp")
+
+configurations.all {
+    resolutionStrategy {
+        // Force safe commons-compress versions to fix CVE-2024-25710
+        // Only force artifacts that exist for version 1.21
+        force "org.apache.commons:commons-compress:${commonsCompressVersion}"
+    }
+}
+
+
+dependencies {
+    testImplementation "org.spockframework:spock-core:${spockVersion}"
+    testImplementation "org.testcontainers:testcontainers:${testContainersVersion}"
+    testImplementation "org.testcontainers:spock:${testContainersVersion}"
+    testImplementation "com.fasterxml.jackson.core:jackson-databind:${jacksonDatabindVersion}"
+    testImplementation "com.squareup.okhttp3:okhttp:${okhttpVersion}"
+    testImplementation "org.slf4j:slf4j-simple:${slf4jVersion}"
+    testImplementation "org.slf4j:jul-to-slf4j:${slf4jVersion}"
+    testImplementation "org.seleniumhq.selenium:selenium-java:${seleniumJavaVersion}"
+    testImplementation "com.squareup.okhttp3:okhttp-urlconnection:${okhttpVersion}"
+    testImplementation group: 'com.jcraft', name: 'jsch', version: "${jschVersion}"
+
+    implementation "org.apache.commons:commons-compress:${commonsCompressVersion}"
+
+}
+
+//This prevents tasks from being cached
+gradle.taskGraph.whenReady { taskGraph ->
+    [Test].each {
+        project.tasks.withType(it) {
+            it.outputs.upToDateWhen { false }
+        }
+    }
+}
+
+def copyFile(source, destination, newFileName){
+    copy {
+        from source
+        into destination
+        rename "$source.name", newFileName
+    }
+}
+
+def checkWarFile(destination, fileName) {
+    def rundeckapp = project(":rundeckapp")
+    /* A bit dirty but will allow building container between Travis stages without rebuilding the war */
+    def warFile
+    if(System.getenv("TEST_WAR_FILE_LOCATION")){
+        warFile = file(System.getenv("TEST_WAR_FILE_LOCATION"))
+        println "From system env File to copy from ${warFile} to ${destination + fileName}"
+    }else{
+        warFile = file(rundeckapp.war.archiveFile.get().toString().replace("-plain", ""))
+        println "From rundeck build File to copy from ${warFile} to ${destination + fileName}"
+    }
+    if (!warFile.exists()) {
+        throw new GradleException("War file does not exist")
+    }
+    copyFile(warFile, destination, fileName)
+    println "File copied from ${warFile} to ${destination + fileName}"
+}
+
+/** 
+ * Returns a function that includes only the test files specified in the `testFiles` parameter.
+ * The `testFiles` parameter is a string of test source paths, or of fully qualified
+ * class names, one entry per line.
+ */
+def explicitTestIncluder(String testFiles) {
+    // Convert test file source code paths to compiled class paths.
+    // Example: `functional-test/src/test/groovy/org/rundeck/tests/functional/api/basic/BasicSpec.groovy`
+    // needs to become `org/rundeck/tests/functional/api/basic/BasicSpec.class`.
+    //
+    // `circleci tests glob` yields those source paths, but when rerunning only the
+    // failed tests `circleci tests run` yields fully qualified class names instead,
+    // because Gradle's JUnit XML carries a `classname` attribute and no `file` one.
+    // Both forms must map to the same compiled class path, otherwise the include
+    // matches nothing and the task is skipped as NO-SOURCE, turning a failing job
+    // green without running a single test.
+    def compiledFilesToTest = testFiles
+        .split(System.lineSeparator())
+        .collect { it.trim() }
+        .findAll { !it.isEmpty() }
+        .collect { testFileOrClass ->
+            testFileOrClass.contains("/")
+                ? testFileOrClass
+                    .replaceFirst(".*\\/src\\/test\\/(groovy\\/|java\\/)", "")
+                    .replaceFirst("(.groovy|.java)\$", ".class")
+                : testFileOrClass.replace(".", "/") + ".class"
+        }
+
+    logger.info("Compiled files to test: {}", compiledFilesToTest)
+
+    return {
+        FileTreeElement e ->
+            if (e.isDirectory()) {
+                return true
+            }
+
+            compiledFilesToTest.contains(e.path)
+    }
+}
+
+task apiTest(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    systemProperty('TEST_IMAGE', "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/compose/oss/docker-compose.yml")
+    systemProperty('spock.configuration','spock-configs/IncludeAPITestsConfig.groovy')
+    description = "Run API tests"
+
+    if (project.hasProperty("testFiles")) {
+        include(explicitTestIncluder(project.properties["testFiles"]))
+    }
+}
+
+task pluginBlocklistTest(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    systemProperty('TEST_IMAGE', "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/compose/oss/docker-compose-blocklist.yml")
+    systemProperty('spock.configuration','spock-configs/IncludeBlocklistTestsConfig.groovy')
+    description = "Run Plugin Blocklist tests"
+}
+
+task apiTestNodeExecutorSecureInput(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    def featureName='nodeExecutorSecureInput'
+    systemProperty("TEST_FEATURE_ENABLED_NAME", featureName)
+    systemProperty('TEST_IMAGE', "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/compose/oss/docker-compose.yml")
+    systemProperty('spock.configuration','spock-configs/IncludeAPISecureInputTestsConfig.groovy')
+    description = "Run Secure Input Tests (test ${featureName} feature)"
+}
+
+task seleniumCoreTest(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    systemProperty('TEST_IMAGE', "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/compose/oss/docker-compose.yml")
+    systemProperty('spock.configuration', 'spock-configs/IncludeSeleniumCoreTestsConfig.groovy')
+    description = "Run Rundeck OSS Selenium Tests"
+
+    if (project.hasProperty("testFiles")) {
+        include(explicitTestIncluder(project.properties["testFiles"]))
+    }
+}
+
+task alphaUiSeleniumCoreTest(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    def featureName='alphaUi'
+    systemProperty("TEST_FEATURE_ENABLED_NAME", featureName)
+    systemProperty('TEST_IMAGE', "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/compose/oss/docker-compose.yml")
+    systemProperty('spock.configuration', 'spock-configs/IncludeAlphaUiSeleniumCoreTestsConfig.groovy')
+    description = "Run Rundeck OSS Selenium Tests with Alpha UI feature flag enabled"
+
+    if (project.hasProperty("testFiles")) {
+        include(explicitTestIncluder(project.properties["testFiles"]))
+    }
+}
+
+task ldapTest(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    systemProperty("TEST_IMAGE", "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/ldap/docker-compose.yml")
+    systemProperty('spock.configuration', 'spock-configs/IncludeLdapTestsConfig.groovy')
+    description = "Run Rundeck OSS LDAP Tests"
+}
+
+task jdbcTest(type: Test){
+    useJUnitPlatform()
+    // Grails 7: Force sequential execution to prevent Docker Compose port conflicts
+    maxParallelForks = 1
+    systemProperty("TEST_IMAGE", "rundeck/rundeck:SNAPSHOT")
+    systemProperty("COMPOSE_PATH", "docker/jdbc/docker-compose.yml")
+    systemProperty('spock.configuration', 'spock-configs/IncludeJdbcTestsConfig.groovy')
+    description = "Run Rundeck OSS JAAS JDBCLoginModule Tests"
+}

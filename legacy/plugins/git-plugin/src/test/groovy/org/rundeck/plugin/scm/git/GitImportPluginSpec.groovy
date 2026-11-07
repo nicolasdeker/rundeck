@@ -1,0 +1,967 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.rundeck.plugin.scm.git
+
+import com.dtolabs.rundeck.core.storage.StorageTreeImpl
+import com.dtolabs.rundeck.plugins.scm.ImportResult
+import com.dtolabs.rundeck.plugins.scm.ImportSynchState
+import com.dtolabs.rundeck.plugins.scm.JobChangeEvent
+import com.dtolabs.rundeck.plugins.scm.JobImporter
+import com.dtolabs.rundeck.plugins.scm.JobScmReference
+import com.dtolabs.rundeck.plugins.scm.JobSerializer
+import com.dtolabs.rundeck.plugins.scm.ScmOperationContext
+import com.dtolabs.rundeck.plugins.scm.ScmPluginException
+import com.dtolabs.rundeck.plugins.scm.ScmUserInfo
+import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.merge.MergeStrategy
+import org.eclipse.jgit.util.FileUtils
+import org.eclipse.jgit.util.SystemReader
+import org.rundeck.plugin.scm.git.config.Common
+import org.rundeck.plugin.scm.git.config.Config
+import org.rundeck.plugin.scm.git.config.Import
+import spock.lang.Specification
+
+/**
+ * Created by greg on 9/19/16.
+ */
+class GitImportPluginSpec extends Specification {
+    File tempdir
+
+    def setup() {
+        tempdir = File.createTempFile("GitImportPluginSpec", "-test")
+        tempdir.delete()
+        SystemReader.setInstance(new TestSystemReader())
+    }
+
+    def cleanup() {
+        if (tempdir.exists()) {
+            FileUtils.delete(tempdir, FileUtils.RECURSIVE | FileUtils.IGNORE_ERRORS)
+        }
+    }
+
+    static Import createTestConfig(File gitdir, File origindir, Map<String, String> override = [:]) {
+        Map<String, String> input = [
+                dir                  : gitdir.absolutePath,
+                pathTemplate         : '${job.group}${job.name}-${job.id}.xml',
+                branch               : 'master',
+                format               : 'xml',
+                strictHostKeyChecking: 'yes',
+                url                  : origindir.absolutePath,
+                useFilePattern       : 'true',
+                filePattern          : '.*\\.xml',
+                importUuidBehavior   : 'preserve'
+
+        ] + override
+        def config = Config.create(Import, input)
+        config
+    }
+
+    def "get job status unimported job"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [:]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+        }
+
+        when:
+        def status = plugin.getJobStatus(job, null)
+
+
+        then:
+        status.synchState == ImportSynchState.IMPORT_NEEDED
+    }
+
+    def "get job status clean job"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        when:
+        def status = plugin.getJobStatus(job, null)
+
+
+        then:
+        status.synchState == ImportSynchState.CLEAN
+    }
+
+    def "Check if the user has permission to the ssh or password configured for the integration"() {
+        given:
+        def scmUserInfo = Mock(ScmUserInfo)
+        def storageTree = Mock(StorageTreeImpl){
+            it.hasPath(_) >> userAccess
+        }
+        def scmOperationContext = Mock(ScmOperationContext){
+            getStorageTree() >> storageTree
+            getUserInfo() >> scmUserInfo
+        }
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        def common = Mock(Common){
+            getSshPrivateKeyPath() >> 'keys/test'
+            getGitPasswordPath() >> 'keys/password'
+        }
+        plugin.setCommonConfig(common)
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        when:
+        hasAccess = plugin.userHasAccessToKeyOrPassword(scmOperationContext)
+
+        then:
+        hasAccess !== null
+
+        where:
+        userAccess | hasAccess
+        true       | true
+        false      | false
+    }
+
+    /**
+     * Repo
+     */
+    def "get job status previously imported different new repo"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: 'xyzwrong', url: wrongurl]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+        }
+
+        when:
+        def status = plugin.getJobStatus(job, null)
+
+
+        then:
+        status.synchState == ImportSynchState.IMPORT_NEEDED
+
+        where:
+        wrongurl  | _
+        'invalid' | _
+        null      | _
+
+    }
+
+    def "get status on deleted jobs"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        plugin.jobStateMap['0001'] = ['synch':'DELETE_NEEDED','path':'job/xy-0001.xml']
+
+        when:
+        def ret = plugin.getTrackedItemsForAction(actionId)
+
+        then:
+        ret
+        ret.size()==1
+
+        where:
+        actionId      | _
+        'import-all'  | _
+        'import-jobs' | _
+    }
+
+    def "get tracked items should assignee jobId"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        plugin.jobStateMap['0001'] = ['synch':'DELETE_NEEDED','path':'job/xy-0001.xml']
+
+        when:
+        def ret = plugin.getTrackedItemsForAction("import-jobs")
+
+        then:
+        ret
+        ret.size()==1
+        ret[0].jobId=='0001'
+    }
+
+    /**
+     * Verifies that callers hold the synchronized-map monitor while creating an iterable view.
+     */
+    def "get tracked items safely snapshots job state before iteration"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        })
+        plugin.jobStateMap = new MonitorCheckedMap<String, Map>()
+        plugin.jobStateMap['0001'] = ['synch': 'DELETE_NEEDED', 'path': 'job/xy-0001.xml']
+
+        when:
+        def ret = plugin.getTrackedItemsForAction('import-jobs')
+
+        then:
+        ret*.jobId == ['0001']
+    }
+
+    /**
+     * Verifies that status calculation reuses one stable job-state value during loader updates.
+     */
+    def "get status safely reuses snapshot when live job state disappears"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'test')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        })
+        plugin.jobStateMap = new DisappearingEntryMap<String, Map>()
+        plugin.jobStateMap['123'] = ['synch': ImportSynchState.CLEAN, 'path': 'job1-123.xml']
+        plugin.importTracker.trackedJobIds['job1-123.xml'] = '123'
+
+        when:
+        def status = plugin.getStatusInternal(Mock(ScmOperationContext), false)
+
+        then:
+        status.importNeeded == 0
+    }
+
+    def "job deletion removes cached state and tracking"() {
+        given:
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+        Git git = GitExportPluginSpec.createGit(origindir)
+        git.close()
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> 'GitImportPluginSpec'
+        })
+        def job = Stub(JobScmReference) {
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getScmImportMetadata() >> [commitId: 'abc']
+        }
+        plugin.jobStateMap['123'] = [
+                synch: ImportSynchState.DELETE_NEEDED,
+                path: 'job1-123.xml'
+        ]
+        plugin.importTracker.trackJobAtPath(job, 'job1-123.xml')
+        JobChangeEvent event = Stub(JobChangeEvent) {
+            getEventType() >> JobChangeEvent.JobChangeEventType.DELETE
+            getOriginalJobReference() >> job
+        }
+
+        when:
+        plugin.jobChanged(event, job)
+
+        then:
+        !plugin.jobStateMap.containsKey('123')
+        plugin.importTracker.trackedPaths().empty
+        plugin.importTracker.trackedPath('123') == null
+    }
+
+    def "local reconciliation removes stale jobs and preserves current jobs"() {
+        given:
+        def plugin = new GitImportPlugin(Mock(Import), [])
+        def currentJob = Stub(JobScmReference) {
+            getId() >> 'current-job'
+            getScmImportMetadata() >> [commitId: 'current-commit']
+        }
+        def deletedJob = Stub(JobScmReference) {
+            getId() >> 'deleted-job'
+            getScmImportMetadata() >> [commitId: 'deleted-commit']
+        }
+        plugin.jobStateMap['current-job'] = [synch: ImportSynchState.CLEAN, path: 'current.xml']
+        plugin.jobStateMap['deleted-job'] = [synch: ImportSynchState.DELETE_NEEDED, path: 'deleted.xml']
+        plugin.importTracker.trackJobAtPath(currentJob, 'current.xml')
+        plugin.importTracker.trackJobAtPath(deletedJob, 'deleted.xml')
+
+        when:
+        plugin.reconcileJobState(['current-job'] as Set<String>)
+
+        then:
+        plugin.jobStateMap.keySet() == ['current-job'] as Set
+        plugin.importTracker.trackedPaths() == ['current.xml'] as Set
+        plugin.importTracker.trackedPath('current-job') == 'current.xml'
+        plugin.importTracker.trackedPath('deleted-job') == null
+    }
+
+    def "perform pull on clean state withouth npe"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+
+        git.close()
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+
+        JobImporter importer = Mock(JobImporter)
+        List<String> selectedPaths = []
+        Map<String, String> input = [:]
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+
+        when:
+        def ret = plugin.scmImport(context, actionId,
+         importer,
+        selectedPaths,
+        input)
+
+        then:
+        ret != null
+        ret.success
+
+        where:
+        actionId      | _
+        'remote-pull' | _
+    }
+
+    def "getStatusInternal no action needed"(){
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+        plugin.importTracker = Mock(ImportTracker){
+            trackedPaths() >> ['job1-1234.xml']
+            getTrackedCommits() >> ['job1-1234.xml' : '123123']
+            getTrackedJobIds() >> ['job1-12345.xml':'1234']
+        }
+
+        when:
+        def result = plugin.getStatusInternal(context, false)
+        then:
+        result.state == ImportSynchState.CLEAN
+    }
+
+    def "getStatusInternal import needed"(){
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+        plugin.importTracker = Mock(ImportTracker){
+            trackedPaths() >> ['job1-123.xml']
+            getTrackedCommits() >> ['job1-123.xml' : '123123']
+        }
+        plugin.jobStateMap["123"] = [
+                "synch": ImportSynchState.IMPORT_NEEDED,
+                "path": "job1-123.xml"
+        ]
+
+        when:
+        def result = plugin.getStatusInternal(context, false)
+        then:
+        result.state == ImportSynchState.IMPORT_NEEDED
+    }
+
+    def "getStatusInternal delete needed"(){
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+        plugin.importTracker = Mock(ImportTracker){
+            trackedPaths() >> ['job1-1231.xml']
+            getTrackedCommits() >> ['job1-123.xml' : '123123']
+            getTrackedJobIds() >> ['123123':'123123.xml']
+        }
+        when:
+        def result = plugin.getStatusInternal(context, false)
+        then:
+        result.state == ImportSynchState.DELETE_NEEDED
+    }
+
+    def "getStatusInternal import needed for job mod"(){
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-1234.xml', 'blah')
+        git.close()
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+        plugin.jobStateMap['1234'] = ['synch':'MODIFIED','path':'job1-1234.xml']
+        plugin.importTracker = Mock(ImportTracker){
+            trackedPaths() >> ['job1-1234.xml']
+            getTrackedCommits() >> ['job1-1234.xml' : '123123']
+            getTrackedJobIds() >> ['job1-1234.xml':'1234']
+        }
+        plugin.jobStateMap["123123"] = [
+                "synch": ImportSynchState.IMPORT_NEEDED,
+                "path": "job1-1234.xml"
+        ]
+        when:
+        def result = plugin.getStatusInternal(context, false)
+        then:
+        result.message == '1 file(s) need to be imported'
+        result.importNeeded == 1
+        result.state == ImportSynchState.IMPORT_NEEDED
+    }
+
+    def "perform import renamed job"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        def actionId = "import-jobs"
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'test/job-123.xml', 'blah')
+        git.close()
+
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+
+        JobImporter importer = Mock(JobImporter)
+        List<String> selectedPaths = ["test/job-123.xml"]
+        List<String> deletePaths = []
+
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> ["commitId":commit.name]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+        }
+
+        def renamedTracker = new RenameTracker<>()
+        renamedTracker.trackItem('job-123.xml','test/job-123.xml')
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+        plugin.importTracker = Mock(ImportTracker){
+            trackedPaths() >> ['test/job-123.xml']
+            getTrackedCommits() >> ['test/job-123.xml' : '123']
+            getTrackedJobIds() >> ['test/job-123.xml':'123']
+            getRenamedTrackedItems() >>renamedTracker
+        }
+
+        when:
+        def ret = plugin.scmImport(context, actionId,
+                importer,
+                selectedPaths,
+                deletePaths,
+                [:]
+        )
+
+        then:
+
+        0*importer.deleteJob(projectName, "123")>>Mock(ImportResult){
+            isSuccessful()>>true
+        }
+
+        then:
+        1*importer.importFromStream(_,_,_,_,_)>>Mock(ImportResult){
+            isSuccessful()>>true
+            getJob()>>job
+        }
+
+        then:
+        plugin.jobStateMap["123"]!=null
+        plugin.jobStateMap["123"]["synch"]!= ImportSynchState.CLEAN
+        ret != null
+        ret.success
+    }
+
+    def "get job status IMPORT_NEEDED when job is renamed"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        def commit2 = GitExportPluginSpec.addCommitFile(origindir, git, 'job2-234.xml', 'blah 222')
+        def commit3 = GitExportPluginSpec.addCommitFile(origindir, git, 'job2-234.xml', 'blah 333')
+        def commit4 = GitExportPluginSpec.renameCommitFile(origindir, git, 'job1-123.xml', 'job1-rename-123.xml', 'blah 333')
+        def commit5 = GitExportPluginSpec.addCommitFile(origindir, git, 'job2-234.xml', 'blah 4444')
+
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        when:
+        def status = plugin.getJobStatus(job, null)
+
+
+        then:
+        status.synchState == ImportSynchState.IMPORT_NEEDED
+        plugin.importTracker.renamedTrackedItems !=null
+        plugin.importTracker.renamedTrackedItems.wasRenamed('job1-123.xml')
+        plugin.importTracker.renamedTrackedItems.originalValue('job1-rename-123.xml') == 'job1-123.xml'
+    }
+
+    def "getStatusInternal import needed job renamed"(){
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        def commit4 = GitExportPluginSpec.renameCommitFile(origindir, git, 'job1-123.xml', 'job1-rename-123.xml', 'blah 333')
+
+        git.close()
+        ScmOperationContext context = Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(context)
+
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        plugin.getJobStatus(job, null)
+
+        when:
+        def result = plugin.getStatusInternal(context, false)
+        then:
+        result.state == ImportSynchState.IMPORT_NEEDED
+        result.message == "1 file(s) were renamed"
+    }
+
+    def "get job status renamed job"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        def commit4 = GitExportPluginSpec.renameCommitFile(origindir, git, 'job1-123.xml', 'job1-rename-123.xml', 'blah 333')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        when:
+        def status = plugin.getJobStatus(job, null)
+
+        then:
+        status.synchState == ImportSynchState.IMPORT_NEEDED
+        status.jobRenamed != null
+        status.jobRenamed.renamedPath == "job1-rename-123.xml"
+    }
+
+    def "get diff status renamed job"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        def commit4 = GitExportPluginSpec.renameCommitFile(origindir, git, 'job1-123.xml', 'job1-rename-123.xml', 'blah 333')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        }
+        )
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        job.getJobSerializer() >> Mock(JobSerializer) {
+            1 * serialize(_, !null, _, _) >> { args ->
+                args[1].write('data'.bytes)
+            }
+        }
+
+        plugin.getJobStatus(job, null)
+
+        when:
+        def status = plugin.getFileDiff(job, null)
+
+        then:
+        status != null
+        status.incomingCommit != null
+        status.content !=null
+    }
+
+    def "get status fetch fails throws ScmPluginException"() {
+        given:
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir, [fetchAutomatically: 'true'])
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> 'test'
+        })
+
+        // Delete origin to make fetch fail
+        FileUtils.delete(origindir, FileUtils.RECURSIVE | FileUtils.IGNORE_ERRORS)
+
+        when:
+        plugin.getStatus(Mock(ScmOperationContext))
+
+        then:
+        // A fetch failure signals the remote is unreachable — throw so the caller can surface a
+        // clear "Git server unavailable" message instead of a misleading local-state status.
+        ScmPluginException e = thrown()
+        e.message.contains('Fetch from the repository failed')
+    }
+
+    def "get status succeeds with a configured fetch timeout"() {
+        // A custom fetchTimeout must be plumbed through to the JGit fetch command
+        // (BaseGitPlugin#fetchFromRemote, RUN-4525) without breaking a normal,
+        // fast local fetch against a reachable remote.
+        given:
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir, [fetchAutomatically: 'true', fetchTimeout: '5'])
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        git.close()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> 'test'
+        })
+
+        when:
+        def status = plugin.getStatus(Mock(ScmOperationContext))
+
+        then:
+        status != null
+    }
+
+    /**
+     * Test map that simulates a loader removing an entry between two live-map reads.
+     */
+    private static class DisappearingEntryMap<K, V> extends LinkedHashMap<K, V> {
+        private int readCount
+
+        @Override
+        V get(Object key) {
+            readCount++
+            if (readCount > 1) {
+                remove(key)
+                return null
+            }
+            super.get(key)
+        }
+    }
+
+    /**
+     * Test map that rejects iteration unless its monitor is held, matching the contract of
+     * {@link Collections#synchronizedMap(Map)}.
+     */
+    private static class MonitorCheckedMap<K, V> extends LinkedHashMap<K, V> {
+        @Override
+        Set<Map.Entry<K, V>> entrySet() {
+            if (!Thread.holdsLock(this)) {
+                throw new ConcurrentModificationException('Iteration requires the map monitor')
+            }
+            super.entrySet()
+        }
+    }
+
+    def "lastCommitForPath reuses the path index while HEAD is unchanged and rebuilds after a commit"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def commit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'blah')
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job2-456.xml', 'blah2')
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        })
+        def job = Mock(JobScmReference) {
+            getScmImportMetadata() >> [commitId: commit.name, url: origindir.absolutePath]
+            getProject() >> projectName
+            getId() >> '123'
+            getJobName() >> 'job1'
+            getGroupPath() >> ''
+            getJobAndGroup() >> 'job1'
+            getImportVersion() >> 12L
+            getVersion() >> 12L
+        }
+
+        when:
+        def status1 = plugin.getJobStatus(job, null)
+        def memo1 = plugin.lastCommitMemo
+        def status2 = plugin.getJobStatus(job, null)
+        def memo2 = plugin.lastCommitMemo
+
+        then:
+        status1.synchState == ImportSynchState.CLEAN
+        status2.synchState == ImportSynchState.CLEAN
+        memo1.is(memo2)
+        memo1.commits.keySet() == ['job1-123.xml', 'job2-456.xml'] as Set
+
+        when: "the job file changes upstream and the local clone pulls it"
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'changed')
+        plugin.git.pull().call()
+        def status3 = plugin.getJobStatus(job, null)
+
+        then:
+        !memo1.is(plugin.lastCommitMemo)
+        status3.synchState == ImportSynchState.IMPORT_NEEDED
+
+        cleanup:
+        git.close()
+    }
+
+    def "lastCommitForPath resolves a merge that keeps one side to the same commit as the exact log"() {
+        given:
+        def projectName = 'GitImportPluginSpec'
+        def gitdir = new File(tempdir, 'scm')
+        def origindir = new File(tempdir, 'origin')
+        Import config = createTestConfig(gitdir, origindir)
+
+        Git git = GitExportPluginSpec.createGit(origindir)
+        def repo = git.repository
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'v1')
+        git.branchCreate().setName('dev').call()
+        // master changes first, dev later; the merge keeps master's version
+        def masterCommit = GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'v3')
+        git.checkout().setName('dev').call()
+        GitExportPluginSpec.addCommitFile(origindir, git, 'job1-123.xml', 'v2')
+        git.checkout().setName('master').call()
+        git.merge().include(repo.resolve('dev')).setStrategy(MergeStrategy.OURS).call()
+
+        def plugin = new GitImportPlugin(config, [])
+        plugin.initialize(Mock(ScmOperationContext) {
+            getFrameworkProject() >> projectName
+        })
+
+        when:
+        def result = plugin.lastCommitForPath('job1-123.xml')
+        def head = GitUtil.getHead(plugin.repo)
+
+        then:
+        result == GitUtil.lastCommitForPath(plugin.repo, plugin.git, 'job1-123.xml')
+        result.name == masterCommit.name
+        plugin.lastCommitMemo.head == head
+
+        cleanup:
+        git.close()
+    }
+}

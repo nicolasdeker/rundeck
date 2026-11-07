@@ -1,0 +1,661 @@
+<template>
+  <div class>
+    <div v-if="title" class>
+      <h3 class>
+        {{ title }}
+        <a
+          v-if="mode !== 'edit'"
+          class="btn btn-primary btn-sm"
+          @click="mode = 'edit'"
+        >
+          <i class="glyphicon glyphicon-pencil"></i>
+          {{ editButtonText || $t("Edit") }}
+        </a>
+      </h3>
+    </div>
+
+    <div class>
+      <div v-if="errors.length > 0" class="alert alert-danger">
+        <ul>
+          <li v-for="(error, index) in errors" :key="'error_' + index">
+            {{ error }}
+          </li>
+        </ul>
+      </div>
+      <div>
+        <a
+          v-if="mode !== 'edit'"
+          class="btn btn-primary btn-sm"
+          @click="mode = 'edit'"
+        >
+          <i class="glyphicon glyphicon-pencil"></i>
+          {{ editButtonText || $t("Edit") }}
+        </a>
+        <div v-if="help" class="help-block">{{ help }}</div>
+
+        <div class="list-group" data-testid="node-sources-list">
+          <div
+            v-for="(plugin, index) in pluginConfigs"
+            :key="'pluginStorageAccessplugin_' + index"
+            class="list-group-item"
+            :class="{ disabled: isPluginDisabled(plugin) }"
+            :data-testid="'node-source-item-' + index"
+          >
+            <plugin-config
+              :key="plugin.entry.type + 'title/' + index"
+              :mode="'title'"
+              :service-name="serviceName"
+              :provider="plugin.entry.type"
+              :show-description="true"
+              :use-runner-selector="true"
+              :event-bus="eventBus"
+              @has-key-storage-access="hasKeyStorageAccess"
+            >
+              <template #titlePrefix
+                ><span>{{ index + 1 }}.</span></template
+              >
+            </plugin-config>
+
+            <div v-if="additionalProps && additionalProps.props.length > 0">
+              <plugin-config
+                :key="'additional_config_' + index"
+                v-model="plugin.extra"
+                :mode="
+                  editFocus === index
+                    ? plugin.create
+                      ? 'create'
+                      : 'edit'
+                    : 'show'
+                "
+                :config="plugin.extra.config"
+                :show-title="false"
+                :show-description="false"
+                :plugin-config="additionalProps"
+                :use-runner-selector="true"
+                :event-bus="eventBus"
+              ></plugin-config>
+            </div>
+            <plugin-config
+              :key="plugin.entry.type + '_config/' + index"
+              v-model="plugin.entry"
+              :mode="
+                editFocus === index
+                  ? plugin.create
+                    ? 'create'
+                    : 'edit'
+                  : 'show'
+              "
+              :service-name="serviceName"
+              :provider="plugin.entry.type"
+              :config="plugin.entry.config"
+              :show-title="false"
+              :show-description="false"
+              :validation="plugin.validation"
+              :validation-warning-text="$t('Validation errors')"
+              :use-runner-selector="true"
+              :event-bus="eventBus"
+              @update:model-value="configUpdated"
+            >
+              <template #extraProperties>
+                <div class="row">
+                  <ui-socket
+                    section="resources-extra-attributes"
+                    location="plugin-config"
+                    :event-bus="eventBus"
+                    :socket-data="{
+                      type: plugin.entry.type,
+                      index: index,
+                      config: plugin.extra.config,
+                      mode:
+                        editFocus === index
+                          ? plugin.create
+                            ? 'create'
+                            : 'edit'
+                          : 'show',
+                    }"
+                  />
+                </div>
+              </template>
+
+              <template v-if="mode === 'edit'" #extra>
+                <div class="row">
+                  <div class="col-xs-12 col-sm-12">
+                    <span v-if="editFocus === -1">
+                      <a
+                        :key="'edit'"
+                        class="btn btn-default btn-xs"
+                        @click="editFocus = index"
+                        >{{ $t("Edit") }}</a
+                      >
+                    </span>
+                    <span v-else-if="editFocus === index">
+                      <a
+                        :key="'save'"
+                        class="btn btn-cta btn-xs"
+                        @click="savePlugin(plugin)"
+                        >{{ $t("Save") }}</a
+                      >
+                      <a
+                        class="btn btn-default btn-xs"
+                        @click="editFocus = -1"
+                        >{{ $t("Cancel") }}</a
+                      >
+                    </span>
+                    <span v-if="plugin.modified" class="small text-info">
+                      <i class="fas fa-pen-square"></i>
+                      Modified
+                    </span>
+                    <div
+                      v-if="editFocus === -1 || editFocus === index"
+                      class="btn-group pull-right"
+                    >
+                      <btn
+                        class="btn-xs btn-danger"
+                        :disabled="editFocus !== -1 && editFocus !== index"
+                        @click="removePlugin(plugin)"
+                      >
+                        {{ $t("Delete") }}
+                        <i class="fas fa-minus"></i>
+                      </btn>
+                      <btn
+                        class="btn-xs"
+                        :disabled="editFocus !== -1 || index == 0"
+                        @click="movePlugin(index, plugin, -1)"
+                      >
+                        <i class="fas fa-arrow-up"></i>
+                      </btn>
+                      <btn
+                        class="btn-xs"
+                        :disabled="
+                          editFocus !== -1 || index >= pluginConfigs.length - 1
+                        "
+                        @click="movePlugin(index, plugin, 1)"
+                      >
+                        <i class="fas fa-arrow-down"></i>
+                      </btn>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </plugin-config>
+            <slot
+              name="item-extra"
+              :plugin="plugin"
+              :edit-focus="editFocus === index"
+              :mode="mode"
+            ></slot>
+          </div>
+          <div
+            v-if="pluginConfigs.length < 1 && showEmpty"
+            class="list-group-item"
+          >
+            <slot name="empty-message">
+              <span class="text-muted">
+                {{
+                  $t("empty.message.default", [
+                    (pluginLabels && pluginLabels.addButton) || serviceName,
+                  ])
+                }}
+              </span>
+            </slot>
+          </div>
+        </div>
+        <div v-if="mode === 'edit' && editFocus === -1" class="card-footer">
+          <btn
+            type="primary"
+            data-test-id="project-plugin-config-add-modal-open-button"
+            @click="modalAddOpen = true"
+          >
+            {{
+              (pluginLabels && pluginLabels.addButton) ||
+              addButtonText ||
+              serviceName
+            }}
+            <i class="fas fa-plus"></i>
+          </btn>
+
+          <modal
+            id="add-new-modal"
+            ref="modal"
+            v-model="modalAddOpen"
+            :title="
+              (pluginLabels && pluginLabels.addButton) ||
+              addButtonText ||
+              serviceName
+            "
+            size="lg"
+            append-to-body
+          >
+            <div class="list-group" data-testid="provider-picker">
+              <a
+                v-for="plugin in pluginProviders"
+                :key="plugin.name"
+                href="#"
+                class="list-group-item"
+                :data-testid="`provider-${String(plugin.name)
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, '-')}`"
+                @click="addPlugin(plugin.name)"
+              >
+                <plugin-info
+                  :detail="plugin"
+                  :show-description="true"
+                  :show-extended="false"
+                  description-css="help-block"
+                >
+                  <i class="glyphicon glyphicon-plus text-muted"></i>
+                </plugin-info>
+              </a>
+            </div>
+            <template #footer>
+              <div>
+                <btn @click="modalAddOpen = false">{{ $t("Cancel") }}</btn>
+              </div>
+            </template>
+          </modal>
+        </div>
+        <div v-if="mode === 'edit' && editFocus === -1" class="card-footer">
+          <btn v-if="modeToggle" type="default" @click="cancelAction">{{
+            $t("Cancel")
+          }}</btn>
+          <btn v-else-if="modified" type="default" @click="cancelAction">{{
+            $t("Revert")
+          }}</btn>
+          <a
+            v-if="modified"
+            class="btn btn-cta"
+            href="#"
+            @click="savePlugins"
+            >{{ $t("Save") }}</a
+          >
+          <span v-if="modified" class="text-warning"
+            >Changes have not been saved.</span
+          >
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script lang="ts">
+import axios from "axios";
+import { defineComponent, PropType } from "vue";
+import { Notification } from "uiv";
+import { EventBus, getRundeckContext, RundeckContext } from "../../../library";
+import Expandable from "../../../library/components/utils/Expandable.vue";
+import PluginInfo from "../../../library/components/plugins/PluginInfo.vue";
+import PluginConfig from "../../../library/components/plugins/pluginConfig.vue";
+import pluginService from "../../../library/modules/pluginService";
+import PluginValidation from "../../../library/interfaces/PluginValidation";
+import UiSocket from "../../../library/components/utils/UiSocket.vue";
+import { api } from "@/library/services/api";
+
+interface PluginConf {
+  readonly type: string;
+  config: any;
+}
+interface ProjectPluginConfigEntry {
+  entry: PluginConf;
+  extra: PluginConf;
+  validation: PluginValidation;
+  create?: boolean;
+  origIndex?: number;
+  modified: boolean;
+}
+
+interface PluginDef {
+  index: number;
+  tyoe: string;
+}
+interface PluginExtraConfig {
+  plugin: PluginDef;
+  extraConfig: any;
+}
+export default defineComponent({
+  name: "ProjectPluginConfig",
+  components: {
+    PluginInfo,
+    PluginConfig,
+    Expandable,
+    UiSocket,
+  },
+  props: {
+    editMode: {
+      type: Boolean,
+      default: false,
+    },
+    modeToggle: {
+      type: Boolean,
+      default: true,
+    },
+    showEmpty: {
+      type: Boolean,
+      default: true,
+    },
+    serviceName: String,
+    addButtonText: String,
+    title: {
+      required: false,
+      type: String,
+    },
+    configPrefix: String,
+    additionalProps: { required: false, type: Object },
+    help: { required: false, type: String },
+    editButtonText: { required: false, type: String },
+    eventBus: { type: Object as PropType<typeof EventBus>, required: false },
+  },
+  emits: [
+    "saved",
+    "reset",
+    "modified",
+    "plugin-configs-data",
+    "plugin-storage-access",
+  ],
+  data() {
+    return {
+      loaded: false,
+      modified: false,
+      mode: this.editMode ? "edit" : "show",
+      project: "",
+      rdBase: "",
+      cancelUrl: "",
+      pluginConfigs: [] as ProjectPluginConfigEntry[],
+      removedPluginConfigs: [] as ProjectPluginConfigEntry[],
+      configOrig: [] as any[],
+      rundeckContext: {} as RundeckContext,
+      modalAddOpen: false,
+      pluginProviders: [] as any[],
+      pluginLabels: {} as any,
+      editFocus: -1,
+      errors: [] as string[],
+      pluginStorageAccess: [] as any[],
+    };
+  },
+  mounted() {
+    this.rundeckContext = getRundeckContext();
+    this.notifyPluginConfigs();
+    if (
+      window._rundeck &&
+      window._rundeck.rdBase &&
+      window._rundeck.projectName
+    ) {
+      this.rdBase = window._rundeck.rdBase;
+      this.project = window._rundeck.projectName;
+
+      this.loadProjectPluginConfig(
+        window._rundeck.projectName,
+        this.configPrefix,
+        this.serviceName,
+      )
+        .then((pluginConfigs) => {
+          this.configOrig = pluginConfigs;
+          //copy
+          this.pluginConfigs = pluginConfigs.map((val: any, index: number) =>
+            this.createConfigEntry(val, index),
+          );
+          this.loaded = true;
+          this.notifyPluginConfigs();
+        })
+        .catch((error) => console.error(error));
+
+      pluginService
+        .getPluginProvidersForService(this.serviceName)
+        .then((data) => {
+          if (data.service) {
+            this.pluginProviders = data.descriptions;
+            this.pluginLabels = data.labels;
+          }
+        })
+        .catch((error) => console.error(error));
+    }
+
+    this.eventBus?.on("resource-model-extra-config", this.setExtraConfig);
+  },
+  methods: {
+    notifyError(msg: string) {
+      Notification.notify({
+        type: "danger",
+        title: "An Error Occurred",
+        content: msg,
+        duration: 0,
+      });
+    },
+
+    notifySuccess(title: string, msg: string) {
+      Notification.notify({
+        type: "success",
+        title: title,
+        content: msg,
+        duration: 5000,
+      });
+    },
+    createConfigEntry(entry: any, origIndex: number): ProjectPluginConfigEntry {
+      return {
+        extra: { config: Object.assign({}, entry.extra) },
+        entry: { type: entry.type, config: Object.assign({}, entry.config) },
+        origIndex: origIndex,
+      } as ProjectPluginConfigEntry;
+    },
+    isPluginDisabled(plugin: ProjectPluginConfigEntry): boolean {
+      const disabled = plugin?.entry?.config?.disabled;
+      return disabled === true || disabled === "true";
+    },
+
+    serializeConfigEntry(entry: ProjectPluginConfigEntry): any {
+      return {
+        extra: Object.assign({}, entry.extra.config),
+        type: entry.entry.type,
+        config: Object.assign({}, entry.entry.config),
+        origIndex: entry.origIndex,
+      };
+    },
+    addPlugin(provider: string) {
+      this.modalAddOpen = false;
+      this.$nextTick(() => {
+        this.pluginConfigs.push({
+          entry: { type: provider, config: {} },
+          extra: { config: {} },
+          create: true,
+        } as ProjectPluginConfigEntry);
+        this.setFocus(this.pluginConfigs.length - 1);
+      });
+    },
+    setFocus(focus: number) {
+      this.editFocus = focus;
+    },
+    async savePlugin(plugin: ProjectPluginConfigEntry) {
+      //validate
+      const validation: PluginValidation =
+        await pluginService.validatePluginConfig(
+          this.serviceName,
+          plugin.entry.type,
+          plugin.entry.config,
+        );
+      if (!validation.valid) {
+        plugin.validation = validation;
+        return;
+      }
+      delete plugin.validation;
+      plugin.create = false;
+      plugin.modified = true;
+      this.setPluginConfigsModified();
+      this.setFocus(-1);
+    },
+    removePlugin(plugin: ProjectPluginConfigEntry) {
+      const found = this.pluginConfigs.indexOf(plugin);
+      this.pluginConfigs.splice(found, 1);
+      if (!plugin.create) {
+        this.setPluginConfigsModified();
+      }
+      if (plugin.create === undefined) this.removedPluginConfigs.push(plugin);
+
+      this.cleanStorageAccess(plugin);
+      this.setFocus(-1);
+    },
+
+    movePlugin(index: number, plugin: ProjectPluginConfigEntry, shift: number) {
+      const found = this.pluginConfigs.indexOf(plugin);
+      const item = this.pluginConfigs.splice(found, 1)[0];
+      const newindex = found + shift;
+      this.pluginConfigs.splice(newindex, 0, item);
+      this.setPluginConfigsModified();
+      this.editFocus = -1;
+    },
+    didSave() {
+      if (this.modeToggle) {
+        this.mode = "show";
+      }
+    },
+    async savePlugins() {
+      try {
+        const result = await this.saveProjectPluginConfig(
+          this.project,
+          this.configPrefix,
+          this.serviceName,
+          this.pluginConfigs,
+          this.removedPluginConfigs,
+        );
+        if (result.success) {
+          this.didSave();
+          this.notifySuccess("Success", "Configuration Saved");
+          this.configOrig = result.data.plugins;
+          //copy
+          this.pluginConfigs = this.configOrig.map(this.createConfigEntry);
+          this.pluginConfigsModifiedReset();
+          this.$emit("saved", result);
+        }
+      } catch (error) {
+        this.notifyError((error as Error).message);
+      }
+    },
+    async loadProjectPluginConfig(
+      project: string,
+      configPrefix: string,
+      serviceName: string,
+    ) {
+      const response = await axios({
+        method: "get",
+        headers: { "x-rundeck-ajax": true },
+        url: `${this.rdBase}/framework/projectPluginsAjax`,
+        params: {
+          project: `${window._rundeck.projectName}`,
+          configPrefix: this.configPrefix,
+          serviceName: this.serviceName,
+          format: "json",
+        },
+        withCredentials: true,
+      });
+      if (!response || response.status < 200 || response.status >= 300) {
+        throw new Error(
+          `Error reading project configuration for ${serviceName}: Response status: ${
+            response ? response.status : "None"
+          }`,
+        );
+      }
+      if (response.data && response.data.plugins) {
+        return response.data.plugins;
+      }
+    },
+    async saveProjectPluginConfig(
+      project: string,
+      configPrefix: string,
+      serviceName: string,
+      data: ProjectPluginConfigEntry[],
+      removedData: ProjectPluginConfigEntry[],
+    ) {
+      const url = `/project/${encodeURIComponent(project)}/plugins/save`;
+
+      // body must be { plugins, removedPlugins }
+      const body = {
+        plugins: data.map(this.serializeConfigEntry),
+        removedPlugins: (removedData || []).map(this.serializeConfigEntry),
+      };
+
+      // query params: ?serviceName=&configPrefix=
+      const resp = await api.post(url, body, {
+        params: { serviceName, configPrefix },
+      });
+
+      // keep the same return contract the caller expects
+      if (resp && resp.status >= 200 && resp.status < 300) {
+        return { success: true, data: resp.data };
+      }
+      if (resp && resp.status === 422) {
+        if (resp.data && Array.isArray(resp.data.errors)) {
+          this.errors = resp.data.errors;
+          if (resp.data.reports) {
+            const reports = resp.data.reports as { [key: string]: any };
+            this.pluginConfigs.forEach((plugin, index) => {
+              if (reports[`${index}`] !== undefined) {
+                plugin.validation = {
+                  valid: false,
+                  errors: reports[`${index}`],
+                };
+              }
+            });
+          }
+          return { success: false };
+        }
+      }
+      throw new Error(
+        `Error saving project configuration for ${serviceName}: Response status: ${resp ? resp.status : "None"}`,
+      );
+    },
+    cancelAction() {
+      this.pluginConfigs = this.configOrig.map(this.createConfigEntry);
+      this.pluginConfigsModifiedReset();
+      this.didSave();
+    },
+    setPluginConfigsModified() {
+      this.modified = true;
+      this.$emit("modified");
+      this.notifyPluginConfigs();
+    },
+    pluginConfigsModified() {
+      if (this.loaded) {
+        this.setPluginConfigsModified();
+      }
+    },
+    pluginConfigsModifiedReset() {
+      this.modified = false;
+      this.removedPluginConfigs = [];
+      this.$emit("reset");
+      this.notifyPluginConfigs();
+    },
+    notifyPluginConfigs() {
+      this.$emit("plugin-configs-data", this.pluginConfigs);
+    },
+    configUpdated() {
+      this.pluginConfigsModified();
+    },
+    hasKeyStorageAccess(provider: any) {
+      this.pluginStorageAccess.push(provider);
+      this.$emit("plugin-storage-access", [provider]);
+    },
+    cleanStorageAccess(plugin: any) {
+      const pluginStorageAccess = [] as any[];
+      this.pluginStorageAccess.forEach((pluginAccess: any) => {
+        if (pluginAccess !== plugin.entry.type) {
+          pluginStorageAccess.push(pluginAccess);
+        }
+      });
+
+      this.pluginStorageAccess = pluginStorageAccess;
+    },
+    setExtraConfig(pluginExtraConfig: PluginExtraConfig) {
+      //console.log("setRunnerConfig")
+      //console.log(pluginExtraConfig)
+      if (
+        pluginExtraConfig != null &&
+        this.pluginConfigs[pluginExtraConfig.plugin.index] != null
+      ) {
+        this.pluginConfigs[pluginExtraConfig.plugin.index].extra = {
+          config: pluginExtraConfig.extraConfig,
+        };
+      }
+    },
+  },
+});
+</script>
+
+<style></style>

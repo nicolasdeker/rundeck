@@ -1,0 +1,731 @@
+<!--
+  - Copyright 2018 Rundeck, Inc. (http://rundeck.com)
+  -
+  - Licensed under the Apache License, Version 2.0 (the "License");
+  - you may not use this file except in compliance with the License.
+  - You may obtain a copy of the License at
+  -
+  -     http://www.apache.org/licenses/LICENSE-2.0
+  -
+  - Unless required by applicable law or agreed to in writing, software
+  - distributed under the License is distributed on an "AS IS" BASIS,
+  - WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  - See the License for the specific language governing permissions and
+  - limitations under the License.
+  -->
+
+<template>
+  <div>
+    <span v-if="error && isTitleMode" class="text-warning">
+      {{ error }}
+    </span>
+    <pluginInfo
+      v-if="isTitleMode && !error"
+      :show-title="inputShowTitle"
+      :show-icon="inputShowIcon"
+      :show-description="inputShowDescription"
+      :detail="detail"
+    >
+      <slot name="titlePrefix"></slot>
+      <template #titleprefix>
+        <slot name="iconSuffix"></slot>
+      </template>
+      <template #suffix>
+        <slot name="titleSuffix"></slot>
+      </template>
+    </pluginInfo>
+
+    <div v-if="!isTitleMode" class="row">
+      <div
+        v-if="inputShowIcon || inputShowTitle || inputShowDescription"
+        class="col-xs-12 col-sm-12"
+      >
+        <slot
+          name="header"
+          :header="{
+            inputShowTitle,
+            inputShowIcon,
+            inputShowDescription,
+            detail,
+          }"
+        >
+          <p>
+            <pluginInfo
+              :show-title="inputShowTitle"
+              :show-icon="inputShowIcon"
+              :show-description="inputShowDescription"
+              :detail="detail"
+            >
+              <slot name="titlePrefix"></slot>
+              <template #titleprefix>
+                <slot name="iconSuffix"></slot>
+              </template>
+              <template #suffix>
+                <slot name="titleSuffix"></slot>
+              </template>
+            </pluginInfo>
+          </p>
+        </slot>
+      </div>
+      <div v-if="isShowMode && config" class="col-xs-12 col-sm-12">
+        <span v-if="validation && !validation.valid" class="text-warning">
+          <i class="fas fa-exclamation-circle"></i> {{ validationWarningText }}
+        </span>
+        <div class="col-sm-12">
+          <slot name="extraProperties"></slot>
+        </div>
+        <template v-for="prop in props" :key="prop.name">
+          <span
+            v-if="
+              (prop.type === 'Boolean' || config[prop.name]) &&
+              isPropInScope(prop) &&
+              !isPropHidden(prop)
+            "
+            class="configprop"
+            :data-testid="`configprop-${prop.name}`"
+          >
+            <plugin-prop-view
+              :prop="prop"
+              :value="config[prop.name]"
+              :allow-copy="allowCopy"
+            />
+          </span>
+        </template>
+      </div>
+      <div
+        v-else-if="isShowConfigForm && inputLoaded"
+        class="col-xs-12 col-sm-12 form-horizontal"
+      >
+        <div v-if="$slots.extraProperties" class="form-group">
+          <div class="col-sm-12">
+            <slot name="extraProperties"></slot>
+          </div>
+        </div>
+        <div v-for="(group, gindex) in groupedProperties" :key="group.name">
+          <div
+            v-for="(prop, pindex) in group.props"
+            v-if="!group.name"
+            :key="'g_' + gindex + '/' + prop.name"
+          >
+            <input
+              v-if="isPropHidden(prop)"
+              type="hidden"
+              :value="inputValues[prop.name]"
+              :data-hidden-field-identity="prop.options['hidden_identity']"
+              :data-testid="`prop-hidden-${prop.name}`"
+              class="_config_prop_display_hidden"
+            />
+
+            <div
+              v-else
+              :class="
+                'form-group ' +
+                (prop.required ? 'required' : '') +
+                (validation && validation.errors[prop.name] ? ' has-error' : '')
+              "
+              :data-prop-name="prop.name"
+              :data-testid="`prop-field-${prop.name}`"
+            >
+              <plugin-prop-edit
+                v-model="inputValues[prop.name]"
+                :prop="prop"
+                :event-bus="eventBus"
+                :input-values="inputValues"
+                :use-runner-selector="useRunnerSelector"
+                :context-autocomplete="inputContextAutocomplete"
+                :validation="validation"
+                :rkey="'g_' + gindex + '_' + rkey"
+                :read-only="readOnly"
+                :pindex="pindex"
+                :selector-data="propsComputedSelectorData"
+                :autocomplete-callback="autocompleteCallback"
+                :step-type="serviceName"
+                :plugin-type="modelValue.type"
+                :extra-autocomplete-vars="extraAutocompleteVars"
+                @plugin-props-mounted="notifyHandleAutoComplete"
+              />
+            </div>
+          </div>
+          <details
+            v-if="group.name"
+            :open="!group.secondary"
+            class="more-info details-reset"
+            :data-testid="`prop-section-${group.name}`"
+          >
+            <summary>
+              <span class="row">
+                <span :class="groupCss">
+                  {{ group.name !== "-" ? group.name : "More" }}
+                  <i
+                    class="more-indicator-verbiage more-info-icon glyphicon glyphicon-chevron-right"
+                  ></i>
+                  <i
+                    class="less-indicator-verbiage more-info-icon glyphicon glyphicon-chevron-down"
+                  ></i>
+                </span>
+              </span>
+            </summary>
+            <div
+              v-for="(prop, pindex) in group.props"
+              :key="'g_' + gindex + '/' + prop.name"
+            >
+              <input
+                v-if="isPropHidden(prop)"
+                type="hidden"
+                :value="inputValues[prop.name]"
+                :data-hidden-field-identity="prop.options['hidden_identity']"
+                :data-testid="`prop-hidden-${prop.name}`"
+                class="_config_prop_display_hidden"
+              />
+              <div
+                v-else
+                :class="
+                  'form-group ' +
+                  (prop.required ? 'required' : '') +
+                  (validation && validation.errors[prop.name]
+                    ? ' has-error'
+                    : '')
+                "
+                :data-prop-name="prop.name"
+                :data-testid="`prop-field-${prop.name}`"
+              >
+                <plugin-prop-edit
+                  v-model="inputValues[prop.name]"
+                  :prop="prop"
+                  :use-runner-selector="useRunnerSelector"
+                  :input-values="inputValues"
+                  :is-storage-prop="isStorageProperty(prop)"
+                  :validation="validation"
+                  :read-only="readOnly"
+                  :event-bus="eventBus"
+                  :rkey="'g_' + gindex + '_' + rkey"
+                  :pindex="pindex"
+                  :selector-data="propsComputedSelectorData"
+                  :step-type="serviceName"
+                  :plugin-type="modelValue.type"
+                  :autocomplete-callback="autocompleteCallback"
+                  :extra-autocomplete-vars="extraAutocompleteVars"
+                />
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+    <slot name="extra"></slot>
+  </div>
+</template>
+
+<script lang="ts">
+import { ContextVariable } from "../../../library/stores/contextVariables";
+import { getRundeckContext } from "../../rundeckService";
+import { defineComponent, type PropType } from "vue";
+import type { PluginConfig } from "../../../library/interfaces/PluginConfig";
+
+import PluginInfo from "./PluginInfo.vue";
+import PluginPropView from "./pluginPropView.vue";
+import PluginPropEdit from "./pluginPropEdit.vue";
+import { cleanConfigInput, convertArrayInput } from "../../modules/InputUtils";
+
+import { diff } from "deep-object-diff";
+
+import { getPluginProvidersForService } from "../../modules/pluginService";
+
+interface PropGroup {
+  name?: string;
+  secondary: boolean;
+  props: any[];
+}
+
+export default defineComponent({
+  name: "PluginConfig",
+  components: {
+    PluginInfo,
+    PluginPropView,
+    PluginPropEdit,
+  },
+  props: {
+    serviceName: { required: false },
+    provider: { required: false },
+    config: { required: false },
+    mode: { required: false },
+    showTitle: { required: false },
+    showIcon: { required: false },
+    showDescription: { required: false },
+    modelValue: { type: Object as PropType<PluginConfig>, required: false },
+    savedProps: { type: Array as PropType<string[]>, required: false },
+    pluginConfig: { required: false },
+    validation: { required: false },
+    readOnly: { required: false },
+    validationWarningText: { required: false },
+    scope: { required: false },
+    defaultScope: { required: false },
+    contextAutocomplete: { required: false },
+    autocompleteCallback: { required: false },
+    useRunnerSelector: { required: false },
+    eventBus: { required: false },
+    groupCss: {
+      required: false,
+      default: "col-sm-2 control-label h5 header-reset",
+    },
+    allowCopy: { type: Boolean, default: false },
+    extraAutocompleteVars: {
+      type: Array as PropType<ContextVariable[]>,
+      required: false,
+      default: () => [],
+    },
+  },
+  emits: [
+    "update:modelValue",
+    "change",
+    "handleAutocomplete",
+    "hasKeyStorageAccess",
+  ],
+  data() {
+    return {
+      props: [] as any[],
+      detail: {},
+      error: null as any | null,
+      isReadOnly: this.readOnly !== null ? this.readOnly : false,
+      propsComputedSelectorData: {} as any,
+      inputShowTitle: this.showTitle !== null ? this.showTitle : true,
+      inputShowIcon: this.showIcon !== null ? this.showIcon : true,
+      inputShowDescription:
+        this.showDescription !== null ? this.showDescription : true,
+      inputValues: {} as any,
+      inputSaved: {} as any,
+      inputSavedProps: (typeof this.savedProps !== "undefined"
+        ? this.savedProps
+        : ["type"]) as string[] | null,
+      rkey:
+        "r_" + Math.floor(Math.random() * Math.floor(1024)).toString(16) + "_",
+      groupExpand: {} as { [name: string]: boolean },
+      inputLoaded: false,
+      inputContextAutocomplete:
+        this.contextAutocomplete !== null ? this.contextAutocomplete : false,
+    };
+  },
+  computed: {
+    isEditMode(): boolean {
+      return this.mode === "edit";
+    },
+    isCreateMode(): boolean {
+      return this.mode === "create";
+    },
+    isShowConfigForm(): boolean {
+      return this.isEditMode || this.isCreateMode;
+    },
+    isShowMode(): boolean {
+      return this.mode === "show";
+    },
+    isTitleMode(): boolean {
+      return this.mode === "title";
+    },
+    visibility(): { [name: string]: boolean } {
+      const visibility: { [name: string]: boolean } = {};
+      this.props.forEach((prop: any) => {
+        visibility[prop.name] =
+          this.isPropVisible(prop) && this.isPropInScope(prop);
+        if (!visibility[prop.name]) {
+          delete visibility[prop.name];
+        }
+      });
+      return visibility;
+    },
+    visibleProps(): any[] {
+      const visibility = this.visibility;
+      return this.props.filter((prop) => {
+        return visibility[prop.name];
+      });
+    },
+    hasGroups(): boolean {
+      return this.props.find((prop) => {
+        return this.isGroupedProp(prop);
+      })
+        ? true
+        : false;
+    },
+    groupedProperties(): PropGroup[] {
+      const unnamed: PropGroup = { props: [], secondary: false };
+      const groups: PropGroup[] = [unnamed];
+      const named: { [name: string]: PropGroup } = {};
+
+      this.props.forEach((prop) => {
+        const name = prop.options && prop.options["groupName"];
+        const secondary = prop.options && prop.options["grouping"];
+        const inScope = this.isPropInScope(prop);
+        if (!inScope) {
+          return;
+        } else if (!name && !secondary) {
+          unnamed.props.push(prop);
+        } else {
+          const gname = name || "-";
+
+          if (!named[gname]) {
+            named[gname] = { props: [prop], secondary: secondary, name: gname };
+            groups.push(named[gname]);
+          } else {
+            named[gname].props.push(prop);
+            named[gname].secondary = named[gname].secondary || secondary;
+          }
+        }
+      });
+      return groups;
+    },
+    exportedValues(): any {
+      return convertArrayInput(cleanConfigInput(this.exportInputs()));
+    },
+    computedConfig(): any {
+      if (this.modelValue) {
+        return Object.assign({}, this.modelValue.config || {});
+      } else {
+        return null;
+      }
+    },
+  },
+  watch: {
+    inputValues: {
+      handler() {
+        if (this.isShowConfigForm) {
+          this.$emit(
+            "update:modelValue",
+            Object.assign({}, this.inputSaved, { config: this.exportedValues }),
+          );
+        }
+      },
+      deep: true,
+    },
+    computedConfig: {
+      handler(newValue, oldValue) {
+        if (Object.keys(diff(newValue, oldValue)).length > 0)
+          this.$emit("change");
+      },
+      deep: true,
+    },
+    mode: {
+      handler() {
+        this.loadForMode();
+      },
+    },
+    serviceName: {
+      handler() {
+        this.loadForMode();
+      },
+    },
+    provider: {
+      handler() {
+        this.loadForMode();
+      },
+    },
+  },
+  beforeMount() {
+    this.loadForMode();
+  },
+  methods: {
+    setVal(target: any, prop: any, val: any) {
+      target[prop] = val;
+    },
+    isStorageProperty(prop: any) {
+      return (
+        prop.options && prop.options["selectionAccessor"] === "STORAGE_PATH"
+      );
+    },
+    prepareInputs() {
+      if (!this.isShowConfigForm) {
+        return;
+      }
+      this.inputLoaded = false;
+
+      if (
+        typeof this.inputSavedProps !== "undefined" &&
+        this.inputSavedProps !== null &&
+        this.inputSavedProps.length > 0
+      ) {
+        for (const i of this.inputSavedProps) {
+          if (typeof this.inputSaved[i] === "undefined") {
+            this.inputSaved[i] = (this.modelValue as any)[i];
+          }
+        }
+      }
+
+      const config = this.modelValue?.config || {};
+
+      const modeCreate = this.isCreateMode;
+
+      // set up defaults and convert Options to array
+      this.props.forEach((prop: any) => {
+        if (config[prop.name]) {
+          this.inputValues[prop.name] = config[prop.name];
+        }
+        if (
+          modeCreate &&
+          !this.isStaticTextProp(prop) &&
+          !this.inputValues[prop.name] &&
+          prop.defaultValue
+        ) {
+          this.inputValues[prop.name] = prop.defaultValue;
+        }
+        if (
+          prop.type === "Options" &&
+          typeof this.inputValues[prop.name] === "string"
+        ) {
+          // convert to array
+          this.inputValues[prop.name] =
+            this.inputValues[prop.name].split(/, */);
+        } else if (
+          prop.type === "Options" &&
+          typeof this.inputValues[prop.name] === "undefined"
+        ) {
+          // convert to array
+          this.inputValues[prop.name] = [];
+        } else if (
+          prop.type === "Select" &&
+          typeof this.inputValues[prop.name] === "undefined"
+        ) {
+          // select box should use blank string to preselect disabled option
+          this.inputValues[prop.name] = "";
+        } else if (
+          prop.type === "Boolean" &&
+          typeof this.inputValues[prop.name] === "string"
+        ) {
+          // boolean should convert to boolean
+          this.inputValues[prop.name] = this.inputValues[prop.name] === "true";
+        }
+        if (
+          prop.options &&
+          (prop.options["groupName"] || prop.options["grouping"])
+        ) {
+          const gname = prop.options["groupName"] || "-";
+          this.groupExpand[gname] =
+            !prop.options["grouping"] ||
+            this.groupExpand[gname] ||
+            this.inputValues[prop.name]
+              ? true
+              : false;
+        }
+        this.computeSelectionAccessor(prop);
+      });
+      this.inputLoaded = true;
+    },
+    exportInputs() {
+      const values: { [index: string]: any } = {};
+      //convert true boolean to 'true'
+      this.props.forEach((prop: any) => {
+        if (this.isStaticTextProp(prop)) {
+          // STATIC_TEXT properties are display-only help text (e.g. workflow strategy
+          // "info" panels) and must never be persisted as real config data.
+          // See https://github.com/rundeck/rundeck/issues/10420
+          return;
+        }
+        if (prop.type === "Boolean") {
+          if (
+            this.inputValues[prop.name] === true ||
+            this.inputValues[prop.name] === "true"
+          ) {
+            values[prop.name] = "true";
+          } else if (
+            prop.defaultValue === "true" ||
+            this.inputValues[prop.name] === false
+          ) {
+            values[prop.name] = "false";
+          }
+        } else {
+          values[prop.name] = this.inputValues[prop.name];
+        }
+      });
+      return values;
+    },
+    computeSelectionAccessor(prop: any) {
+      if (prop.options && prop.options["selectionAccessor"] === "PLUGIN_TYPE") {
+        const serviceName = prop.options["selectionAdditional"];
+        getPluginProvidersForService(serviceName).then((data: any) => {
+          this.propsComputedSelectorData[prop.name] = data.descriptions.map(
+            (provider: any) => {
+              return {
+                key: provider.title,
+                value: provider.name,
+                description: provider.description,
+              };
+            },
+          );
+        });
+      }
+    },
+    loadPluginData(data: any) {
+      this.props = data.props;
+
+      this.props.forEach((prop: any) => {
+        if (data.dynamicProps && data.dynamicProps[prop.name]) {
+          const dynamic = data.dynamicProps[prop.name];
+          const isValueLabelMap =
+            typeof dynamic === "object" && !Array.isArray(dynamic);
+
+          // Remember the labels the descriptor itself supplied. loadPluginData
+          // can run more than once over the same prop object, so labels
+          // derived from an earlier map must not survive into a later
+          // list-shaped load, and the descriptor's own labels must not be lost.
+          if (prop.descriptorSelectLabels === undefined) {
+            prop.descriptorSelectLabels = prop.selectLabels || null;
+          }
+
+          // A map arrives as { value: label }, e.g. ServiceNow urgency
+          // { "1": "1 - High" }. Iterating an object with v-for yields the
+          // labels, so the rendered option value would become "1 - High"
+          // instead of "1"; keep the map as the labels pluginPropVal renders
+          // and expose only the keys as the allowed values.
+          prop.selectLabels = isValueLabelMap
+            ? dynamic
+            : prop.descriptorSelectLabels || undefined;
+          prop.allowed = isValueLabelMap ? Object.keys(dynamic) : dynamic;
+        }
+        if (data.dynamicDefaults && data.dynamicDefaults[prop.name]) {
+          prop.defaultValue = data.dynamicDefaults[prop.name];
+        }
+        if (prop.type === "AutogenInstanceId") {
+          if (this.isCreateMode && prop.defaultValue === "") {
+            prop.defaultValue = Math.random().toString(36).slice(2);
+          } else if (!this.isCreateMode) {
+            prop.defaultValue = "";
+          }
+          prop.staticTextDefaultValue = prop.defaultValue;
+        }
+      });
+
+      this.detail = data;
+      this.prepareInputs();
+
+      const storageAccess = this.hasKeyStorageAccess();
+      if (storageAccess) {
+        this.notifyHasKeyStorageAccess();
+      }
+    },
+    async loadProvider(provider: any) {
+      try {
+        const data =
+          await getRundeckContext().rootStore.plugins.getPluginDetail(
+            this.serviceName as string,
+            provider,
+          );
+        if (data.props) {
+          this.loadPluginData(data);
+        }
+      } catch (e) {
+        let message = "Unknown Error";
+        if (e instanceof Error) message = e.message;
+        this.error = message;
+      }
+    },
+    isPropVisible(testProp: any): boolean {
+      // determine if property is visible based on required prop value
+      const requiredProp =
+        testProp.options && testProp.options["requiredProperty"];
+      const requiredVal = testProp.options && testProp.options["requiredValue"];
+      if (requiredProp) {
+        if (!this.inputValues || !this.inputValues[requiredProp]) {
+          return false;
+        }
+        if (
+          requiredVal &&
+          (!this.inputValues || this.inputValues[requiredProp] !== requiredVal)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    },
+    isPropHidden(testProp: any): boolean {
+      return testProp.options && testProp.options["displayType"] === "HIDDEN";
+    },
+    isStaticTextProp(testProp: any): boolean {
+      // STATIC_TEXT properties (e.g. the WorkflowStrategy "info" help table) are
+      // rendered from prop.staticTextDefaultValue and are never user-editable, so
+      // they must not be seeded with a default value or exported as config data.
+      // AutogenInstanceId properties are also displayed as STATIC_TEXT (see
+      // PropertyBuilder.autogenInstanceId) but their generated id is real config
+      // that must be seeded in create mode and persisted (e.g. the Node Wizard
+      // "wizard-id"), so they are excluded here.
+      return (
+        testProp.type !== "AutogenInstanceId" &&
+        testProp.options &&
+        testProp.options["displayType"] === "STATIC_TEXT"
+      );
+    },
+    isPropInScope(testProp: any): boolean {
+      // determine if property is visible in scope
+      const testScope = testProp.scope || this.defaultScope;
+      const allowedScope = this.scope;
+      if (!allowedScope || !testScope || testScope === "Unspecified") {
+        //no specific scope
+        return true;
+      } else if (
+        allowedScope === "Project" &&
+        testScope.startsWith("Project")
+      ) {
+        return true;
+      } else if (
+        allowedScope === "Framework" &&
+        (testScope === "Framework" || testScope === "Project")
+      ) {
+        return true;
+      } else if (
+        allowedScope === "Instance" &&
+        testScope.startsWith("Instance")
+      ) {
+        return true;
+      }
+
+      return false;
+    },
+    isGroupedProp(testProp: any): boolean {
+      // determine if property is visible based on required prop value
+      const grouping = testProp.options && testProp.options["grouping"];
+      const groupName = testProp.options && testProp.options["groupName"];
+
+      return grouping || groupName;
+    },
+    hasKeyStorageAccess(): boolean {
+      let storageAccess = false;
+      this.props.forEach((prop: any) => {
+        if (prop.options != null && prop.options["selectionAccessor"]) {
+          storageAccess = true;
+        }
+      });
+      return storageAccess;
+    },
+    notifyHasKeyStorageAccess() {
+      this.$emit("hasKeyStorageAccess", this.provider);
+    },
+    notifyHandleAutoComplete() {
+      this.$emit("handleAutocomplete");
+    },
+    loadForMode() {
+      if (this.serviceName && this.provider) {
+        this.loadProvider(this.provider);
+      } else if (
+        this.isShowConfigForm &&
+        this.serviceName &&
+        this.modelValue &&
+        this.modelValue.type
+      ) {
+        this.loadProvider(this.modelValue.type);
+      } else if (this.pluginConfig) {
+        this.loadPluginData(this.pluginConfig);
+      }
+    },
+  },
+});
+</script>
+<style lang="scss">
+.configprop + .configprop:before {
+  content: " ";
+}
+
+.has-error .ace_editor {
+  border: 1px solid var(--danger-color);
+}
+</style>
+<style lang="scss" scoped>
+.header-reset {
+  margin: 0;
+}
+</style>

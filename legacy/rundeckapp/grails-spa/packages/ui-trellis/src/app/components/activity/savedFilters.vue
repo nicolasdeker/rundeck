@@ -1,0 +1,177 @@
+<template>
+  <span>
+    <btn
+      v-if="hasQuery && (!query || !query.filterName)"
+      size="xs"
+      type="default"
+      data-test-id="save-filter-button"
+      @click="saveFilterPrompt"
+    >
+      {{ $t("filter.save.button") }}
+    </btn>
+    <span v-if="query && query.filterName" data-test-id="filter-name">{{
+      query.filterName
+    }}</span>
+    <dropdown v-if="filters && filters.length > 0">
+      <span
+        class="dropdown-toggle btn btn-secondary btn-sm"
+        :class="query && query.filterName ? 'text-info' : 'text-secondary'"
+      >
+        {{ $t("Filters") }}
+        <span class="caret"></span>
+      </span>
+      <template #dropdown>
+        <li v-if="query && query.filterName">
+          <a
+            role="button"
+            data-test-id="delete-filter-btn"
+            @click="deleteFilter"
+          >
+            <i class="glyphicon glyphicon-trash"></i>
+            {{ $t("filter.delete.named.text", [query.filterName]) }}
+          </a>
+        </li>
+        <li
+          v-if="query && query.filterName"
+          role="separator"
+          class="divider"
+        ></li>
+        <li class="dropdown-header">
+          <i class="glyphicon glyphicon-filter"></i>
+          {{ $t("saved.filters") }}
+        </li>
+        <li
+          v-for="filter in filters"
+          :key="filter.filterName"
+          data-test="filter-item"
+        >
+          <a
+            role="button"
+            @click="selectFilter(filter)"
+            data-test="filter-link"
+          >
+            {{ filter.filterName }}
+            <span v-if="query && filter.filterName === query.filterName"
+              >√</span
+            >
+          </a>
+        </li>
+      </template>
+    </dropdown>
+  </span>
+</template>
+<script lang="ts">
+import { defineComponent, PropType } from "vue";
+import { ActivityFilterStore } from "../../../library/stores/ActivityFilterStore";
+import { EventBus, getRundeckContext } from "../../../library";
+import { MessageBox, Notification } from "uiv";
+export default defineComponent({
+  props: {
+    hasQuery: {
+      type: Boolean,
+    },
+    query: {
+      type: Object,
+    },
+    eventBus: {
+      type: Object as PropType<typeof EventBus>,
+      required: true,
+    },
+  },
+  emits: ["select_filter"],
+  data() {
+    return {
+      projectName: "",
+      loadError: "",
+      filters: [],
+      promptTitle: this.$t("Save Filter"),
+      promptContent: this.$t("filter.save.name.prompt"),
+      promptError: this.$t("filter.save.validation.name.blank"),
+      filterStore: new ActivityFilterStore(),
+    };
+  },
+  mounted() {
+    this.projectName = getRundeckContext().projectName;
+    this.loadFilters();
+
+    this.eventBus &&
+      this.eventBus.on("invoke-save-filter", this.saveFilterPrompt);
+  },
+  beforeUnmount() {
+    this.eventBus.off("invoke-save-filter");
+  },
+  methods: {
+    notifyError(msg) {
+      Notification.notify({
+        type: "danger",
+        title: "An Error Occurred",
+        content: msg,
+        duration: 0,
+      });
+    },
+    async loadFilters() {
+      this.filters =
+        this.filterStore.loadForProject(this.projectName).filters || [];
+    },
+    selectFilter(filter) {
+      this.$emit("select_filter", filter);
+    },
+    deleteFilter() {
+      if (!this.query || !this.query.filterName) {
+        return;
+      }
+
+      this.$confirm({
+        title: this.$t("Delete Saved Filter"),
+        content: this.$t("filter.delete.confirm.text", [this.query.filterName]),
+      })
+        .then(() => {
+          this.doDeleteFilter(this.query.filterName);
+        })
+        .catch(() => {
+          // this.$notify("Delete canceled.");
+        });
+    },
+    async doDeleteFilter(name) {
+      await this.filterStore.removeFilter(this.projectName, name);
+      await this.loadFilters();
+    },
+    async doSaveFilter(name) {
+      if (this.filters.find((f) => f.filterName === name)) {
+        this.notifyError(`Filter with name ${name} already exists`);
+      } else {
+        await this.filterStore.saveFilter(this.projectName, {
+          filterName: name,
+          query: { ...this.query, projFilter: this.projectName },
+        });
+        await this.loadFilters();
+      }
+    },
+    saveFilterPrompt() {
+      MessageBox.prompt({
+        title: this.promptTitle,
+        content: this.promptContent,
+        validator: (value) => {
+          return /.+/.test(value) ? null : this.promptError;
+        },
+      })
+        .then((value) => {
+          this.doSaveFilter(value);
+        })
+        .catch(() => {
+          // this.$notify("Save canceled.");
+        });
+    },
+  },
+});
+</script>
+<style lang="scss">
+.modal-footer .btn-primary {
+  color: var(--font-fill-color);
+  background-color: var(--cta-color);
+  &:hover {
+    color: var(--font-fill-color);
+    background-color: var(--cta-states-color);
+  }
+}
+</style>

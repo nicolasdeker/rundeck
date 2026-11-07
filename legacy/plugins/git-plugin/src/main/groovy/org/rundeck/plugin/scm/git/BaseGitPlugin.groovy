@@ -1,0 +1,925 @@
+/*
+ * Copyright 2016 SimplifyOps, Inc. (http://simplifyops.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.rundeck.plugin.scm.git
+
+import com.dtolabs.rundeck.core.jobs.JobReference
+import com.dtolabs.rundeck.core.plugins.configuration.Validator
+import com.dtolabs.rundeck.core.plugins.views.Action
+import com.dtolabs.rundeck.core.storage.ResourceMeta
+import com.dtolabs.rundeck.plugins.scm.*
+import com.jcraft.jsch.Session
+import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.api.ListBranchCommand
+import org.eclipse.jgit.api.PullResult
+import org.eclipse.jgit.api.RebaseCommand
+import org.eclipse.jgit.api.RebaseResult
+import org.eclipse.jgit.api.Status
+import org.eclipse.jgit.api.TransportCommand
+import org.eclipse.jgit.api.TransportConfigCallback
+import org.eclipse.jgit.errors.TransportException
+import org.eclipse.jgit.diff.RawTextComparator
+import org.eclipse.jgit.lib.BranchConfig
+import org.eclipse.jgit.lib.ConfigConstants
+import org.eclipse.jgit.lib.Constants
+import org.eclipse.jgit.lib.ObjectId
+import org.eclipse.jgit.lib.Ref
+import org.eclipse.jgit.lib.Repository
+import org.eclipse.jgit.merge.MergeStrategy
+import org.eclipse.jgit.revwalk.RevCommit
+import org.eclipse.jgit.storage.file.FileRepositoryBuilder
+import org.eclipse.jgit.transport.ssh.jsch.JschConfigSessionFactory
+import org.eclipse.jgit.transport.SshTransport
+import org.eclipse.jgit.transport.RemoteRefUpdate
+import org.eclipse.jgit.transport.TrackingRefUpdate
+import org.eclipse.jgit.transport.Transport
+import org.eclipse.jgit.transport.URIish
+import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
+import org.eclipse.jgit.transport.ssh.jsch.OpenSshConfig
+import org.eclipse.jgit.util.FileUtils
+import org.rundeck.plugin.scm.git.config.Common
+import org.rundeck.plugin.scm.git.ssh.SshjSessionFactory
+import org.rundeck.storage.api.StorageException
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.regex.Matcher
+import java.util.regex.Pattern
+
+/**
+ * Common features of the import and export plugins
+ */
+class BaseGitPlugin {
+    public static final String REMOTE_NAME = "origin"
+    Git git
+    Repository repo
+    File workingDir
+    String branch
+    Map<String, String> input
+    Common commonConfig
+    JobFileMapper mapper
+    RawTextComparator COMP = RawTextComparator.DEFAULT
+    Map<String, Map> jobStateMap = Collections.synchronizedMap([:])
+
+    protected enum ScmAuthMessages {
+        CHECKING("Checking if user has access to the configured SCM key/password."),
+        NO_ACCESS("User don't have access to the configured SCM key/password yet."),
+        HAS_ACCESS("User has access to the configured SCM key/password, sending job status.");
+        private String message;
+        ScmAuthMessages( String message ){
+            this.message = message;
+        }
+        String getMessage(){
+            return message;
+        }
+    }
+
+    BaseGitPlugin(Common commonConfig) {
+        this.input = commonConfig.rawInput
+        this.commonConfig = commonConfig
+    }
+
+    /**
+     * Creates a stable copy of the job state map for safe iteration.
+     *
+     * @return a snapshot preserving the map's iteration order
+     */
+    protected Map<String, Map> snapshotJobStateMap() {
+        synchronized (jobStateMap) {
+            return new LinkedHashMap<String, Map>(jobStateMap)
+        }
+    }
+
+    Map<String, String> getSshConfig() {
+        def config = [:]
+
+        if (commonConfig.strictHostKeyChecking in ['yes', 'no']) {
+            config['StrictHostKeyChecking'] = commonConfig.strictHostKeyChecking
+        }
+        config
+    }
+
+    /**
+     * maps output file to an AtomicLong used for synchronization and
+     * only serializing monotonically increasing revision for the job
+     */
+    ConcurrentMap<File, AtomicLong> fileSerializeRevisionCounter = new ConcurrentHashMap<>()
+
+    /**
+     * Get an AtomicLong used for synchronization and comparing
+     * serialized revision number of the file.
+     *
+     * @param outfile the target file
+     * @return atomic long for file serialization revision number
+     */
+    void resetFileCounterFor(File outfile) {
+        fileSerializeRevisionCounter.remove(outfile)
+    }
+    /**
+     * Get an AtomicLong used for synchronization and comparing
+     * serialized revision number of the file.
+     *
+     * @param outfile the target file
+     * @return atomic long for file serialization revision number
+     */
+    private AtomicLong fileCounterFor(File outfile) {
+        AtomicLong latch = fileSerializeRevisionCounter.get(outfile)
+        if (latch == null) {
+            latch = new AtomicLong(-1)
+            AtomicLong previous = fileSerializeRevisionCounter.putIfAbsent(outfile, latch)
+            if (null != previous) {
+                latch = previous
+            }
+        }
+        latch
+    }
+
+    /**
+     * compareAndSet if the new value is greater than the current value
+     * @param atomic atomic long
+     * @param update the new value
+     * @return
+     */
+    static boolean greaterAndSet(AtomicLong atomic, long update) {
+        while (true) {
+            long cur = atomic.get();
+            if (update <= cur) {
+                return false
+            }
+            //should set if it hasn't changed
+            if (atomic.compareAndSet(cur, update)) {
+                return true;
+            }
+            //otherwise try again
+        }
+    }
+
+    def serialize(
+            final JobExportReference job,
+            String format,
+            boolean preserveId,
+            boolean useSourceId,
+            File outfile = null
+    )
+    {
+        if (!outfile) {
+            outfile = mapper.fileForJob(job)
+        }
+        AtomicLong counter = fileCounterFor(outfile)
+
+        synchronized (counter) {
+            //other threads serializing the same job must wait until we complete
+            if (greaterAndSet(counter, job.version)) {
+                //only bother writing the file if this rev of Job if it is newer than previously serialized rev
+
+                if (!outfile.parentFile.isDirectory()) {
+                    File parentFile = outfile.parentFile
+                    AtomicLong parentCounter = fileCounterFor(parentFile)
+                    synchronized (parentCounter) {
+                        if (!parentFile.isDirectory()) {
+                            if (!parentFile.mkdirs()) {
+                                throw new ScmPluginException(
+                                    "Cannot create necessary dirs to serialize file to path: ${outfile.absolutePath}"
+                                )
+                            }
+                        }
+                    }
+                }
+
+                File temp = new File(outfile.parentFile, outfile.name + ".tmp${job.version}")
+                temp.deleteOnExit()
+                Throwable thrown = null
+                try {
+                    try {
+                        temp.withOutputStream { out ->
+                            try {
+                                def sourceId = (job instanceof JobScmReference) ? job.sourceId  : null
+                                job.jobSerializer.serialize(
+                                        format,
+                                        out,
+                                        preserveId,
+                                        useSourceId ? (sourceId ?: job.id) : null
+                                )
+                            } catch (Throwable e) {
+                                thrown = e;
+                            }
+                        }
+                    } catch (IOException e) {
+                        throw new ScmPluginException("Failed to serialize job ${job}: ${e.message}", e)
+                    }
+                    if (thrown != null) {
+                        throw new ScmPluginException("Failed to serialize job ${job}: ${thrown.message}", thrown)
+                    }
+                    if (!temp.exists() || temp.size() < 1) {
+                        throw new ScmPluginException(
+                                "Failed to serialize job, no content was written for job ${job}"
+                        )
+                    }
+
+                    Files.move(temp.toPath(), outfile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }finally{
+                    if(temp.exists()){
+                        temp.delete()
+                    }
+                }
+            } else {
+                //another thread already serialized this or earlier revision of the job, should not
+                logger.trace("SKIP serialize[${Thread.currentThread().name}] for ${job} to ${outfile}")
+            }
+        }
+    }
+
+    def serializeTemp(final JobExportReference job, String format, boolean preserveId, boolean useSourceId) {
+        File outfile = File.createTempFile("${this.class.name}-serializeTemp", ".${format}")
+        outfile.deleteOnExit()
+        outfile.withOutputStream { out ->
+            job.jobSerializer.serialize(
+                    format,
+                    out,
+                    preserveId,
+                    (useSourceId && job instanceof JobScmReference) ? job.sourceId : null
+            )
+        }
+        return outfile
+    }
+
+    def serializeAll(
+            final Set<JobExportReference> jobExportReferences,
+            String format,
+            boolean preserveId,
+            boolean useOriginal
+    )
+    {
+        jobExportReferences.each { serialize(it, format, preserveId, useOriginal) }
+    }
+
+    TrackingRefUpdate fetchFromRemote(ScmOperationContext context, Git git1 = null) {
+        def agit = git1 ?: git
+        def fetchCommand = agit.fetch()
+        fetchCommand.setRemote(REMOTE_NAME)
+        fetchCommand.setTimeout(commonConfig.getFetchTimeoutSeconds())
+        setupTransportAuthentication(sshConfig, context, fetchCommand)
+        def fetchResult = fetchCommand.call()
+
+        def update = fetchResult.getTrackingRefUpdate("refs/remotes/${REMOTE_NAME}/${this.branch}")
+
+        def fetchMessage = update ? update.toString() : "No changes were found"
+        getLogger().debug("fetchFromRemote: ${fetchMessage}")
+        //make sure tracking is configured for the branch
+        if (!remoteTrackingBranch(agit)) {
+            agit.repository.config.setString(
+                    ConfigConstants.CONFIG_BRANCH_SECTION,
+                    branch,
+                    ConfigConstants.CONFIG_KEY_REMOTE,
+                    REMOTE_NAME
+            );
+            //if remote branch name exists, track it for merging
+            def remoteRef = fetchResult.getAdvertisedRef(branch) ?:
+                    fetchResult.getAdvertisedRef(Constants.R_HEADS + branch)
+            if (remoteRef) {
+                agit.repository.config.setString(
+                        ConfigConstants.CONFIG_BRANCH_SECTION,
+                        branch,
+                        ConfigConstants.CONFIG_KEY_MERGE,
+                        remoteRef.name
+                );
+            }
+
+            agit.repository.config.save()
+        }
+
+        return update
+    }
+    /**
+     * @param git1
+     * @return remote tracking branch name, or null if tracking has not be set up
+     */
+    def remoteTrackingBranch(Git git1 = null) {
+        def agit = git1 ?: git
+
+        def branchConfig = new BranchConfig(agit.repository.config, branch)
+        return branchConfig.getRemoteTrackingBranch()
+    }
+
+    PullResult gitPull(ScmOperationContext context, Git git1 = null) {
+        def pullCommand = (git1 ?: git).pull().setRemote(REMOTE_NAME).setRemoteBranchName(branch)
+        pullCommand.setTimeout(commonConfig.getFetchTimeoutSeconds())
+        setupTransportAuthentication(sshConfig, context, pullCommand)
+        pullCommand.call()
+    }
+
+    ScmExportResult gitResolve(
+            final ScmOperationContext context,
+            boolean rebase,
+            String mergeResolutionStrategy
+    )
+    {
+        if (rebase) {
+            def pullCommand = git.pull().setRemote(REMOTE_NAME).setRemoteBranchName(branch)
+            pullCommand.setRebase(true)
+            setupTransportAuthentication(sshConfig, context, pullCommand)
+            def pullResult = pullCommand.call()
+
+            def result = new ScmExportResultImpl()
+            result.success = pullResult.successful
+            result.message = result.success ? "Rebase was successful" : "Rebase did not succeed"
+            if (pullResult.rebaseResult) {
+                result.extendedMessage = "Rebase result was: " + pullResult.rebaseResult.status?.toString()
+                //get status
+                boolean rebasestat = false
+                if (pullResult.rebaseResult.conflicts) {
+                    rebasestat = true
+
+                    result.extendedMessage = result.extendedMessage + " Conflicts: " + pullResult.rebaseResult.conflicts
+                }
+                if (pullResult.rebaseResult.failingPaths) {
+                    rebasestat = true
+                    result.extendedMessage = result.extendedMessage + " Failures: " +
+                            pullResult.rebaseResult.failingPaths
+                }
+                if (pullResult.rebaseResult.uncommittedChanges) {
+                    rebasestat = true
+                    result.extendedMessage = result.extendedMessage + " Uncommitted changes: " +
+                            pullResult.rebaseResult.uncommittedChanges
+                }
+                if (!rebasestat) {
+                    //rebase does not seem to actually include conflict info in result
+                    def status = git.status().call()
+                    if (status.conflicting || status.conflictingStageState) {
+                        result.extendedMessage = result.extendedMessage + " Conflicts: " + status.conflictingStageState
+                    }
+                }
+            }
+            if (!result.success) {
+                //abort rebase
+                def abortResult = git.rebase().setOperation(RebaseCommand.Operation.ABORT).call()
+                if (abortResult.status == RebaseResult.Status.ABORTED) {
+                    result.message = result.message + ". Rebase automatically aborted."
+                    result.extendedMessage = result.extendedMessage +
+                            ". Note: local rebase was automatically aborted and restored to previous state."
+                } else {
+                    result.message = result.message + ". Rebase WAS NOT automatically aborted ${abortResult.status}."
+                    result.extendedMessage = result.extendedMessage +
+                            ". Warning: local rebase WAS NOT automatically aborted."
+                }
+            }
+            return result
+        } else {
+            //fetch, then
+            //merge
+            fetchFromRemote(context)
+
+            def strategy = MergeStrategy.get(mergeResolutionStrategy)
+            def mergebuild = git.merge().setStrategy(strategy)
+            def commit = git.repository.resolve("refs/remotes/${REMOTE_NAME}/${branch}")
+
+            mergebuild.include(commit)
+
+            def mergeresult = mergebuild.call()
+
+            def result = new ScmExportResultImpl()
+            result.success = mergeresult.mergeStatus.successful
+            result.message = result.success ? "Merge was successful" : "Merge failed"
+            result.extendedMessage = mergeresult.toString()
+            return result
+
+        }
+    }
+
+    String debugStatus(final Status status) {
+        def smap = [
+                conflicting          : status.conflicting,
+                added                : status.added,
+                changed              : status.changed,
+                clean                : status.clean,
+                conflictingStageState: status.conflictingStageState,
+                ignoredNotInIndex    : status.ignoredNotInIndex,
+                missing              : status.missing,
+                modified             : status.modified,
+                removed              : status.removed,
+                uncommittedChanges   : status.uncommittedChanges,
+                untracked            : status.untracked,
+                untrackedFolders     : status.untrackedFolders,
+        ]
+        def sb = new StringBuilder()
+        smap.each {
+            sb << "${it.key}:\n"
+            it.value.each {
+                sb << "\t${it}\n"
+            }
+        }
+        sb.toString()
+    }
+
+    File getLocalFileForJob(final JobReference job) {
+        mapper.fileForJob(job)
+    }
+
+    String relativePath(JobReference reference) {
+        mapper.pathForJob(reference)
+    }
+    /**
+     * get RevCommit for HEAD rev of the path
+     * @return RevCommit or null if HEAD not found (empty git)
+     */
+    RevCommit getHead() {
+        GitUtil.getHead repo
+    }
+
+    ObjectId lookupId(RevCommit commit, String path) {
+        GitUtil.lookupId repo, commit, path
+    }
+
+    byte[] getBytes(ObjectId id) {
+        GitUtil.getBytes repo, id
+    }
+
+    int diffContent(OutputStream out, byte[] left, File right) {
+        GitUtil.diffContent out, left, right, COMP
+    }
+
+    int diffContent(OutputStream out, File left, byte[] right) {
+        GitUtil.diffContent out, left, right, COMP
+    }
+
+    int diffContent(OutputStream out, byte[] left, byte[] right) {
+        GitUtil.diffContent out, left, right, COMP
+    }
+
+    RevCommit lastCommit() {
+        GitUtil.lastCommit repo, git
+    }
+
+    /**
+     * Path to last-commit index for the current HEAD. Rebuilt with one history walk whenever HEAD changes.
+     */
+    volatile Map lastCommitMemo = [head: null, commits: new ConcurrentHashMap<String, Optional<RevCommit>>()]
+    private final Object lastCommitMemoLock = new Object()
+
+    /**
+     * Last commit that touched the path, memoized per HEAD: the first lookup after HEAD changes builds a
+     * path to commit index for the whole HEAD tree with a single history walk; paths outside that tree
+     * (deleted or renamed files) fall back to a per-path log from the same indexed HEAD, cached until HEAD
+     * changes again. Every value in an index is therefore relative to that index's HEAD, whatever HEAD the
+     * repository moves to while a lookup is in flight.
+     *
+     * @param path repository path
+     * @return last commit touching the path, or null if none
+     */
+    RevCommit lastCommitForPath(String path) {
+        ObjectId headId = repo.resolve(Constants.HEAD)
+        if (!headId || !path) {
+            return GitUtil.lastCommitForPath(repo, git, path)
+        }
+        Map memo = lastCommitMemo
+        if (memo.head != headId) {
+            memo = rebuildLastCommitMemo()
+        }
+        RevCommit indexedHead = memo.head
+        memo.commits.computeIfAbsent(path) { String p ->
+            Optional.ofNullable(GitUtil.lastCommitForPath(repo, git, indexedHead, p))
+        }.orElse(null)
+    }
+
+    /**
+     * Rebuild the path to commit index for the current HEAD under a lock, so concurrent readers that observe a
+     * new HEAD share one history walk instead of each running their own, and a slower reader cannot publish an
+     * index for an older HEAD over a newer one.
+     *
+     * @return the index for the HEAD resolved while holding the lock
+     */
+    private Map rebuildLastCommitMemo() {
+        synchronized (lastCommitMemoLock) {
+            RevCommit head = GitUtil.getHead(repo)
+            Map memo = lastCommitMemo
+            if (!head || memo.head == head) {
+                return memo
+            }
+            Map<String, RevCommit> bulk = GitUtil.lastCommitsForPaths(repo, head, GitUtil.listPaths(git, head.tree.name))
+            memo = [head: head, commits: new ConcurrentHashMap<>(bulk.collectEntries { p, c -> [p, Optional.of(c)] })]
+            lastCommitMemo = memo
+            return memo
+        }
+    }
+
+    static String expand(final String source, final ScmUserInfo scmUserInfo) {
+        def userInfoProps = ['fullName', 'firstName', 'lastName', 'email', 'userName']
+        def map = userInfoProps.collectEntries { [it, scmUserInfo[it]] }
+        map['login'] = map['userName']
+        expand(source, map, 'user')
+    }
+
+    static String expand(final String source, final Map<String, String> data, String prefix = '') {
+        data.keySet().inject(source) { String x, String y ->
+            return x.replaceAll(
+                    Pattern.quote('${' + (prefix ? prefix + '.' : '') + y + '}'),
+                    Matcher.quoteReplacement(data[y] ?: '')
+            )
+        }
+    }
+
+    JobState createJobStatus(final Map map, final List<Action> actions = []) {
+        //TODO: include scm status
+        return new JobGitState(
+                synchState: map['synch'],
+                commit: map.commitMeta ? new GitScmCommit(map.commitMeta) : null,
+                actions: actions
+        )
+    }
+
+    JobImportState createJobImportStatus(final Map map, final List<Action> actions = [], JobRenamed jobRenamed = null) {
+        //TODO: include scm status
+        return new JobImportGitState(
+                synchState: map['synch'],
+                commit: map.commitMeta ? new GitScmCommit(map.commitMeta) : null,
+                actions: actions,
+                jobRenamed: jobRenamed
+        )
+    }
+
+    Logger getLogger() {
+        LoggerFactory.getLogger(this.class)
+    }
+
+    private InputStream getStoragePathStream(final ScmOperationContext context, String path) throws IOException {
+        if (null == path) {
+            return null;
+        }
+        def tree = context.getStorageTree()
+        if (!tree.hasResource(path)) {
+            throw new ScmPluginException("Path does not exist: ${path}")
+        }
+        ResourceMeta contents
+        try {
+            contents = tree.getResource(path).getContents()
+        } catch (StorageException e) {
+            logger.debug("getStoragePathStream", e)
+            throw new ScmPluginException(e)
+        }
+        return contents.getInputStream()
+    }
+
+    private byte[] loadStoragePathData(final ScmOperationContext context, String path)
+            throws IOException, ScmPluginException
+    {
+        if (null == path) {
+            return null;
+        }
+
+        def tree = context.getStorageTree()
+        if (!tree.hasResource(path)) {
+            throw new ScmPluginException("Path does not exist: ${path}")
+        }
+        ResourceMeta contents
+        try {
+            contents = tree.getResource(path).getContents()
+        } catch (StorageException e) {
+            logger.debug("loadStoragePathData", e)
+            throw new ScmPluginException(e)
+        }
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        contents.writeContent(byteArrayOutputStream);
+        return byteArrayOutputStream.toByteArray();
+    }
+
+    /**
+     * Returns {@code true} when {@code base} is an existing git workdir whose HEAD
+     * is already checked out on {@code branchName}.
+     */
+    protected boolean workdirCheckedOutOn(File base, String branchName) {
+        if (!base?.isDirectory() || !new File(base, ".git").isDirectory() || !branchName) {
+            return false
+        }
+        def existing = null
+        try {
+            existing = new FileRepositoryBuilder().setGitDir(new File(base, ".git")).setWorkTree(base).build()
+            return existing.getFullBranch() == "refs/heads/${branchName}"
+        } catch (Exception e) {
+            logger.debug("Could not read existing workdir branch at ${base}: ${e.message}", e)
+            return false
+        } finally {
+            existing?.close()
+        }
+    }
+
+    private void removeWorkdir(File base) {
+        //remove the dir
+        try {
+            FileUtils.delete(base, FileUtils.RECURSIVE)
+        } catch(IOException e){
+            logger.error("Failed to delete repo folder")
+        }
+    }
+
+    protected void cloneOrCreate(final ScmOperationContext context, File base, String url, String integration) throws ScmPluginException {
+        if (base.isDirectory() && new File(base, ".git").isDirectory()) {
+            def arepo = new FileRepositoryBuilder().setGitDir(new File(base, ".git")).setWorkTree(base).build()
+            def agit = new Git(arepo)
+
+            //test url matches origin
+            def config = agit.getRepository().getConfig()
+            def found = config.getString("remote", REMOTE_NAME, "url")
+            def projectName = config.getString("rundeck", "scm-plugin", "project-name")
+            def gitIntegration = config.getString("rundeck", "scm-plugin", "integration")
+            if (projectName && !projectName.equals(context.frameworkProject) || gitIntegration && !gitIntegration.equals(integration)) {
+                throw new ScmPluginInvalidInput(
+                        "The base directory is already in use by another project: ${projectName} with integration : ${gitIntegration}",
+                        Validator.errorReport(
+                                'dir',
+                                "The base directory is already in use by another project: ${projectName} with integration : ${gitIntegration}"
+                        )
+                )
+            } else if (!projectName) {
+                config.setString("rundeck", "scm-plugin", "project-name", context.frameworkProject)
+                config.setString("rundeck", "scm-plugin", "integration", integration)
+                config.save()
+            }
+            def needsClone=false;
+
+            if (found != url) {
+                logger.debug("url differs, re-cloning ${found}!=${url}")
+                needsClone = true
+            }else if (agit.repository.getFullBranch() != "refs/heads/$branch") {
+                //check same branch
+                logger.debug("branch differs, re-cloning")
+                needsClone = true
+            }
+
+            if(needsClone){
+                //need to reconfigured
+                removeWorkdir(base)
+                performClone(base, url, context, integration)
+                return
+            }
+
+            try {
+                fetchFromRemote(context, agit)
+            } catch (Exception e) {
+                logger.debug("Failed fetch from the repository: ${e.message}", e)
+                String msg = collectCauseMessages(e)
+                throw new ScmPluginException("Failed fetch from the repository: ${msg}", e)
+            }
+            git = agit
+            repo = arepo
+        } else {
+            performClone(base, url, context, integration)
+        }
+    }
+
+    private static String collectCauseMessages(Exception e) {
+        List<String> msgs = [e.message]
+        def cause = e.cause
+        while (cause) {
+            if (cause.message != msgs.last() && !msgs.last().endsWith(cause.message)) {
+                msgs << cause.message
+            }
+            cause = cause.cause
+        }
+        return msgs.join("; ")
+    }
+
+    private void performClone(File base, String url, ScmOperationContext context, String branch=this.branch, String integration) {
+        logger.debug("cloning...")
+        def cloneCommand = Git.cloneRepository().
+                setBranch(branch).
+                setRemote(REMOTE_NAME).
+                setDirectory(base).
+                setURI(url)
+        setupTransportAuthentication(sshConfig, context, cloneCommand, url)
+        try {
+            git = cloneCommand.call()
+        } catch (Exception e) {
+            logger.debug("Failed cloning the repository from ${url}: ${e.message}", e)
+            throw new ScmPluginException("Failed cloning the repository from ${url}: ${e.message}", e)
+        }
+        git.getRepository().config.setString("rundeck", "scm-plugin", "project-name", context.frameworkProject)
+        git.getRepository().config.setString("rundeck", "scm-plugin", "integration", integration)
+        git.getRepository().config.save()
+        repo = git.getRepository()
+    }
+
+    protected boolean existBranch(String remoteName){
+        List<Ref> call = git.branchList().setListMode(ListBranchCommand.ListMode.ALL).call()
+        for (Ref ref : call) {
+            if (remoteName == ref.getName()) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Query the remote for branch heads. Unlike {@link #existBranch(String)}, this does not rely on
+     * refs already present in the local clone (a single-branch clone may not have remote-tracking refs
+     * for other branches).
+     */
+    protected boolean remoteBranchExists(ScmOperationContext context, String url, String branchName)
+            throws ScmPluginException
+    {
+        def command = Git.lsRemoteRepository().setRemote(url).setHeads(true)
+        setupTransportAuthentication(sshConfig, context, command, url)
+        try {
+            return command.call().any { it.name == Constants.R_HEADS + branchName }
+        } catch (Exception e) {
+            logger.debug("Failed checking remote branch ${branchName}: ${e.message}", e)
+            throw new ScmPluginException("Failed checking remote branch ${branchName}: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Checks whether the given throwable (or any cause in its chain) indicates that the specified
+     * remote branch does not exist in the upstream repository.
+     *
+     * @param t          the throwable to inspect, including its cause chain
+     * @param branchName the remote branch name to look for in the error message
+     * @return {@code true} if a {@link TransportException} in the cause chain reports the branch
+     *         is not found in the upstream; {@code false} otherwise
+     */
+    protected static boolean isMissingRemoteBranch(Throwable t, String branchName) {
+        Throwable current = t
+        while (current) {
+            if (current instanceof TransportException) {
+                def msg = current.message ?: ''
+                if (msg.contains('not found in upstream') &&
+                        (msg.contains("'${branchName}'") || msg.contains(branchName))) {
+                    return true
+                }
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    /**
+     * Creates {@code newBranch} from the remote base, pushes it, and only then checks
+     * it out locally. The checkout keeps HEAD on the new branch so a follow-up
+     * {@link #cloneOrCreate} does not treat the workdir as a branch mismatch and
+     * delete it. It deliberately runs after the push is validated: leaving HEAD on
+     * the base branch when the push is rejected lets the next initialize detect the
+     * mismatch and fail again, instead of succeeding with a branch that exists only
+     * locally.
+     */
+    protected void createBranch(ScmOperationContext context, String newBranch, String baseBranch){
+        def createCommand = git.branchCreate()
+                .setName(newBranch)
+                .setStartPoint("${REMOTE_NAME}/${baseBranch}")
+                .setForce(true)
+
+        try {
+            createCommand.call()
+        } catch (Exception e) {
+            logger.debug("Failed creating branch ${newBranch}: ${e.message}", e)
+            throw new ScmPluginException("Failed creating branch ${newBranch}: ${e.message}", e)
+        }
+        def pushb = git.push()
+        pushb.setRemote(REMOTE_NAME)
+        pushb.add(newBranch)
+        setupTransportAuthentication(sshConfig, context, pushb)
+
+        def push
+        try {
+            push = pushb.call()
+        } catch (Exception e) {
+            logger.debug("Failed push to remote: ${e.message}", e)
+            throw new ScmPluginException("Failed push to remote: ${e.message}", e)
+        }
+        def updates = (push*.remoteUpdates).flatten()
+        def failedUpdates = updates.findAll { it.status != RemoteRefUpdate.Status.OK }
+        if (failedUpdates) {
+            throw new ScmPluginException("Failed push to remote: " + failedUpdates)
+        }
+
+        try {
+            git.checkout().setName(newBranch).call()
+        } catch (Exception e) {
+            logger.debug("Failed checking out branch ${newBranch}: ${e.message}", e)
+            throw new ScmPluginException("Failed checking out branch ${newBranch}: ${e.message}", e)
+        }
+    }
+
+
+    /**
+     * Configure authentication for the git command depending on the configured ssh private Key storage path, or password
+     *
+     * @param u
+     * @param context
+     * @param command
+     */
+    void setupTransportAuthentication(
+            Map<String, String> sshConfig,
+            ScmOperationContext context,
+            TransportCommand command,
+            String url = null
+    )
+            throws ScmPluginException
+    {
+        if (!url) {
+            url = command.repository.config.getString('remote', REMOTE_NAME, 'url')
+        }
+        if (!url) {
+            throw new NullPointerException("url for remote was not set")
+        }
+
+        URIish u = new URIish(url);
+        logger.debug("transport url ${u}, scheme ${u.scheme}, user ${u.user}")
+        if ((u.scheme == null || u.scheme == 'ssh') && u.user && commonConfig.sshPrivateKeyPath) {
+            logger.debug("using ssh private key path ${commonConfig.sshPrivateKeyPath}")
+            //setup ssh key authentication
+            def expandedPath = expandContextVarsInPath(context, commonConfig.sshPrivateKeyPath)
+            def keyData = loadStoragePathData(context, expandedPath)
+
+            command.setTransportConfigCallback(new TransportConfigCallback() {
+                @Override
+                void configure(final Transport transport) {
+                    if (transport instanceof SshTransport) {
+                        SshTransport sshTransport = (SshTransport) transport
+                        sshTransport.setSshSessionFactory(new SshjSessionFactory(keyData, sshConfig))
+                    }
+                }
+            })
+        } else if (u.user && commonConfig.gitPasswordPath) {
+            //setup password authentication
+            logger.debug("using password path ${commonConfig.gitPasswordPath}")
+            def expandedPath = expandContextVarsInPath(context, commonConfig.gitPasswordPath)
+
+            def data = loadStoragePathData(context, expandedPath)
+            command.setTransportConfigCallback(new TransportConfigCallback() {
+                @Override
+                void configure(final Transport transport) {
+                    if (transport instanceof SshTransport) {
+                        SshTransport sshTransport = (SshTransport) transport
+                        sshTransport.setSshSessionFactory(new JschConfigSessionFactory() {
+                            @Override
+                            protected void configure(final OpenSshConfig.Host hc, final Session session) {
+                                sshConfig.each { k, v ->
+                                    session.setConfig(k,v)
+                                }
+                            }
+                        })
+                    }
+                }
+            })
+
+            if (null != data && data.length > 0) {
+
+                def pass = new String(data)
+                command.setCredentialsProvider(new UsernamePasswordCredentialsProvider(u.user, pass))
+            }
+        }
+    }
+
+    /**
+     * Expand variable references in the storage path, such as ${user.name} and ${project}* @param context
+     * @param path
+     * @return
+     */
+    public static String expandContextVarsInPath(ScmOperationContext context, String path) {
+        if( null === path  || !path ){
+            return null
+        }
+        expand(expand(path, context.userInfo), [project: context.frameworkProject])
+    }
+
+    /**
+     * Checks if the user in context has access to the configured key or password of the common config
+     * @param ctx: ScmConfigurationContext
+     * @return true / false
+     */
+    protected Boolean userHasAccessToCommonConfigKeyOrPassword(ScmOperationContext ctx){
+        if( !ctx || !ctx.getUserInfo().userName ){
+            return false
+        }
+        logger.debug(ScmAuthMessages.CHECKING.getMessage())
+        def userStorageTree = ctx.getStorageTree()
+        def scmAuthPath = commonConfig?.sshPrivateKeyPath ? commonConfig?.sshPrivateKeyPath : commonConfig?.gitPasswordPath
+        if(!scmAuthPath){
+            return true
+        }
+        def expandedAuthPath = expandContextVarsInPath(ctx, scmAuthPath)
+        if( expandedAuthPath !== null && userStorageTree.hasPath(expandedAuthPath) ){
+            logger.debug(ScmAuthMessages.HAS_ACCESS.getMessage())
+            return true;
+        }else{
+            logger.debug(ScmAuthMessages.NO_ACCESS.getMessage())
+            return false;
+        }
+    }
+}
