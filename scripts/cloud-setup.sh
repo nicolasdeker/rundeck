@@ -28,7 +28,7 @@ pull() { # Docker Hub answers 429 to anonymous pulls from shared egress IPs: ret
 # 1) System packages: JDK 17 for the legacy functional-test build (Gradle 8.14), PAM/SSL headers for rdx crates,
 #    shellcheck for scripts, k6/hyperfine come later via scripts/bench.
 budget 200 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends \
-  openjdk-17-jdk-headless libpam0g-dev libssl-dev pkg-config clang lld jq bc unzip shellcheck >/dev/null' &
+  openjdk-17-jdk-headless libpam0g-dev libssl-dev pkg-config clang lld jq bc unzip shellcheck openssh-client >/dev/null' &
 
 # 2) Docker images for the oracle and DB fixtures (cached by the snapshot; containers are started per session).
 #    mysql:8.4.11 is the version pinned by legacy/functional-test/src/test/resources/docker/compose/oss/docker-compose.yml.

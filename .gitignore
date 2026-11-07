@@ -21,6 +21,8 @@
 /parity-report*.json
 /legacy/.gradle/
 /legacy/**/build/
+/legacy/functional-test/.build/
+/legacy/build/
 /legacy/functional-test/src/test/resources/docker/compose/oss/keys/*
 !/legacy/functional-test/src/test/resources/docker/compose/oss/keys/README.md
 

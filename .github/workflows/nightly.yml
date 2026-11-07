@@ -1,0 +1,178 @@
+# nightly.yml — fuzzing, benches and Lighthouse (MISSION §4 gates, §7 "Heavy verification").
+# Each job says explicitly when it has nothing to do yet and exits 0 (no fake green, no pretend run); once the inputs
+# exist (fuzz targets, criterion benches, UI routes) a failure here is a real finding to journal.
+# Action pinning: full version tags; SHAs cannot be resolved from this scoped session (see ci.yml).
+name: nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # 03:17 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: never
+
+jobs:
+  fuzz:
+    name: fuzz (cargo-fuzz, 60 s per target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect fuzz targets
+        id: targets
+        run: |
+          shopt -s nullglob
+          targets=(fuzz/fuzz_targets/*.rs)
+          if [ ! -f fuzz/Cargo.toml ] || [ ${#targets[@]} -eq 0 ]; then
+            echo "no fuzz targets yet: the first parser lands in Phase 2 (MISSION §4 Security: fuzz every parser, corpora checked in)"
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "count=${#targets[@]}" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "${targets[@]}"
+          fi
+      - uses: dtolnay/rust-toolchain@nightly
+        if: steps.targets.outputs.count != '0'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.targets.outputs.count != '0'
+        with:
+          workspaces: |
+            .
+            fuzz
+      - uses: taiki-e/install-action@v2
+        if: steps.targets.outputs.count != '0'
+        with:
+          tool: cargo-fuzz
+      - name: Run every target for 60 s with the committed corpus
+        if: steps.targets.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          failed=0
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::fuzz $t"
+            # The corpus lives in fuzz/corpus/<target> (cargo-fuzz default); new inputs are kept as an artifact below.
+            if ! cargo +nightly fuzz run "$t" -- -max_total_time=60; then
+              echo "::error::fuzz target $t found a crash (see fuzz/artifacts/$t)"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+      - name: Upload crash artifacts and corpus additions
+        if: always() && steps.targets.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore
+          retention-days: 30
+
+  bench:
+    name: bench (criterion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-toolchain.toml
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          [ -n "$channel" ] || { echo "rust-toolchain.toml has no channel"; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Detect criterion benches
+        id: benches
+        run: |
+          count=$(cargo metadata --no-deps --format-version 1 | jq '[.packages[].targets[] | select(.kind | index("bench"))] | length')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" = "0" ]; then
+            echo "no criterion benches yet: cron / node filter / variable expansion / rdlog / aclpolicy benches land with their crates (MISSION §4 Performance)"
+          else
+            cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | .name as $p | .targets[] | select(.kind | index("bench")) | "\($p): \(.name)"'
+          fi
+      - name: Compile the benches
+        if: steps.benches.outputs.count != '0'
+        run: cargo bench --workspace --no-run
+      # The legacy-vs-rdx k6 comparison (scripts/bench/run.sh) needs both servers on one machine; it runs in-session,
+      # never on this shared runner. Only criterion micro-benchmarks run here.
+      - name: Run the benches
+        if: steps.benches.outputs.count != '0'
+        run: cargo bench --workspace -- --noplot 2>&1 | tee bench-output.txt
+      - name: Upload criterion reports
+        if: steps.benches.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-reports
+          path: |
+            target/criterion
+            bench-output.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  lighthouse:
+    name: lighthouse (mobile preset, /user/login)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: make ui-install
+      - run: make ui-build
+      - name: Write the Lighthouse CI config
+        # MISSION §4 Frontend: mobile preset (Lighthouse's default device emulation), performance >= 0.90,
+        # accessibility >= 0.95, best-practices >= 0.95. Phase 5 extends `url` to project home, job list, job edit,
+        # execution view, nodes, activity. `pnpm preview` serves ui/dist on the fixed port 4173 (ui/vite.config.ts).
+        run: |
+          cat > "$RUNNER_TEMP/lighthouserc.json" <<'EOF'
+          {
+            "ci": {
+              "collect": {
+                "startServerCommand": "pnpm --dir ui preview",
+                "startServerReadyPattern": "Local:",
+                "startServerReadyTimeout": 60000,
+                "url": ["http://localhost:4173/user/login"],
+                "numberOfRuns": 3,
+                "settings": { "formFactor": "mobile", "screenEmulation": { "mobile": true, "width": 375, "height": 812, "deviceScaleFactor": 2, "disabled": false } }
+              },
+              "assert": {
+                "assertions": {
+                  "categories:performance": ["error", { "minScore": 0.90 }],
+                  "categories:accessibility": ["error", { "minScore": 0.95 }],
+                  "categories:best-practices": ["error", { "minScore": 0.95 }]
+                }
+              },
+              "upload": { "target": "filesystem", "outputDir": ".lighthouseci" }
+            }
+          }
+          EOF
+      - name: Run Lighthouse CI
+        # @lhci/cli pinned to an exact version (.claude/rules/npm-dependencies.md). A failed assertion is a real finding.
+        run: npx --yes @lhci/cli@0.15.1 autorun --config="$RUNNER_TEMP/lighthouserc.json"
+      - name: Upload Lighthouse reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: .lighthouseci
+          if-no-files-found: warn
+          retention-days: 30
