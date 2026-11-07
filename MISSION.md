@@ -40,7 +40,7 @@ GitHub app and the Claude app. Details in §7.
 ## 1. The parity contract — what must be identical
 
 Everything below is verified by the oracle: the **upstream functional test suite** in `legacy/functional-test`
-(Spock, 64 `@APITest` specs) run against the Rust binary via `TEST_RUNDECK_URL` / `TEST_RUNDECK_TOKEN`
+(Spock, 63 `@APITest` specs plus the separately tasked `@APIExecOutputTest`, `@APISecureInputTest`, `@JdbcTest`, `@LdapTest` specs) run against the Rust binary via `TEST_RUNDECK_URL` / `TEST_RUNDECK_TOKEN`
 (see `legacy/functional-test/readme.md`), plus differential tests you write against a running legacy container
 (`scripts/oracle.sh`, image `rundeck/rundeck:6.3.0`).
 
@@ -51,10 +51,10 @@ Everything below is verified by the oracle: the **upstream functional test suite
   (`{"error":true,"apiversion":60,"errorCode":"...","message":"..."}` — `ApiService.renderErrorJson`, and the XML
   equivalent `<result error="true" apiversion="60">`), same per-version behavior switches where the legacy code
   branches on `request.api_version`.
-- All **120 route patterns** in `legacy/rundeckapp/grails-app/controllers/rundeckapp/UrlMappings.groovy`
-  (`/api/$api_version/...`) plus the routes contributed by the Grails plugins
-  (`legacy/grails-webhooks`, `grails-metricsweb`, `grails-repository`, `grails-rundeck-data-shared`,
-  `grails-execution-mode-timer`, `grails-job-kill-handler`). Same methods, status codes, JSON shapes, XML shapes where
+- All **119 route patterns** in `legacy/rundeckapp/grails-app/controllers/rundeckapp/UrlMappings.groovy` (lines 40–288)
+  (`/api/$api_version/...`) plus the 33 API routes contributed by the Grails plugins (`legacy/grails-webhooks` 3,
+  `grails-repository` 26, `grails-execution-mode-timer` 4; `grails-metricsweb` adds only the `/metrics/*` web routes,
+  `grails-rundeck-data-shared` and `grails-job-kill-handler` add no routes — see `PARITY.md`). Same methods, status codes, JSON shapes, XML shapes where
   XML is still supported, pagination params (`offset`, `max`), filters, and `Content-Type` handling
   (`application/json`, `application/xml`, `application/yaml`, `text/plain`, multipart).
 - Authentication: API tokens (`X-Rundeck-Auth-Token` header and `authtoken` param), session cookie after form login
@@ -127,7 +127,7 @@ Everything below is verified by the oracle: the **upstream functional test suite
   (`legacy/rundeckapp/grails-app/views/**/*.gsp`) and the SPA routes/components
   (`legacy/rundeckapp/grails-spa/packages/ui-trellis/src`). Each journey gets a Playwright test in `ui/e2e/`.
 - **Deep links keep resolving** (bookmarks, emails, webhooks and notifications carry them): `/project/$p/job/show/$id`,
-  `/project/$p/execution/show/$id`, `/project/$p/jobs`, `/project/$p/nodes`, `/project/$p/activity`, `/project/$p/home`,
+  `/project/$p/execution/show/$id`, `/project/$p/jobs`, `/project/$p/nodes/` (legacy maps the trailing-slash form, accept both), `/project/$p/activity`, `/project/$p/home`,
   `/menu/*`, `/user/login`, `/resources/*` — new routes may differ, old ones redirect.
 - i18n: every message key of `legacy/rundeckapp/grails-app/i18n/` and ui-trellis bundles that the new UI needs is
   carried over (converted), languages kept.
@@ -530,7 +530,7 @@ phase reviews, unblocking) belongs to the Sunday review session.
 - Routes: `rundeckapp/grails-app/controllers/rundeckapp/UrlMappings.groovy` (+ `grails-*/grails-app/controllers/**/UrlMappings.groovy`)
 - Controllers: `rundeckapp/grails-app/controllers/rundeck/controllers/*.groovy` (`ApiController`, `ExecutionController`,
   `ScheduledExecutionController`, `ProjectController`, `FrameworkController`, `StorageController`, `ScmController`, `PluginController`, ...)
-- Services: `rundeckapp/grails-app/services/rundeck/services/` (66)
+- Services: `rundeckapp/grails-app/services/rundeck/services/` (65 `*Service.groovy`, + `grails-webhooks` `WebhookService`)
 - Domain + schema: `rundeckapp/grails-app/domain/rundeck/*.groovy` (22), `grails-webhooks/grails-app/domain/webhooks/Webhook.groovy`; `rundeckapp/grails-app/migrations/`
 - Core engine: `core/src/main/java/com/dtolabs/rundeck/core/{execution,dispatcher,jobs,nodes,resources,rules,schedule,storage,logging,authorization,authentication,cluster,plugins,utils}`
 - Plugin SPI: `core/src/main/java/com/dtolabs/rundeck/plugins/` (35 service types in `ServiceNameConstants.java:35-76`)
@@ -555,7 +555,8 @@ phase reviews, unblocking) belongs to the Sunday review session.
 ## Appendix B — Inventory (measured on tag v6.3.0)
 
 - Backend: ~370k lines Groovy + ~147k lines Java. Legacy frontend: ~46k TS, ~49k Vue, ~81k JS; 260 GSP files.
-- API: versions 14–60, 120 route patterns in the main app + plugin routes; 27 controllers; 66 services; 23 domain classes.
-- Plugin service types: 35 (`ServiceNameConstants.java`; MISSION drafts said 36). Built-in plugin modules: 15. Functional specs: 64 API, 57 Selenium.
+- API: versions 14–60, 119 route patterns in the main app + 33 plugin API routes; 26 controllers (+ `WebhookController`); 65 `*Service.groovy`
+  (+ `WebhookService`); 23 domain classes (22 + `Webhook`). Counts reproduced by `scripts/inventory/routes.py`.
+- Plugin service types: 35 (`ServiceNameConstants.java`; MISSION drafts said 36). Built-in plugin modules: 15. Functional specs: 63 `@APITest` (+4 under other tasks), 57 Selenium.
 - Legacy build (only if ever needed): Java 17 + Node, `./gradlew build -x check` ≈ 4–8 min on a laptop; prefer the
   published `rundeck/rundeck:6.3.0` image as oracle.

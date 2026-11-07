@@ -29,6 +29,10 @@
 # Benchmarks
 /scripts/bench/results/
 
+# Python helper scripts
+__pycache__/
+*.pyc
+
 # OS / editors
 .DS_Store
 *.swp
