@@ -1,0 +1,58 @@
+/*
+ * Global styles: Tailwind 4 for layout and tokens, PrimeVue 4 (Aura) for components.
+ *
+ * The cascade-layer order is fixed here, before anything else loads: PrimeVue component styles
+ * (`primevue`, the layer name configured in main.ts) beat Tailwind's preflight (`base`) but lose
+ * to Tailwind utilities, so a utility class on a PrimeVue component wins as expected.
+ */
+@layer theme, base, primevue, components, utilities;
+
+@import 'tailwindcss';
+
+/*
+ * Dark mode is class-driven: the theme store toggles `dark` on <html>, which is both PrimeVue's
+ * `darkModeSelector` (main.ts) and the selector of Tailwind's `dark:` variant below.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Tailwind color tokens aliased to PrimeVue's design tokens so both systems share one palette. */
+@theme inline {
+  --color-surface-0: var(--p-surface-0);
+  --color-surface-50: var(--p-surface-50);
+  --color-surface-100: var(--p-surface-100);
+  --color-surface-200: var(--p-surface-200);
+  --color-surface-300: var(--p-surface-300);
+  --color-surface-400: var(--p-surface-400);
+  --color-surface-500: var(--p-surface-500);
+  --color-surface-600: var(--p-surface-600);
+  --color-surface-700: var(--p-surface-700);
+  --color-surface-800: var(--p-surface-800);
+  --color-surface-900: var(--p-surface-900);
+  --color-surface-950: var(--p-surface-950);
+  --color-primary: var(--p-primary-color);
+  --color-primary-contrast: var(--p-primary-contrast-color);
+  --color-primary-emphasis: var(--p-primary-hover-color);
+  --color-content: var(--p-content-background);
+  --color-content-border: var(--p-content-border-color);
+  --color-fg: var(--p-text-color);
+  --color-fg-muted: var(--p-text-muted-color);
+}
+
+html {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background-color: var(--p-surface-50);
+  color: var(--p-text-color);
+  -webkit-font-smoothing: antialiased;
+}
+
+html.dark body {
+  background-color: var(--p-surface-950);
+}
