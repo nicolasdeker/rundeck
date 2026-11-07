@@ -8,11 +8,11 @@ screenshots updated, tag `phase-N` via REST, journal summary).
 
 - [x] P0-01 Repo surgery: Java tree → `legacy/` pinned at `v6.3.0`, kit at the root, `NOTICE`, `.gitmodules`, `.gitignore` (commit 513185b)
 - [x] P0-02 Cloud environment: setup script runs from the checkout's parent (`scripts/cloud-setup.sh`, env `RDX` re-saved), Maven mirror init script, oracle tools image (commit c7f6353 + follow-ups)
-- [ ] P0-03 Rust workspace scaffold: `Cargo.toml`, 22 `rdx-*` crates + `quartz-cron`, toolchain/fmt/clippy/deny, `Makefile`, `docs/ARCHITECTURE.md`
-- [ ] P0-04 `ui/` scaffold (Vue 3 + Vite + PrimeVue 4 + Tailwind 4) with lint/test/e2e; login shell; screenshots in `docs/ui-review/phase-0/`
+- [x] P0-03 Rust workspace scaffold: `Cargo.toml`, 22 `rdx-*` crates + `quartz-cron`, toolchain/fmt/clippy/deny, `Makefile`, `docs/ARCHITECTURE.md`
+- [x] P0-04 `ui/` scaffold (Vue 3 + Vite + PrimeVue 4 + Tailwind 4) with lint/test/e2e; login shell; screenshots in `docs/ui-review/phase-0/`
 - [ ] P0-05 CI: `ci.yml`, `parity.yml`, `nightly.yml`, `release.yml`; `scripts/oracle.sh`, `scripts/parity.sh`, `scripts/parity-report.py`, `scripts/bench/`, `tests/parity-skips.toml`
 - [ ] P0-06 `PARITY.md` inventory (routes, service types, plugins, domain classes, formats, behavior, journeys) + `specs/ui-journeys.md` + `specs/README.md`
-- [ ] P0-07 ADR-0001..0009 + `docs/COMPAT.md`
+- [x] P0-07 ADR-0001..0009 + `docs/COMPAT.md` (commit: adr, 21 COMPAT rows, 87 verified legacy citations)
 - [ ] P0-08 Oracle proven: `legacy/functional-test` `apiTest` against `rundeck/rundeck:6.3.0` in-session and in `parity.yml`; baseline recorded in `PARITY.md`
 - [ ] P0-09 Scheduled tasks `rdx-autopilot` and `rdx-review` created; owner actions journaled
 - [ ] P0-10 Exit gate: `ci.yml` green on `main`, journal summary, tag `phase-0`

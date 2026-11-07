@@ -72,7 +72,7 @@ Everything below is verified by the oracle: the **upstream functional test suite
   (`rundeck-authz-core`), same validation messages where tests assert them.
 - Config: `rundeck-config.properties`, `framework.properties`, `project.properties` (incl. `rundeck.server.uuid`,
   cluster mode), `realm.properties` (every credential format legacy's `PropertyFileLoginModule` accepts — verify in
-  `legacy/rundeckapp/src/main/java/.../jaas/`), `jaas-loginmodule.conf` (parse the JAAS format, map modules to native
+  `legacy/core/src/main/java/org/rundeck/jaas/PasswordCredential.java`: plain, `MD5:`, `CRYPT:`, `BCRYPT:`, `OBF:`), `jaas-loginmodule.conf` (parse the JAAS format, map modules to native
   auth providers: property file, LDAP, LDAP combined, PAM; see §3.7), `log4j2.properties` (accept; map to `tracing`).
 - Execution logs: the `.rdlog` format (`legacy/core/src/main/java/com/dtolabs/rundeck/core/logging/internal/RundeckLogFormat.java`)
   so existing log archives remain readable and `output` endpoints return identical entries.
@@ -144,13 +144,16 @@ Everything below is verified by the oracle: the **upstream functional test suite
   is a bug confirmed by legacy tests or docs, or (c) the legacy feature is JVM-bound (H2, jar plugins, JAAS classes,
   GSP-injected UI plugins). Where feasible keep a compatibility switch (`rdx.compat.<name>=true`) defaulting to the
   secure behavior.
-- **Pre-approved deviations** (write the ADRs in Phase 0): API tokens stored hashed; new local passwords hashed with
-  argon2id while all legacy `realm.properties` formats remain accepted; stricter default security headers/CSP (legacy
-  `grails-securityheaders` is the floor); session cookies `Secure`/`HttpOnly`/`SameSite=Lax`; constant-time
+- **Pre-approved deviations** (ADR-0007, `docs/COMPAT.md` C-001..C-007): no plaintext API tokens (legacy 6.3.0 already
+  SHA-256-hashes new tokens, `AuthToken.groovy:36,81-95`; the deviation is that `LEGACY`-mode rows are never created
+  and are re-encoded); new local passwords hashed with argon2id while all legacy `realm.properties` formats remain
+  accepted; stricter default security headers/CSP (legacy `grails-securityheaders` is the floor); session cookies
+  `Secure` also behind TLS-terminating proxies (legacy already sets `HttpOnly`/`SameSite=Lax`, `application.yml:400-401`); constant-time
   comparisons; log files `0600`; no default `admin/admin` credentials in packaged artifacts unless
   `RDX_INSECURE_DEFAULT_ADMIN=1` (the oracle fixture sets it so the upstream tests stay runnable); the whole UI (§3.8).
-- **Additive features are allowed only after their phase gate** and off by default: OIDC/OAuth2 login, Prometheus
-  exposition, OpenTelemetry traces, WASM plugin ABI, UI extension API. They never alter a legacy contract.
+- **Additive features are allowed only after their phase gate** and off by default: OIDC/OAuth2 login, OpenTelemetry
+  traces, WASM plugin ABI, UI extension API. They never alter a legacy contract. (Prometheus exposition is not additive:
+  legacy already serves `/monitoring/prometheus`, a contract to keep — ADR-0008.)
 - When unsure whether something is a contract: **it is**. Preserve it, note it in `DECISIONS-PENDING.md`.
 
 ---
@@ -211,7 +214,7 @@ Tier 1: **script plugins** unchanged (zip + `plugin.yaml`, same provider types, 
 Tier 2: **built-in providers** ported natively in Rust (everything in `legacy/plugins/*`: localexec, script,
 script-node-step, stub, copyfile, job-state, source-refresh, flow-control, aes-gcm-encryption, object-store
 (S3-compatible), orchestrator, git, audit-logging, upvar, jsch→russh). Tier 3: a **WASM Component Model ABI**
-(`wit/` definitions mirroring the 36 service types in `legacy/core/.../ServiceNameConstants.java`), hosted by
+(`wit/` definitions mirroring the 35 service types in `legacy/core/.../ServiceNameConstants.java`), hosted by
 `wasmtime` with capability-scoped WASI. Tier 4 (not v1): a JVM sidecar over gRPC for jar plugins — design note only.
 Plugin descriptors, property schemas, `/plugin/list` and `/plugin/detail` keep the legacy shapes.
 
@@ -257,7 +260,8 @@ handler (a test walks the router and fails on any handler without an explicit au
 
 ### 3.9 Observability (ADR-0008)
 `tracing` everywhere with execution/job/project/user fields; OpenTelemetry OTLP export optional; a Prometheus
-registry exposed at `/metrics` (new) and projected into the legacy Dropwizard JSON shape at `/api/*/metrics/*`;
+registry exposed at the legacy path `/monitoring/prometheus` (`/metrics/*` is the legacy Dropwizard namespace, 404 by
+default in 6.3.0) and projected into the legacy Dropwizard JSON shape at `/api/*/metrics/*`;
 `/api/*/system/info` and `/health` keep legacy content; structured JSON logs with secret redaction.
 
 ### 3.10 Packaging (ADR-0009)
@@ -346,7 +350,7 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
   `scripts/cloud-setup.sh` (kept current: it is the cloud environment's setup script), `scripts/oracle.sh`
   (`docker compose` with `rundeck/rundeck:6.3.0`, `RUNDECK_TOKENS_FILE` with `admintoken`), `scripts/parity.sh`,
   `scripts/bench/`, `ui/` scaffold (§3.8) with lint/test/e2e wiring.
-- Generate `PARITY.md` from `UrlMappings.groovy` (all routes), `ServiceNameConstants.java` (36 service types),
+- Generate `PARITY.md` from `UrlMappings.groovy` (all routes), `ServiceNameConstants.java` (35 service types),
   `legacy/plugins/*` (15 built-ins), domain classes (23), file formats (§1.2), journeys (§1.6): one row each, `missing`.
 - Write ADR-0001..0009 and the pre-approved deviations of §2 into `docs/COMPAT.md`.
 - Prove the oracle: run `legacy/functional-test` `apiTest` against `rundeck/rundeck:6.3.0` (in-session with Docker,
@@ -527,16 +531,18 @@ phase reviews, unblocking) belongs to the Sunday review session.
 - Controllers: `rundeckapp/grails-app/controllers/rundeck/controllers/*.groovy` (`ApiController`, `ExecutionController`,
   `ScheduledExecutionController`, `ProjectController`, `FrameworkController`, `StorageController`, `ScmController`, `PluginController`, ...)
 - Services: `rundeckapp/grails-app/services/rundeck/services/` (66)
-- Domain + schema: `rundeckapp/grails-app/domain/rundeck/*.groovy`, `webhooks/Webhook.groovy`; `rundeckapp/grails-app/migrations/`
+- Domain + schema: `rundeckapp/grails-app/domain/rundeck/*.groovy` (22), `grails-webhooks/grails-app/domain/webhooks/Webhook.groovy`; `rundeckapp/grails-app/migrations/`
 - Core engine: `core/src/main/java/com/dtolabs/rundeck/core/{execution,dispatcher,jobs,nodes,resources,rules,schedule,storage,logging,authorization,authentication,cluster,plugins,utils}`
-- Plugin SPI: `core/src/main/java/com/dtolabs/rundeck/plugins/` (36 service types in `ServiceNameConstants.java`)
+- Plugin SPI: `core/src/main/java/com/dtolabs/rundeck/plugins/` (35 service types in `ServiceNameConstants.java:35-76`)
 - Built-in plugins: `plugins/*` (15)
 - AuthZ: `rundeck-authz/{rundeck-authz-api,rundeck-authz-core,rundeck-authz-yaml}`; key storage: `rundeck-storage/*`; crypto: `encryption-core/`
 - Job codecs: `rundeckapp/grails-app/utils/rundeck/codecs/{JobsXMLCodec,JobsYAMLCodec}.groovy`
 - Node filter: `core/src/main/java/com/dtolabs/rundeck/core/utils/NodeSet.java`, `core/.../common/NodeFilter.java`
 - Log format: `core/src/main/java/com/dtolabs/rundeck/core/logging/internal/RundeckLogFormat.java`
-- JAAS modules: `rundeckapp/src/main/java/**/jaas/` (`PropertyFileLoginModule`, `JettyCachingLdapLoginModule`,
-  `JettyCombinedLdapLoginModule`, `JettyPamLoginModule`, ...)
+- JAAS modules: `rundeckapp/src/main/java/org/rundeck/jaas/` (`PropertyFileLoginModule`, `AbstractLoginModule`),
+  `rundeckapp/src/main/groovy/com/dtolabs/rundeck/jetty/jaas/` (`JettyCachingLdapLoginModule`, `JettyCombinedLdapLoginModule`),
+  `rundeckapp/src/main/groovy/org/rundeck/jaas/jetty/` (`JettyPamLoginModule`, property-file variants); credential formats
+  (plain, `MD5:`, `CRYPT:`, `BCRYPT:`, `OBF:`) in `core/src/main/java/org/rundeck/jaas/PasswordCredential.java`
 - Legacy frontend (reference only): `rundeckapp/grails-spa/packages/ui-trellis/`, `rundeckapp/grails-app/views/**/*.gsp`,
   `rundeckapp/grails-app/i18n/`
 - Oracle: `functional-test/` (tasks `apiTest`, `seleniumCoreTest`, `ldapTest`, `jdbcTest`, `pluginBlocklistTest`,
@@ -550,6 +556,6 @@ phase reviews, unblocking) belongs to the Sunday review session.
 
 - Backend: ~370k lines Groovy + ~147k lines Java. Legacy frontend: ~46k TS, ~49k Vue, ~81k JS; 260 GSP files.
 - API: versions 14–60, 120 route patterns in the main app + plugin routes; 27 controllers; 66 services; 23 domain classes.
-- Plugin service types: 36. Built-in plugin modules: 15. Functional specs: 64 API, 57 Selenium.
+- Plugin service types: 35 (`ServiceNameConstants.java`; MISSION drafts said 36). Built-in plugin modules: 15. Functional specs: 64 API, 57 Selenium.
 - Legacy build (only if ever needed): Java 17 + Node, `./gradlew build -x check` ≈ 4–8 min on a laptop; prefer the
   published `rundeck/rundeck:6.3.0` image as oracle.
