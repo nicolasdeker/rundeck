@@ -17,8 +17,9 @@ mission brief is `MISSION.md`. **Read it at the start of every session, then `PL
 - `PLAN.md` — phases, checklists, `← CURRENT` item. `PARITY.md` — contract matrix. `JOURNAL.md` — append-only session
   log. `DECISIONS-PENDING.md` — defaults taken (mirrored as GitHub issues labeled `decision`). `BLOCKED/` — one file per
   blocked item (mirrored as issues labeled `blocked`).
-- `scripts/` — `cloud-setup.sh` (the cloud environment's setup script), `oracle.sh` (legacy Rundeck via Docker),
-  `parity.sh` (upstream functional suite against the Rust binary), `bench/`.
+- `scripts/` — `prompts/{bootstrap,run,review}.md` (session prompts used by the autopilot), `cloud-setup.sh` (cloud
+  environment setup script), `oracle.sh` (legacy Rundeck via Docker), `parity.sh` (upstream functional suite against the
+  Rust binary), `bench/`. `.github/workflows/autopilot.yml` — the unattended loop (API-billed, spend-capped).
 
 ## Working rules (short form — MISSION.md is authoritative)
 

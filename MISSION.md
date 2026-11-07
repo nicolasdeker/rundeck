@@ -28,9 +28,10 @@ The product is not called Rundeck ("Rundeck" is a trademark of PagerDuty, Inc.).
 (binary `rdx`, crates `rdx-*`). Keep `NOTICE` with the Apache-2.0 attribution and a "not affiliated with PagerDuty"
 statement. Legacy config keys that contain the word `rundeck` are kept verbatim for compatibility.
 
-**Operating model (non-negotiable):** everything runs in Claude Code cloud sessions (Anthropic-hosted VM: Ubuntu 24.04,
-4 vCPU, 16 GB, 30 GB disk, Docker + compose, JDK 21/Gradle, Rust, Node 20/22, PostgreSQL 16, `gh`) plus GitHub
-Actions on the public fork. State lives in git. Progress is reviewable from the GitHub app and the Claude app.
+**Operating model (non-negotiable):** unattended sessions run as GitHub Actions jobs billed to the owner's API key
+with hard spend caps (Mode A), or as Claude Code cloud sessions (ad-hoc from the Claude app; Mode B scheduled tasks on
+the subscription, night-only). The family's claude.ai usage is protected: no autopilot run may consume subscription
+usage during homework hours. State lives in git. Progress is reviewable from the GitHub app and the Claude app.
 Details in §7.
 
 ---
@@ -350,7 +351,9 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
 - Prove the oracle: run `legacy/functional-test` `apiTest` against `rundeck/rundeck:6.3.0` (in-session with Docker,
   and in the `parity` workflow); store the baseline pass list in `PARITY.md` (tests failing on legacy are excluded
   from gates and listed).
-- Create the recurring cloud scheduled task `rdx-autopilot` (§7) if it does not exist yet, and verify a `Run now`.
+- Recurring runs: in Mode A nothing to create (the `autopilot` workflow is in the kit); verify its prerequisites and
+  document missing secrets/variables in `JOURNAL.md` under "Owner action required". In Mode B create the cloud scheduled
+  task `rdx-autopilot` (§7) if it does not exist yet.
 - Exit: CI green on the empty workspace; `scripts/parity.sh` can target legacy or `rdx` by env; first UI screenshots
   (login shell) in `docs/ui-review/phase-0/`.
 
@@ -409,15 +412,24 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
 ## 7. Autonomy protocol (cloud-only)
 
 **Where things run**
-- **Work sessions**: the cloud scheduled task `rdx-autopilot` (cron `7 */2 * * *`, repository `nicolasdeker/rundeck`,
-  environment `rdx` whose setup script is `bash scripts/cloud-setup.sh` and whose variables include
-  `BASH_DEFAULT_TIMEOUT_MS=600000`, `BASH_MAX_TIMEOUT_MS=1800000`). Each run is a fresh VM with the repo cloned at
-  `main`. The owner can also open an ad-hoc session from the Claude app (**Code** tab) at any time; the same rules apply.
+- **Work sessions — Mode A (default): the `autopilot` GitHub Actions workflow** (`.github/workflows/autopilot.yml`) on
+  the public fork, billed to the owner's **API key** with a hard per-run spend cap (`--max-budget-usd`), so that the
+  family's claude.ai subscription usage is never touched. Schedule: two sessions per night (01:07 and 04:07 Europe/Zurich)
+  with the work model (`AUTOPILOT_MODEL`, default `sonnet`), plus a Sunday **review** session with the review model
+  (`AUTOPILOT_REVIEW_MODEL`, default `opus`) running `scripts/prompts/review.md`. The owner pauses everything with the
+  repository variable `AUTOPILOT_ENABLED=false`; a manual run is `Actions → autopilot → Run workflow` (modes
+  `bootstrap`, `run`, `review`). Each run posts its result and cost as a comment on the issue labeled `autopilot`.
+- **Mode B (alternative, subscription-billed)**: the cloud scheduled task `rdx-autopilot` (cron `7 0,3 * * *` UTC,
+  repository `nicolasdeker/rundeck`, environment `rdx` whose setup script is `bash scripts/cloud-setup.sh` and whose
+  variables include `BASH_DEFAULT_TIMEOUT_MS=600000`, `BASH_MAX_TIMEOUT_MS=1800000`). Used only if the owner chooses it
+  in `KICKOFF.md`; night-only cadence and a Sonnet-class model so the family keeps its usage for homework hours.
+- **Ad-hoc sessions**: the owner can open a cloud session from the Claude app (**Code** tab) at any time to steer or
+  to run something urgent; the same rules and the same lock apply.
 - **Heavy verification**: GitHub Actions on the public fork (free standard runners, Docker, services). `parity.yml`
   runs the full oracle suite on every push to `main` and uploads `parity-report.json`; `nightly.yml` runs fuzzing,
-  benches, Lighthouse; `ci.yml` is the fast gate (fmt, clippy, tests, deny, audit, ui lint/test).
-- **Owner interface**: GitHub app (commits, Actions, issues) and Claude app (run transcripts, steering). Nothing requires
-  a terminal.
+  benches, Lighthouse; `ci.yml` is the fast gate (fmt, clippy, tests, deny, audit, ui lint/test). Pushes made by the
+  autopilot use the owner's PAT so that these workflows trigger normally.
+- **Owner interface**: GitHub app (commits, Actions, issues) and Claude app (ad-hoc sessions). Nothing requires a terminal.
 
 **State lives in files, not in your context.** A fresh session must resume in under five minutes.
 - `PLAN.md`: phases as checklists; exactly one item marked `← CURRENT`. Granularity: 1–3 hours of work.
@@ -449,8 +461,8 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
 4. Work the current item with the §5 loop. Commit at every green step (conventional messages), **push to `main`**
    after each commit (`git push origin HEAD:main`; never force). The scheduled task's default `claude/` branch
    behavior is overridden by this instruction.
-5. Stop after ~90 minutes of work or when the item is done: `JOURNAL.md` entry, `PLAN.md` update, commit, push,
-   release the lock. The next scheduled run continues.
+5. Stop after ~60 minutes of work, when the item is done, or when the spend approaches the cap: `JOURNAL.md` entry,
+   `PLAN.md` update, commit, push, release the lock. The next scheduled run continues.
 6. When a phase gate is met: create the tag `phase-N` through the REST API (git pushes of tags are refused by the proxy):
    `gh api repos/nicolasdeker/rundeck/git/refs -f ref=refs/tags/phase-N -f sha=$(git rev-parse HEAD)`; journal
    summary with screenshot links; move `← CURRENT` to the next phase.
@@ -467,8 +479,11 @@ close the phase with the item listed in `BLOCKED/` and in `PARITY.md` as `missin
 - Run the full Selenium/Playwright suites in CI, not in-session; in-session use filtered runs.
 - Disk: `cargo clean -p` old artifacts if `df` shows < 5 GB; never commit `target/`, `node_modules/`, oracle data.
 
-**Budget**: runs count against the owner's subscription. Do not spawn parallel sessions; one lock, one run. Prefer
-`legacy-analyst` (sonnet) for exploration. Never run the same failing command more than twice in a row.
+**Budget**: every run has a hard spend cap and the owner's API spend limit is the ultimate stop; a run that hits its
+cap is not a failure, it is the plan. Plan each session so that the final 15 % of the budget is kept for wrapping up
+(journal, plan, commit, push, unlock). Do not spawn parallel sessions; one lock, one run. Prefer `legacy-analyst`
+(sonnet) for exploration; use subagents sparingly — they share the run's cap. Never run the same failing command more
+than twice in a row. Expensive work (engine design, phase reviews, unblocking) belongs to the weekly review session.
 
 ---
 

@@ -1,70 +1,87 @@
-# KICKOFF — run the rdx mission from an iPhone (Claude app + GitHub app), nothing else
+# KICKOFF — run the rdx mission from an iPhone, without touching the family's Claude usage
 
-Everything below is done from the phone: Safari for two one-time settings pages, the Claude app for sessions,
-the GitHub app for supervision. No terminal, no VM.
+Everything is done from the phone: Safari for a few settings pages, the GitHub app and the Claude app for
+supervision. No terminal, no VM.
 
-## 0. One-time setup (≈10 minutes, Safari)
+## Budget — why Mode A
 
-1. **GitHub App** — install the Claude GitHub App on the fork: https://github.com/apps/claude → *Install* → select
-   `nicolasdeker/rundeck`. (Gives cloud sessions push access, Auto-fix, and GitHub-event triggers.)
-2. **Cloud environment `rdx`** — https://claude.ai/code → environment settings → *New environment*:
-   - Name: `rdx` · Network access: **Trusted** (default list is enough: GitHub, Docker Hub, crates.io, npm, Maven, Ubuntu apt).
-   - Environment variables:
-     ```
-     BASH_DEFAULT_TIMEOUT_MS=600000
-     BASH_MAX_TIMEOUT_MS=1800000
-     CARGO_TERM_COLOR=never
-     ```
-   - Setup script: `bash scripts/cloud-setup.sh`
-   The snapshot is taken the first time the environment is used (after the kit is merged); if a run reports that
-   `scripts/cloud-setup.sh` changed, re-save the environment to refresh the snapshot.
-3. **Usage** — a run every 2 hours ≈ 12 sessions/day on the subscription. Check https://claude.ai/settings/usage;
-   turn on usage credits if the runs must continue past the plan's limit.
+The claude.ai subscription has one usage pool per account (5-hour windows + weekly limits), shared by chat, Claude Code,
+cloud sessions and scheduled tasks. There is no way to reserve part of it for homework. So the autopilot runs on
+**API billing instead** (Mode A): API usage is a separate budget with a hard monthly cap, it never counts against the
+plan, and Max/Ultra plans include **$100/month of API credits** (Max) / **$200** (Ultra) that cover exactly this kind of
+`claude -p` run. Rules of thumb: a one-hour Sonnet session costs a few dollars; an Opus/Fable session several times
+more. The defaults below (2 Sonnet sessions per night at $8 cap + 1 Opus review per week at $30) land around
+$150/month, i.e. the included credits plus about $50 — set the Console spend limit to what you accept, and the loop
+simply pauses when it is reached.
 
-## 1. Bootstrap session (Claude app → **Code** tab → `nicolasdeker/rundeck` → environment `rdx` → paste PROMPT 1)
+Mode B (subscription, cloud scheduled task, nights only, Sonnet) is kept as a fallback in §5; it is free but it does
+eat into the weekly limit the kids rely on.
 
-Model: the strongest available (Fable or Opus), effort high or max. Expected duration: 1–3 hours (Phase 0).
+## 1. One-time setup for Mode A (≈20 minutes, Safari)
 
-### PROMPT 1 — bootstrap
-```
-Bootstrap the rdx mission in this repository (nicolasdeker/rundeck).
+1. **Claude Console** — https://platform.claude.com : sign in with the same account, create an organization if asked.
+   - On https://claude.ai → *Settings → Billing → API credits → Link organization*: claims the included monthly credits
+     (plan held ≥ 7 days; Max/Ultra only).
+   - *API keys → Create key*: name `rdx-autopilot`, copy it once.
+   - *Billing / Limits*: set a **monthly spend limit** (e.g. 150 USD). With no payment method on file the runs stop
+     when the included credits are used up — the strictest protection.
+2. **GitHub personal access token** — https://github.com/settings/personal-access-tokens → *Fine-grained → Generate*:
+   repository access `nicolasdeker/rundeck` only; permissions **Contents: Read and write**, **Issues: Read and write**,
+   **Workflows: Read and write**, **Actions: Read**. Expiry 90 days (put a reminder). Copy it once.
+3. **Repository settings** — https://github.com/nicolasdeker/rundeck/settings/secrets/actions (desktop site if the
+   mobile layout hides the menu):
+   - Secrets: `ANTHROPIC_API_KEY` = the Console key · `AUTOPILOT_PAT` = the token from step 2.
+   - Variables (tab *Variables*): `AUTOPILOT_ENABLED=true` · `AUTOPILOT_MODEL=sonnet` · `AUTOPILOT_EFFORT=high` ·
+     `AUTOPILOT_RUN_BUDGET_USD=8` · `AUTOPILOT_REVIEW_MODEL=opus` · `AUTOPILOT_REVIEW_BUDGET_USD=30`.
+   - *Settings → Actions → General*: workflow permissions **Read and write**, and allow GitHub Actions to create issues.
+4. **Merge the kit (required: Actions only lists workflows that exist on `main`)** —
+   https://github.com/nicolasdeker/rundeck/compare/main...claude/rdx-kit → *Create pull request → Merge pull request*.
+5. **GitHub App** (optional but recommended, for ad-hoc sessions and Auto-fix): https://github.com/apps/claude → *Install*
+   → select `nicolasdeker/rundeck`.
 
-1. Run: git fetch origin claude/rdx-kit && git merge --ff-only origin/claude/rdx-kit (if a fast-forward is impossible, merge normally). Then read CLAUDE.md and MISSION.md fully.
-2. Execute MISSION.md §6 "Phase 0 — Bootstrap" completely, following §7 (take the autopilot-lock branch first, push to main after each commit, JOURNAL.md, PLAN.md). Pin legacy to tag v6.3.0 exactly as §6 describes.
-3. Create the cloud scheduled task named "rdx-autopilot": prompt = the text under "PROMPT 2" in KICKOFF.md, schedule = custom cron "7 */2 * * *", repository = nicolasdeker/rundeck, environment = "rdx" (fall back to Default if "rdx" does not exist and say so). If you cannot create scheduled tasks from this session, write the exact settings in JOURNAL.md under "Owner action required" so the owner creates it at claude.ai/code/routines.
-4. Release the lock. Finish with a JOURNAL.md entry and a short final message: what exists now, the first CI run URL, what the next scheduled run will do, and anything the owner must do from his phone.
-```
+## 2. Bootstrap (Phase 0)
 
-## 2. Recurring work (scheduled task `rdx-autopilot`)
+GitHub app or Safari → *Actions → autopilot → Run workflow* → mode `bootstrap`, budget `20` → *Run workflow*.
+Expected: 1–3 hours. Follow it in the workflow log; the result is posted as the first comment of the issue
+**"Autopilot runs"** (created automatically). If something is missing (secret, permission), the comment says so.
+If the run fails at startup with a model/effort error, change `AUTOPILOT_MODEL` / `AUTOPILOT_EFFORT` (e.g. `medium`)
+and run again.
 
-Created by the bootstrap session, or manually at https://claude.ai/code/routines → *New task*:
-name `rdx-autopilot`, trigger *Schedule* → *Custom* → `7 */2 * * *`, repository `nicolasdeker/rundeck`,
-environment `rdx`, model Fable/Opus with effort high, prompt = PROMPT 2.
+Alternative (uses subscription usage once, but gives you a readable transcript): Claude app → **Code** tab →
+`nicolasdeker/rundeck` → paste the content of `scripts/prompts/bootstrap.md` (also quoted at the end of this file).
 
-### PROMPT 2 — scheduled run
-```
-You are a scheduled run of the rdx mission in nicolasdeker/rundeck. CLAUDE.md and MISSION.md in the repository are the contract: read them fully, then follow MISSION.md §7 (autonomy protocol) exactly.
+## 3. Recurring runs
 
-1. Lock: git fetch origin autopilot-lock. If the branch exists, its tip commit message starts with "lock" and its committer date is younger than 3 hours, print "locked, skipping" and stop without changing anything. Otherwise take the lock exactly as §7 describes (a "lock <time> <run>" commit force-pushed to autopilot-lock).
-2. Session ritual: tail -n 80 JOURNAL.md, the "← CURRENT" item of PLAN.md, open issues labeled decision/blocked (gh api repos/nicolasdeker/rundeck/issues?labels=decision&state=open — never gh issue/gh pr), latest CI runs (gh run list -L 5; gh run view <id> --log-failed on red), latest parity-report artifact, then make check.
-3. Work the ← CURRENT item with the parity loop of MISSION.md §5 (spec → tests → code → oracle/Playwright → review → journal). Commit at every green step and push to main: git push origin HEAD:main. Never create or push any other branch. Never ask the owner anything: decide, record (ADR or DECISIONS-PENDING.md + decision issue), continue. Three failed attempts on one item → BLOCKED/<id>.md + blocked issue, next item.
-4. After about 90 minutes of work, or when the item is done: JOURNAL.md entry (Done / Evidence with commit SHAs and CI URLs / Next / Risks), PLAN.md update, commit, push, release the lock (an "unlocked <time>" commit force-pushed to autopilot-lock).
-5. If MISSION.md §9 is fully satisfied: write DONE at the repo root, commit, push, pause this scheduled task, open an issue titled "Release v0.1.0 ready".
+Nothing to create: the `autopilot` workflow fires at 01:07 and 04:07 (Europe/Zurich, winter) every night with the
+work model, and on Sunday 03:07 with the review model. Each run: locks `autopilot-lock`, works the `← CURRENT` item of
+`PLAN.md`, commits and pushes to `main`, writes `JOURNAL.md`, posts cost + summary to the "Autopilot runs" issue.
 
-Final message: item worked, commits (SHAs), CI status, next item, and anything the owner should look at (screenshots under docs/ui-review/, decision issues).
-```
+- **Pause / resume**: variable `AUTOPILOT_ENABLED=false` / `true`.
+- **Faster / slower**: edit the two cron lines in `.github/workflows/autopilot.yml` (any run can do it for you:
+  comment on a `decision` issue or open an ad-hoc session and say "add a 10:07 weekday run").
+- **Stronger model for work runs**: `AUTOPILOT_MODEL=opus` (raise `AUTOPILOT_RUN_BUDGET_USD` accordingly).
+- **Manual run now**: *Actions → autopilot → Run workflow* (mode `run` or `review`, optional budget override).
 
-## 3. Daily supervision from the phone
+## 4. Daily supervision from the phone
 
-- **GitHub app**: commits on `main` (each one is a green step), *Actions* (`ci`, `parity`, `nightly`), issues labeled
-  `decision` (answer in a comment: the next run applies it and closes the issue) and `blocked`, screenshots under
-  `docs/ui-review/<phase>/`, `JOURNAL.md` and `PARITY.md` for the big picture.
-- **Claude app**: open any run from the task's *History* to read what happened, or send it a message to steer.
-  To change direction durably: open a session on the repo and say *"Update MISSION.md: …"* — the next runs obey the
-  new text. To pause: the task's on/off switch at claude.ai/code/routines.
-- **Review UI work**: the screenshots gallery (`docs/ui-review/`) is updated at every phase gate; the journal links it.
+- **GitHub app**: issue **"Autopilot runs"** (one comment per session with cost and summary), commits on `main`,
+  *Actions* (`autopilot`, `ci`, `parity`, `nightly`), issues labeled `decision` (answer in a comment: the next run
+  applies it and closes the issue) and `blocked`, screenshots under `docs/ui-review/<phase>/`, `JOURNAL.md` and
+  `PARITY.md` for the big picture.
+- **Claude app**: open an ad-hoc cloud session on the repo to steer ("Update MISSION.md: …", "show me the execution
+  page screenshots and explain the choices"); it uses subscription usage, so keep it for real decisions.
+- **Console**: https://platform.claude.com → Billing shows the month's API spend and the remaining credits.
 
-## 4. Decisions already taken for you (reverse any of them with one message to a session)
+## 5. Mode B — subscription instead of API (fallback)
+
+Create the cloud environment `rdx` (https://claude.ai/code → environments → *New*: name `rdx`, network **Trusted**,
+variables `BASH_DEFAULT_TIMEOUT_MS=600000`, `BASH_MAX_TIMEOUT_MS=1800000`, `CARGO_TERM_COLOR=never`, setup script
+`bash scripts/cloud-setup.sh`), then at https://claude.ai/code/routines → *New task*: name `rdx-autopilot`, trigger
+*Schedule → Custom* `7 0,3 * * *`, repository `nicolasdeker/rundeck`, environment `rdx`, model Sonnet / effort high,
+prompt = content of `scripts/prompts/run.md`. Set `AUTOPILOT_ENABLED=false` on GitHub so the two modes never overlap.
+Expect the weekly limit to be shared with homework use; keep the cadence to nights.
+
+## 6. Decisions already taken for you (reverse any of them with one message)
 
 - Backend contracts identical to Rundeck 6.3.0 (API v14–60, formats, DB schema on Postgres/MySQL, script plugins).
 - Frontend rebuilt from scratch: Vue 3 + TypeScript + Vite + PrimeVue 4 + Tailwind 4, mobile-first, live execution
@@ -72,5 +89,17 @@ Final message: item worked, commits (SHAs), CI status, next item, and anything t
 - Embedded DB: SQLite instead of H2 (JVM-only); migration tool provided.
 - Java `.jar` plugins and legacy GSP-injected UI plugins: not supported in v1; script plugins unchanged; new WASM plugin ABI.
 - Working name `rdx` (Rundeck is a PagerDuty trademark).
-- Trunk-based: every run commits and pushes to `main`; phase tags `phase-N` (created via the GitHub API); one run at a
-  time via the `autopilot-lock` branch.
+- Trunk-based: every run commits and pushes to `main`; phase tags via the GitHub API; one run at a time via the
+  `autopilot-lock` branch; Sonnet for routine work, Opus for the weekly review.
+
+---
+
+### Appendix — the bootstrap prompt (`scripts/prompts/bootstrap.md`), for the Claude-app variant
+```
+Bootstrap the rdx mission in this repository (nicolasdeker/rundeck).
+
+1. If the files CLAUDE.md, MISSION.md and KICKOFF.md are not yet the rdx kit (check for "rdx" in CLAUDE.md), run: git fetch origin claude/rdx-kit && git merge --ff-only origin/claude/rdx-kit (if a fast-forward is impossible, merge normally). Then read CLAUDE.md and MISSION.md fully.
+2. Execute MISSION.md §6 "Phase 0 — Bootstrap" completely, following §7 (take the autopilot-lock branch first, push to main after each commit, JOURNAL.md, PLAN.md). Pin legacy to tag v6.3.0 exactly as §6 describes.
+3. Operating mode: read KICKOFF.md §"Budget". If this session runs inside GitHub Actions (the GITHUB_ACTIONS environment variable is set), the recurring runs are the autopilot workflow already present in .github/workflows/autopilot.yml — do not create a cloud scheduled task; make sure the workflow's prerequisites are documented in JOURNAL.md under "Owner action required" (secrets ANTHROPIC_API_KEY and AUTOPILOT_PAT, repository variables). If this session runs in a Claude Code cloud session instead, create the cloud scheduled task "rdx-autopilot" with the prompt from scripts/prompts/run.md, schedule custom cron "7 0,3 * * *" (UTC), repository nicolasdeker/rundeck, environment "rdx" (fall back to Default and say so); if you cannot create scheduled tasks from here, write the exact settings in JOURNAL.md under "Owner action required".
+4. Release the lock. Finish with a JOURNAL.md entry and a short final message: what exists now, the first CI run URL, what the next run will do, and anything the owner must do from his phone.
+```

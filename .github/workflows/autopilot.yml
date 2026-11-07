@@ -1,0 +1,137 @@
+# Autopilot — unattended Claude Code sessions on API billing (Mode A in KICKOFF.md).
+# Every run: one `claude -p` session with a hard per-run spend cap, then the result is posted to the tracking issue.
+# Pause: set the repository variable AUTOPILOT_ENABLED=false. Stop for good: the agent writes DONE at the repo root.
+name: autopilot
+
+on:
+  schedule:
+    - cron: '7 0,3 * * *'   # two work sessions per night: 01:07 and 04:07 Europe/Zurich (winter time; cron is UTC)
+    - cron: '7 2 * * 0'     # weekly review on Sunday 03:07 Europe/Zurich with the review model
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'bootstrap | run | review'
+        default: run
+        type: choice
+        options: [run, bootstrap, review]
+      budget_usd:
+        description: 'Override the per-run spend cap (USD)'
+        required: false
+
+concurrency:
+  group: autopilot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ secrets.AUTOPILOT_PAT || github.token }}
+      WORK_MODEL: ${{ vars.AUTOPILOT_MODEL || 'sonnet' }}
+      WORK_EFFORT: ${{ vars.AUTOPILOT_EFFORT || 'high' }}
+      WORK_BUDGET: ${{ vars.AUTOPILOT_RUN_BUDGET_USD || '8' }}
+      REVIEW_MODEL: ${{ vars.AUTOPILOT_REVIEW_MODEL || 'opus' }}
+      REVIEW_EFFORT: ${{ vars.AUTOPILOT_REVIEW_EFFORT || 'high' }}
+      REVIEW_BUDGET: ${{ vars.AUTOPILOT_REVIEW_BUDGET_USD || '30' }}
+    steps:
+      - name: Gate (pause switch, DONE marker, mode)
+        id: gate
+        run: |
+          if [ "${{ vars.AUTOPILOT_ENABLED || 'true' }}" != "true" ]; then echo "go=false" >> "$GITHUB_OUTPUT"; echo "paused by AUTOPILOT_ENABLED"; exit 0; fi
+          mode="${{ inputs.mode || 'run' }}"
+          [ "${{ github.event.schedule }}" = "7 2 * * 0" ] && mode=review
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go == 'true'
+        with:
+          token: ${{ secrets.AUTOPILOT_PAT || github.token }}
+          fetch-depth: 50
+
+      - name: Stop if DONE
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') != ''
+        run: echo "DONE marker present — mission complete, nothing to do." && exit 0
+
+      - name: Toolchains
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        run: |
+          set -e
+          git config user.name "rdx-autopilot"
+          git config user.email "rdx-autopilot@users.noreply.github.com"
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libpam0g-dev libssl-dev pkg-config clang lld jq bc >/dev/null
+          rustup show >/dev/null 2>&1 || true
+          rustup component add clippy rustfmt llvm-tools-preview >/dev/null 2>&1 || true
+          ( docker pull -q rundeck/rundeck:6.3.0 >/dev/null 2>&1 || true ) &
+          curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-java@v4
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        with: { distribution: temurin, java-version: '17', cache: gradle }
+      - uses: pnpm/action-setup@v4
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        with: { node-version: '22' }
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        with: { cache-on-failure: true }
+      - uses: taiki-e/install-action@v2
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        with:
+          tool: cargo-nextest,cargo-deny,cargo-audit,cargo-llvm-cov
+
+      - name: Claude Code session
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == ''
+        run: |
+          set +e
+          mkdir -p .autopilot
+          mode="${{ steps.gate.outputs.mode }}"
+          case "$mode" in
+            review) model="$REVIEW_MODEL"; effort="$REVIEW_EFFORT"; budget="${{ inputs.budget_usd || '' }}"; budget="${budget:-$REVIEW_BUDGET}"; fallback="--fallback-model sonnet";;
+            *)      model="$WORK_MODEL";   effort="$WORK_EFFORT";   budget="${{ inputs.budget_usd || '' }}"; budget="${budget:-$WORK_BUDGET}";   fallback="";;
+          esac
+          echo "mode=$mode model=$model effort=$effort budget=$budget USD"
+          claude --version
+          claude -p "$(cat scripts/prompts/$mode.md)" \
+            --dangerously-skip-permissions --permission-prompts none \
+            --model "$model" --effort "$effort" $fallback \
+            --max-budget-usd "$budget" \
+            --output-format json > .autopilot/result.json 2> .autopilot/stderr.log
+          rc=$?
+          echo "rc=$rc" > .autopilot/rc
+          jq -r '"cost_usd=" + ((.total_cost_usd // 0)|tostring) + " turns=" + ((.num_turns // 0)|tostring) + " error=" + ((.is_error // false)|tostring)' .autopilot/result.json || true
+          exit 0
+
+      - name: Summary → job summary + tracking issue
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == '' && always()
+        run: |
+          set +e
+          r=.autopilot/result.json
+          cost=$(jq -r '.total_cost_usd // 0' $r 2>/dev/null); err=$(jq -r '.is_error // false' $r 2>/dev/null); rc=$(cat .autopilot/rc 2>/dev/null || echo "?")
+          result=$(jq -r '.result // "(no result)"' $r 2>/dev/null | head -c 6000)
+          mode="${{ steps.gate.outputs.mode }}"
+          body=$(printf '### autopilot %s — %s\n\nmode: `%s` · cost: **$%s** · exit: %s · error: %s · [workflow run](%s/%s/actions/runs/%s)\n\n%s\n' \
+            "$mode" "$(date -u +%FT%TZ)" "$mode" "$cost" "$rc" "$err" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$result")
+          printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
+          # find or create the tracking issue (REST only)
+          num=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=autopilot&state=open&per_page=1" --jq '.[0].number' 2>/dev/null)
+          if [ -z "$num" ] || [ "$num" = "null" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/labels" -f name=autopilot -f color=0e8a16 >/dev/null 2>&1 || true
+            num=$(gh api "repos/$GITHUB_REPOSITORY/issues" -f title="Autopilot runs" -f body="One comment per autonomous session. Close this issue and a new one is created." -f 'labels[]=autopilot' --jq '.number')
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/issues/$num/comments" -f body="$body" >/dev/null || echo "could not post the comment"
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.go == 'true' && hashFiles('DONE') == '' && always()
+        with:
+          name: autopilot-${{ github.run_id }}
+          path: .autopilot/
+          retention-days: 30
